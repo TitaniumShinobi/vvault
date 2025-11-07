@@ -1,3 +1,5 @@
+![VVAULT Logo](./assets/vvault_glyph.png)
+
 # VVAULT - Voice & Vaulted Autonomy for Unfragmented Long-Term Tethering
 
 **Verified Vectored Anatomy Unconsciously Lingering Together**
