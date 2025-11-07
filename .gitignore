@@ -184,3 +184,14 @@ cython_debug/
 capsules/
 nova-001/
 sera-001/
+
+# Large files and backups
+*.zip
+*.parquet
+*.pkl
+*.bin
+nova-001.zip
+**/backup/**
+**/Backups/**
+**/Initial Data Export/**
+**/Initial Data Export.zip
