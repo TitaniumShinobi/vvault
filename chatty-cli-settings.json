@@ -1,0 +1,8 @@
+{
+  "allow_dimensional_drift": true,
+  "max_drift_index": 5,
+  "enable_runtime_pluralization": true,
+  "drift_reconciliation_threshold": 3,
+  "anchor_registry_enabled": true
+}
+

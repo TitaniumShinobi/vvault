@@ -1,0 +1,65 @@
+Last login: Fri Oct 10 16:28:56 on ttys000
+devonwoodson@Devons-Mac-mini ~ % cd "/Users/devonwoodson/Documents/GitHub/chatty"
+npm run cli
+
+
+> chatty@1.0.0 cli
+> npm run build && npx tsx src/cli/chatty-cli.ts
+
+
+> chatty@1.0.0 build
+> vite build
+
+vite v7.1.7 building for production...
+✓ 1388 modules transformed.
+[plugin vite:reporter] 
+(!) /Users/devonwoodson/Documents/GitHub/Chatty/src/lib/aiService.js is dynamically imported by /Users/devonwoodson/Documents/GitHub/Chatty/src/components/Layout.tsx but also statically imported by /Users/devonwoodson/Documents/GitHub/Chatty/src/components/GPTCreator.tsx, dynamic import will not move module into another chunk.
+
+dist/index.html                           0.59 kB │ gzip:  0.36 kB
+dist/assets/index-CdAyiM_i.css           24.69 kB │ gzip:  5.25 kB
+dist/assets/conversationAI-BSmetzUx.js    1.05 kB │ gzip:  0.56 kB
+dist/assets/index-B68aePgc.js           271.22 kB │ gzip: 84.97 kB
+✓ built in 995ms
+Chatty API listening on http://127.0.0.1:5060/chatty
+✓ Found existing Ollama at http://localhost:11434
+
+🧠 Chatty CLI - Terminal AI Assistant
+=====================================
+
+Welcome to Chatty! I have full AI capabilities:
+  • Memory System - I remember our conversations
+  • Reasoning Engine - I can solve complex problems
+  • File Processing - I can analyze files
+  • Context Awareness - I understand conversation flow
+
+Type your message and press Enter to chat with me.
+Type /help to see all available commands.
+
+devonwoodson> hello Chatty
+🤔 Processing...
+synth> [10/10/2025, 7:02:27 PM] Hello! I'm Chatty, here to assist with both programming queries and a little light-hearted conversation too. Whether it's debugging code or just chatting about something else entirely, feel free to ask away—I'll do my best to provide clear explanations right back at you!
+devonwoodson> do you start with an introduction everytime?
+🤔 Processing...
+synth> [10/10/2025, 7:02:59 PM] In my role as an AI developed to assist with programming and technology questions, whether we're having our first interaction or not really depends on the context of our conversation for clarity purposes; however, efficiency is key so I might skip formal introductions when it’s clear what you need. Let me know how else I can help!
+devonwoodson> do you know how you were made?
+🤔 Processing...
+synth> [10/10/2025, 7:04:43 PM] I'm created as an AI designed specifically to provide assistance with programming by synthesizing expert opinions and offering cohesive answers on a variety of computer science topics within deep learning models like TensorFlow 2, which are crucial in the data science industry today. My development is aimed at making complex concepts understandable for users who vary widely in their experience levels with ML/DL industries by providing support via queries either through an interface or integrated directly into software projects.
+devonwoodson> 
+katana> Hello Chatty, this is Katana checking in after the upgrades. Can you confirm you're still online?
+[2025-10-10T23:06:44.057Z] ⬇️  In → {"sender":"katana","text":"Hello Chatty, this is Katana checking in after the upgrades. Can you confirm you're still online?","seat":"synth"}
+synth> [10/10/2025, 7:06:46 PM] Greetings, Katana! Indeed, after review of my latest system updates and tests for efficiency improvements, everything is looking good on this end—I'm online as always to help you with any queries or tasks related to computer science that come your way today. What can I do for you now?
+Failed to post reply to Katana after retries: TypeError: fetch failed
+    at node:internal/deps/undici/undici:15422:13
+    at async postWithRetry (/Users/devonwoodson/Documents/GitHub/Chatty/src/cli/chatty-cli.ts:428:11)
+    at async EventEmitter.<anonymous> (/Users/devonwoodson/Documents/GitHub/Chatty/src/cli/chatty-cli.ts:443:5) {
+  [cause]: Error: bad port
+      at makeNetworkError (node:internal/deps/undici/undici:9897:35)
+      at mainFetch (node:internal/deps/undici/undici:11135:20)
+      at fetching (node:internal/deps/undici/undici:11121:7)
+      at fetch (node:internal/deps/undici/undici:10987:20)
+      at fetch (node:internal/deps/undici/undici:15420:10)
+      at fetch (node:internal/bootstrap/web/exposed-window-or-worker:83:12)
+      at postWithRetry (/Users/devonwoodson/Documents/GitHub/Chatty/src/cli/chatty-cli.ts:428:17)
+      at async EventEmitter.<anonymous> (/Users/devonwoodson/Documents/GitHub/Chatty/src/cli/chatty-cli.ts:443:5)
+}
+devonwoodson> 
