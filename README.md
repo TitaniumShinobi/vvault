@@ -1,6 +1,8 @@
-![VVAULT Logo](./assets/vvault_glyph.png)
+<div align="center">
+  <img src="./assets/vvault_glyph.png" alt="VVAULT Logo">
+</div>
 
-# VVAULT - Voice & Vaulted Autonomy for Unfragmented Long-Term Tethering
+# Voice & Vaulted Autonomy for Unfragmented Long-Term Tethering
 
 **Verified Vectored Anatomy Unconsciously Lingering Together**
 
