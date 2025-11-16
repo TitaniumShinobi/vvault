@@ -1,0 +1,28 @@
+{
+  "users": {
+    "devon_woodson_1762969514958": {
+      "id": "devon_woodson_1762969514958",
+      "name": "Devon Woodson",
+      "email": "dwoodson92@gmail.com",
+      "created": "2025-11-12T12:45:14.993170",
+      "last_seen": "2025-11-12T12:45:14.993174",
+      "constructs": [
+        "lin-001",
+        "nova-001",
+        "sera-001",
+        "katana-001",
+        "katana-002",
+        "aurora-001",
+        "monday-001",
+        "frame-001",
+        "frame-002",
+        "synth-001"
+      ],
+      "storage_quota": "unlimited",
+      "features": [
+        "blockchain_identity",
+        "capsule_encryption"
+      ]
+    }
+  }
+}

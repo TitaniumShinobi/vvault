@@ -181,9 +181,64 @@ cython_debug/
 .cursorindexingignore
 
 # VVAULT Specific - Sensitive Data Directories
+# Automatically ignore all construct folders with callsigns (e.g., synth-001, katana-002, etc.)
+# Pattern matches: {name}-{3-digit-number}/
+*-[0-9][0-9][0-9]/
+
+# UUID-based construct directories (e.g., 690ec2d8c980c59365f284f5/)
+# Pattern matches 32-character hex strings (UUIDs without dashes)
+# Using specific pattern for common UUID formats
+690ec2d8c980c59365f284f5/
+# Generic pattern for any 32-char hex directory (less precise but catches most cases)
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/
+
+# Construct directories without number suffix (e.g., lin/)
+lin/
+chatty/
+
+# Legacy manual entries (kept for reference, but pattern above covers these)
+# aurora-001/
+# katana-001/
+# katana-002/
+# monday-001/
+# nova-001/
+# sera-001/
+# synth-001/
+# chatty-001/
+# frame-001/
+# frame-002/
+
+# Construct data directories
 capsules/
-nova-001/
-sera-001/
+users/
+memory_records/
+indexes/
+etl_logs/
+
+# Capsule files (explicit pattern for any .capsule files)
+*.capsule
+
+# Encryption and blockchain security directories
+.encrypted/
+.encryption_metadata/
+.integrity_records/
+blockchain_wallet/
+blockchain_wallet/**/*
+
+# Security and authentication files
+security.db
+*.key
+*.pem
+*.p12
+*.pfx
+authorized_sessions.json
+user_auth.db
+
+# Logs containing sensitive construct data
+logs/
+*.log
+*.err
+*.out
 
 # Large files and backups
 *.zip

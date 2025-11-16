@@ -60,7 +60,7 @@ def create_canary_record(canary: str, source_id: str = "canary_seed") -> Dict[st
         }
     }
 
-def seed_canaries_to_vvault(output_file: str = "canary_records.json") -> List[Dict[str, Any]]:
+def seed_canaries_to_vvault(output_file: str = "logs/canary_records.json") -> List[Dict[str, Any]]:
     """Seed canary tokens into VVAULT format"""
     
     logger.info(f"Seeding {len(CANARIES)} canary tokens to VVAULT")
@@ -213,16 +213,16 @@ def main():
     print(f"   ✅ Created test script: test_canary_detection.sh")
     
     print("\nNext steps:")
-    print("1. Load canary records into VVAULT: cat canary_records.json")
+    print("1. Load canary records into VVAULT: cat "logs/canary_records.json")
     print("2. Start VXRunner gateway: python brain.py --prod")
     print("3. Run canary test: ./test_canary_detection.sh")
     print("4. Check for alerts in logs and SIEM")
     
     # Save detection results
-    with open("canary_detection_results.json", "w") as f:
+    with open("logs/canary_detection_results.json", "w") as f:
         json.dump(detection_results, f, indent=2)
     
-    print(f"\nResults saved to: canary_detection_results.json")
+    print(f"\nResults saved to: "logs/canary_detection_results.json")
 
 if __name__ == "__main__":
     main()

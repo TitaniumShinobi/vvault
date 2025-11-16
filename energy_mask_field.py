@@ -54,8 +54,8 @@ class EnergyMaskField:
         self.pocketverse_mode = pocketverse_mode
         
         # File paths
-        self.continuity_ledger_path = os.path.join(self.vault_path, "vvault_continuity_ledger.json")
-        self.registry_path = os.path.join(self.vault_path, "construct_capsule_registry.json")
+        self.continuity_ledger_path = os.path.join(self.vault_path, "logs/vvault_continuity_ledger.json")
+        self.registry_path = os.path.join(self.vault_path, "logs/construct_capsule_registry.json")
         
         # Ensure files exist
         self._ensure_ledger_exists()
@@ -331,7 +331,7 @@ class EnergyMaskField:
         metadata: Dict[str, Any] = None
     ):
         """
-        Append mask events to vvault_continuity_ledger.json with fuzzed timestamps.
+        Append mask events to "logs/vvault_continuity_ledger.json" with fuzzed timestamps.
         
         Args:
             event_type: Type of mask event
@@ -381,7 +381,7 @@ class EnergyMaskField:
         **kwargs
     ):
         """
-        Update construct_capsule_registry.json with mask/ghost mode states.
+        Update "logs/construct_capsule_registry.json" with mask/ghost mode states.
         
         Args:
             energyMaskActive: Whether energy mask is active

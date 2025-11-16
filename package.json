@@ -8,7 +8,7 @@
     "dev": "webpack-dev-server --mode development --port 7784 --host localhost --open",
     "dev:full": "concurrently \"npm run backend\" \"npm run frontend\"",
     "frontend": "webpack-dev-server --mode development --port 7784 --host localhost --open",
-    "backend": "/Users/devonwoodson/Documents/GitHub/VVAULT/vvault_env/bin/python vvault_web_server.py",
+    "backend": "/Users/devonwoodson/Documents/GitHub/vvault/vvault_env/bin/python vvault_web_server.py",
     "build": "webpack --mode production",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

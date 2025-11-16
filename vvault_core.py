@@ -147,6 +147,9 @@ class VVAULTCore:
             # Update instance index
             self._update_instance_index(instance_name, capsule_metadata)
             
+            # ACTIVATION HOOK: Notify capsule imported for plug-and-play
+            self._notify_capsule_imported(instance_name, capsule_metadata)
+            
             logger.info(f"[✅] Capsule stored successfully: {filepath}")
             logger.info(f"   Instance: {instance_name}")
             logger.info(f"   UUID: {uuid_val}")
@@ -657,6 +660,55 @@ class VVAULTCore:
             
         except Exception as e:
             logger.error(f"Error updating instance index: {e}")
+    
+    def _notify_capsule_imported(self, instance_name: str, capsule_metadata: CapsuleMetadata):
+        """
+        ACTIVATION HOOK: Notify when capsule is imported for plug-and-play restoration
+        
+        This triggers construct restoration and memory injection into runtime
+        """
+        try:
+            # Try to import CapsuleLoader if available
+            try:
+                import sys
+                from pathlib import Path
+                
+                # Try to find CapsuleLoader (may be in vxrunner)
+                vxrunner_path = Path(__file__).parent.parent / "vxrunner"
+                if vxrunner_path.exists():
+                    sys.path.insert(0, str(vxrunner_path))
+                    from capsuleloader import CapsuleLoader
+                    
+                    # Load and restore construct
+                    capsule_path = os.path.join(
+                        self.capsules_dir,
+                        instance_name,
+                        capsule_metadata.filename
+                    )
+                    
+                    if os.path.exists(capsule_path):
+                        loader = CapsuleLoader()
+                        result = loader.load_capsule(capsule_path)
+                        
+                        if result.is_valid and result.capsule_data:
+                            construct_state = loader.restore_construct(result.capsule_data)
+                            logger.info(f"[🔄] Construct restored: {instance_name}")
+                            logger.info(f"   Memory entries: {len(construct_state.memory_log)}")
+                            
+                            # Trigger memory injection (if drop_mem_into_runtime is implemented)
+                            if construct_state.memory_log:
+                                loader.drop_mem_into_runtime(construct_state.memory_log)
+                                logger.info(f"[💾] Memory injected into runtime: {len(construct_state.memory_log)} entries")
+            except ImportError:
+                logger.debug(f"CapsuleLoader not available, skipping auto-restore")
+            except Exception as e:
+                logger.warning(f"Auto-restore failed (non-critical): {e}")
+            
+            # Also emit event for other systems (Chatty, etc.)
+            logger.info(f"[🔔] Capsule imported event: {instance_name} ({capsule_metadata.uuid})")
+            
+        except Exception as e:
+            logger.warning(f"Error in capsule import notification: {e}")
     
     # ============================================================================
     # DIMENSIONAL DISTORTION: Layer II - Runtime Pluralization

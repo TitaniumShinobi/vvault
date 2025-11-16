@@ -42,7 +42,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(PROJECT_DIR, 'vvault_desktop.log')),
+        logging.FileHandler(os.path.join(PROJECT_DIR, "logs/vvault_desktop.log")),
         logging.StreamHandler()
     ]
 )
