@@ -119,21 +119,31 @@ class CapsuleForge:
     of AI constructs' memory, personality, and environmental state.
     """
     
-    def __init__(self, vault_path: str = None):
+    def __init__(self, vault_path: str = None, instance_path: str = None):
         """
         Initialize CapsuleForge.
         
         Args:
             vault_path: Path to VVAULT directory. If None, uses current directory.
+            instance_path: Path to instance directory where capsule should be saved.
+                          If provided, capsule will be saved as {instance_name}.capsule in this directory.
+                          If None, uses legacy capsules directory.
         """
         self.vault_path = vault_path or os.path.dirname(os.path.abspath(__file__))
+        self.instance_path = instance_path  # New: instance-specific path
         self.capsules_dir = os.path.join(self.vault_path, "capsules")
         
-        # Ensure capsules directory exists
-        os.makedirs(self.capsules_dir, exist_ok=True)
+        # Ensure directories exist
+        if self.instance_path:
+            os.makedirs(self.instance_path, exist_ok=True)
+        else:
+            os.makedirs(self.capsules_dir, exist_ok=True)
         
         logger.info(f"[🔧] CapsuleForge initialized with vault path: {self.vault_path}")
-        logger.info(f"[📁] Capsules will be saved to: {self.capsules_dir}")
+        if self.instance_path:
+            logger.info(f"[📁] Capsules will be saved to instance directory: {self.instance_path}")
+        else:
+            logger.info(f"[📁] Capsules will be saved to: {self.capsules_dir}")
     
     def generate_capsule(
         self, 
@@ -197,9 +207,15 @@ class CapsuleForge:
             fingerprint = self.calculate_fingerprint(capsule_data)
             capsule_data.metadata.fingerprint_hash = fingerprint
             
-            # Generate filename
-            filename = self._generate_filename(instance_name, timestamp)
-            filepath = os.path.join(self.capsules_dir, filename)
+            # Determine save location: instance directory (new) or capsules directory (legacy)
+            if self.instance_path:
+                # Save as {instance_name}.capsule in instance directory (no subfolder)
+                filename = f"{instance_name}.capsule"
+                filepath = os.path.join(self.instance_path, filename)
+            else:
+                # Legacy: save in capsules directory with timestamp
+                filename = self._generate_filename(instance_name, timestamp)
+                filepath = os.path.join(self.capsules_dir, filename)
             
             # Save capsule to file
             self._save_capsule(capsule_data, filepath)
