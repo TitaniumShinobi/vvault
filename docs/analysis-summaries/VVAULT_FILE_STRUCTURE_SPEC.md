@@ -1,6 +1,6 @@
 # VVAULT File Structure Specification
 
-**Last Updated**: November 10, 2025
+**Last Updated**: January 27, 2025
 
 ## Overview
 
@@ -16,17 +16,28 @@ VVAULT uses a **user-registry-based file structure** that ensures complete data 
 /VVAULT/
 ├── users.json                    # Global user registry
 ├── users/                        # All user data isolated here (SHARDED)
-│   ├── shard_00/                # Shard 0 (for scalability)
+│   ├── shard_0000/              # Shard 0 (for scalability)
 │   │   ├── {user_id_1}/         # User-specific directory
-│   │   │   ├── identity/         # User identity files
-│   │   │   ├── constructs/       # User's constructs
-│   │   │   ├── capsules/         # User's capsules
-│   │   │   └── sessions/         # Cross-construct sessions
-│   │   ├── {user_id_2}/         # Next user in shard_00
+│   │   │   ├── account/         # User account files
+│   │   │   │   └── profile.json
+│   │   │   ├── archive/         # Per-user archive (conversations, instances)
+│   │   │   │   └── archived_conversations/
+│   │   │   ├── instances/       # User's constructs (instances)
+│   │   │   ├── library/         # User's library (documents, media)
+│   │   │   │   ├── documents/
+│   │   │   │   └── media/
+│   │   │   └── capsules/        # User's capsules (legacy, now in instances)
+│   │   ├── {user_id_2}/         # Next user in shard_0000
 │   │   └── ...
-│   ├── shard_01/                # Shard 1
-│   ├── shard_02/                # Shard 2
-│   └── ...                      # Up to shard_9999 (10,000 shards)
+│   ├── shard_0001/              # Shard 1
+│   ├── shard_0002/              # Shard 2
+│   ├── ...                      # Up to shard_9999 (10,000 shards)
+│   ├── archive_0000/            # Archive shard for archived users
+│   │   ├── {archived_user_id_1}_timestamp/
+│   │   │   └── ARCHIVE_MANIFEST.json
+│   │   └── ...
+│   ├── archive_0001/            # Archive shard 1
+│   └── ...                      # Archive shards match user shards
 ├── system/                       # System-level data
 │   ├── registry/
 │   │   ├── user_index.db
@@ -57,23 +68,33 @@ VVAULT uses a **user-registry-based file structure** that ensures complete data 
 ### User Identity (Sharded)
 
 ```
-users/{shard_XX}/{user_id}/
-├── identity/
-│   ├── profile.json              # User profile metadata
-│   ├── fingerprint.json          # User identity fingerprint
-│   ├── biometric_hash.enc        # Encrypted biometric hash
-│   └── auth_keys.gpg             # GPG authentication keys
-├── capsules/                      # User's .capsule files
-│   ├── construct-a-001.capsule   # Construct capsule files
-│   ├── construct-b-001.capsule
-│   └── construct-c-001.capsule
-└── sessions/                      # Cross-construct session logs (optional)
+users/{shard_XXXX}/{user_id}/
+├── account/                       # User account files
+│   └── profile.json              # User profile metadata
+├── archive/                       # Per-user archive (conversations, instances)
+│   ├── archived_conversations/   # Archived conversation threads
+│   └── archived_instances/       # Archived construct instances
+├── instances/                     # User's constructs (instances)
+│   ├── {construct}-001/
+│   │   ├── identity/
+│   │   │   ├── prompt.txt
+│   │   │   ├── conditioning.txt
+│   │   │   └── {construct}-001.capsule
+│   │   ├── chatty/
+│   │   │   └── chat_with_{construct}-001.md
+│   │   └── chatgpt/              # ChatGPT conversation exports
+│   └── ...
+├── library/                       # User's library
+│   ├── documents/                # User documents
+│   └── media/                     # User media files
+└── capsules/                      # Legacy capsules directory (deprecated)
 ```
 
 **Example**:
-- User `user_abc123` → Shard `shard_42` (based on hash)
-- Path: `users/shard_42/user_abc123/`
-- Capsules: `users/shard_42/user_abc123/capsules/construct-a-001.capsule`
+- User `user_abc123` → Shard `shard_0042` (based on hash)
+- Path: `users/shard_0042/user_abc123/`
+- Instances: `users/shard_0042/user_abc123/instances/construct-a-001/`
+- Capsules: `users/shard_0042/user_abc123/instances/construct-a-001/identity/construct-a-001.capsule`
 
 **profile.json**:
 ```json
@@ -91,12 +112,54 @@ users/{shard_XX}/{user_id}/
 
 ---
 
+## Archive Structure
+
+### Per-User Archive
+
+Each user has an `archive/` directory for archiving conversations and instances:
+
+```
+users/{shard_XXXX}/{user_id}/archive/
+├── archived_conversations/      # Archived conversation threads
+│   └── {construct}_{timestamp}.md
+└── archived_instances/           # Archived construct instances
+    └── {construct}_{timestamp}/
+        └── ARCHIVE_MANIFEST.json
+```
+
+### Archive Shards (Archived Users)
+
+When entire accounts are archived, they move to archive shards:
+
+```
+users/archive_{shard_XXXX}/{archived_user_id}_{timestamp}/
+├── ARCHIVE_MANIFEST.json         # Archive metadata
+├── account/                      # Original account files
+├── instances/                     # Original instances
+├── library/                       # Original library
+└── ...                           # Complete user directory structure
+```
+
+**Archive Manifest**:
+```json
+{
+  "vvaultUserId": "user_abc123",
+  "originalShard": "shard_0042",
+  "archivedAt": "2025-01-27T12:34:56Z",
+  "reason": "user_requested",
+  "originalPath": "users/shard_0042/user_abc123",
+  "canRestoreUntil": "2025-02-26T12:34:56Z"
+}
+```
+
+---
+
 ## Construct Directory Structure
 
 ### Standard Construct Layout (Sharded)
 
 ```
-users/{shard_XX}/{user_id}/constructs/{construct-callsign}-001/
+users/{shard_XXXX}/{user_id}/instances/{construct-callsign}-001/
 ├── chatty/                       # Chatty conversation transcripts
 │   └── chat_with_{construct}-001.md
 ├── chatgpt/                      # ChatGPT conversation exports
@@ -130,7 +193,7 @@ users/{shard_XX}/{user_id}/constructs/{construct-callsign}-001/
 
 ### Chatty Transcripts
 
-**Location**: `users/{shard_XX}/{user_id}/constructs/{construct}-001/chatty/`
+**Location**: `users/{shard_XXXX}/{user_id}/instances/{construct}-001/chatty/`
 
 **File Format**: Single append-only markdown file per construct
 
@@ -155,7 +218,7 @@ users/{shard_XX}/{user_id}/constructs/{construct-callsign}-001/
 
 ### ChatGPT Exports
 
-**Location**: `users/{shard_XX}/{user_id}/constructs/{construct}-001/chatgpt/{year}/`
+**Location**: `users/{shard_XXXX}/{user_id}/instances/{construct}-001/chatgpt/{year}/`
 
 **File Format**: JSON files organized by year/month
 
@@ -192,7 +255,7 @@ users/{shard_XX}/{user_id}/constructs/{construct-callsign}-001/
 
 ### Memories (ChromaDB)
 
-**Location**: `users/{shard_XX}/{user_id}/constructs/{construct}-001/memories/chroma_db/`
+**Location**: `users/{shard_XXXX}/{user_id}/instances/{construct}-001/memories/chroma_db/`
 
 **Collections**:
 - `{user_id}_{construct}_long_term_memory` - Long-term memories (>7 days)
@@ -380,7 +443,9 @@ Capsules (`.capsule` files) are **complete AI construct snapshots** containing:
 
 ### Storage Location
 
-**Location**: `users/{shard_XX}/{user_id}/capsules/`
+**Primary Location**: `users/{shard_XXXX}/{user_id}/instances/{construct}-001/identity/{construct}-001.capsule`
+
+**Legacy Location**: `users/{shard_XXXX}/{user_id}/capsules/` (deprecated, maintained for backward compatibility)
 
 **File Format**: `.capsule` (JSON format with strict schema)
 
@@ -418,16 +483,16 @@ Capsules (`.capsule` files) are **complete AI construct snapshots** containing:
 
 Every new user automatically receives two default constructs:
 
-1. **`synth-001`**: Main conversation construct
+1. **`zen-001`**: Primary conversation construct
    - **Territory**: Main conversation window in Chatty
-   - **Purpose**: General chat and assistance
-   - **Storage**: `users/{shard}/{user_id}/constructs/synth-001/`
-   - **Type**: Standalone construct (not Lin-based)
+   - **Purpose**: General chat and assistance (multi-model synthesis)
+   - **Storage**: `users/{shard}/{user_id}/instances/zen-001/`
+   - **Type**: Primary construct (system-guaranteed)
 
 2. **`lin-001`**: GPT Creator assistant construct
    - **Territory**: GPT Creator Create tab
    - **Purpose**: Help users create GPTs with persistent memory
-   - **Storage**: `users/{shard}/{user_id}/constructs/lin-001/`
+   - **Storage**: `users/{shard}/{user_id}/instances/lin-001/`
    - **Memory**: Lin remembers all GPT creation conversations across sessions
    - **Type**: Construct with backend orchestration capabilities
    - **Backend Task**: Multi-model orchestration and routing (internal functionality)
