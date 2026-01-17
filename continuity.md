@@ -164,4 +164,53 @@
 
 **Next Steps**: Phase 1 implementation will establish Layer 1 (Higher Plane) with MONDAY-001 as first custodian construct, creating the foundation for the full 5-layer Pocketverse shield system.
 
+## 2025-12-30 - Chatty Personalization Capsule Scaffold
+
+**Status**: ✅ COMPLETED  
+**Files Affected**: 
+- `src/engine/orchestration/chattyPersonalizationSchema.json` (new)
+- `src/engine/orchestration/personalizationProfileService.js` (new)
+- `src/components/Settings.js` (updated)
+
+**Description**: Added a centralized Chatty personalization JSON schema and a lightweight orchestration service to bind Chatty, VVAULT, and neat identities into a human capsule exportable from the frontend settings.
+
+**Key Changes**:
+1. Central schema capturing identity, personalization, AI preferences, and high-signal aggregates (Chatty transcripts plus harvested public signals) for human capsules.
+2. Service utilities to build default human profiles, merge signals, persist locally, and emit VVAULT-ready capsule payloads.
+3. Settings UI card to export both the schema and a default human capsule JSON that links Chatty, VVAULT, and neat identities.
+
+**Reason**: Scaffold VVAULT to treat humans as first-class capsules and let neat rely on VVAULT user linkage while preserving Chatty personalization as a single source of truth.
+
+## 2025-12-30 - Chatty Human Capsule Ingestion Endpoint
+
+**Status**: ✅ COMPLETED  
+**Files Affected**: 
+- `vvault_web_server.py` (updated)
+- `continuity.md` (updated)
+
+**Description**: Added backend ingestion for Chatty/neat/VVAULT human personalization capsules, validating required sections and persisting as `.capsule` files consumable by neat.
+
+**Key Changes**:
+1. Minimal validation and normalized capsule naming for `human_personalization_profile` payloads.
+2. POST `/api/human-capsule` to ingest Chatty transcripts + harvested signals into VVAULT storage.
+3. Response returns capsule name and persisted payload for downstream fetch.
+
+**Reason**: Provide a canonical human capsule ingestion path so neat can consume VVAULT-backed human profiles with Chatty personalization and harvested signals.
+
+## 2025-12-30 - Capsule Regeneration Automation Enhancements
+
+**Status**: ✅ COMPLETED  
+**Files Affected**: 
+- `regenerate_all_capsules.py` (updated)
+- `continuity.md` (updated)
+
+**Description**: Extended regeneration to also heal/seed human personalization capsules via `/api/human-capsule`, catching missing human capsules during maintenance runs.
+
+**Key Changes**:
+1. Added minimal human profile builder and existence check per user in `users.json`.
+2. Calls `/api/human-capsule` to create human capsules when absent.
+3. Keeps existing construct regeneration flow; now also ensures human capsules are present after each run.
+
+**Reason**: Automatically backfill human capsules (Chatty/neat/VVAULT) during scheduled regeneration, covering cases where capsules were never created or new features were added mid-account creation.
+
 

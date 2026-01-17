@@ -7,8 +7,14 @@ Quick script to regenerate all 6 missing capsules from existing memory data.
 import os
 import json
 import sys
+import glob
+from datetime import datetime
 from pathlib import Path
+import requests
 from capsuleforge import CapsuleForge
+
+VVAULT_API_URL = os.getenv("VVAULT_API_URL", "http://localhost:8000")
+HUMAN_CAPSULE_PREFIX = "human-"
 
 def load_memory_data(construct_id: str, vault_path: str) -> dict:
     """Load memory data for a construct"""
@@ -108,6 +114,104 @@ def regenerate_capsule(construct_id: str, vault_path: str):
         traceback.print_exc()
         return False
 
+
+def build_minimal_human_profile(user_rec: dict) -> dict:
+    """Construct required payload for /api/human-capsule."""
+    user_id = user_rec.get("id") or user_rec.get("userId") or "unknown-human"
+    email = user_rec.get("email") or "pending@vvault.local"
+    now = datetime.utcnow().isoformat() + "Z"
+    return {
+        "identity": {
+            "userId": user_id,
+            "email": email,
+            "vvaultLinked": True,
+            "provider": "google",
+            "tier": "free",
+            "linkedAccounts": {"neatUserId": user_id, "neatLinked": True}
+        },
+        "personalization": {
+            "enableCustomization": False,
+            "allowMemory": False,
+            "nickname": "",
+            "occupation": "",
+            "tags": [],
+            "aboutYou": ""
+        },
+        "appearance": {
+            "theme": "system",
+            "accentColor": "Default",
+            "customTheme": {"mode": "light", "name": "Custom", "tokens": {}},
+            "compactMode": False
+        },
+        "language": {"language": "Auto-detect", "spokenLanguage": "Auto-detect"},
+        "voice": {"voice": "Maple"},
+        "aiPreferences": {
+            "model": "gpt-4o-mini",
+            "openaiBaseUrl": "https://api.openai.com/v1",
+            "showAdditionalModels": True,
+            "enableMemory": True,
+            "enableReasoning": True,
+            "enableFileProcessing": True,
+            "enableNarrativeSynthesis": True,
+            "enableLargeFileIntelligence": True,
+            "enableZenMode": True,
+            "reasoningDepth": 3,
+            "maxHistory": 100,
+            "maxFileSize": 10485760,
+            "chunkSize": 1000
+        },
+        "notifications": {},
+        "dataControls": {},
+        "security": {},
+        "parentalControls": {},
+        "account": {},
+        "backup": {},
+        "profilePicture": {},
+        "advanced": {},
+        "metadata": {
+            "createdAt": now,
+            "lastUpdated": now,
+            "lastSeen": now,
+            "version": "1.0.0"
+        },
+        "signals": {
+            "chattyTranscripts": [],
+            "harvestedSignals": [],
+            "publicRecords": [],
+            "signalVersion": "1.0.0"
+        }
+    }
+
+
+def human_capsule_exists(capsules_dir: str, user_id: str) -> bool:
+    pattern = os.path.join(capsules_dir, f"{HUMAN_CAPSULE_PREFIX}{user_id}-*.capsule")
+    return len(glob.glob(pattern)) > 0
+
+
+def ensure_human_capsules(users_path: str, capsules_dir: str, api_url: str = VVAULT_API_URL):
+    """Ensure every user has a human capsule; create if missing."""
+    try:
+        with open(users_path, "r", encoding="utf-8") as f:
+            users_doc = json.load(f)
+        users = users_doc.get("users", {})
+    except Exception as e:
+        print(f"❌ Could not read users.json: {e}")
+        return
+
+    for user_id, user_rec in users.items():
+        if human_capsule_exists(capsules_dir, user_id):
+            continue
+
+        payload = build_minimal_human_profile(user_rec)
+        try:
+            resp = requests.post(f"{api_url}/api/human-capsule", json=payload, timeout=15)
+            if resp.status_code == 200 and resp.json().get("success"):
+                print(f"✅ Created human capsule for {user_id}: {resp.json().get('capsule')}")
+            else:
+                print(f"⚠️ Failed to create human capsule for {user_id}: {resp.status_code} {resp.text}")
+        except Exception as e:
+            print(f"❌ Error calling /api/human-capsule for {user_id}: {e}")
+
 def main():
     """Main function"""
     print("=" * 60)
@@ -142,6 +246,13 @@ def main():
                 cap_path = os.path.join(capsules_dir, cap)
                 size = os.path.getsize(cap_path)
                 print(f"  - {cap} ({size:,} bytes)")
+
+    # Ensure human capsules exist for all users
+    users_path = os.path.join(vault_path, "users.json")
+    if os.path.exists(users_path):
+        ensure_human_capsules(users_path, capsules_dir)
+    else:
+        print("⚠️ users.json not found; skipping human capsule check")
 
 if __name__ == "__main__":
     main()

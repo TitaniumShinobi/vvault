@@ -1,4 +1,9 @@
 import React, { useState, useEffect } from 'react';
+import {
+  buildDefaultProfile,
+  getSchema,
+  toVvaultCapsulePayload
+} from '../engine/orchestration/personalizationProfileService';
 
 const Settings = ({ systemInfo }) => {
   const [settings, setSettings] = useState({
@@ -14,6 +19,8 @@ const Settings = ({ systemInfo }) => {
   
   const [config, setConfig] = useState(null);
   const [saved, setSaved] = useState(false);
+  const [schemaExported, setSchemaExported] = useState(false);
+  const [capsuleExported, setCapsuleExported] = useState(false);
   
   useEffect(() => {
     loadConfig();
@@ -58,6 +65,45 @@ const Settings = ({ systemInfo }) => {
       apiTimeout: '30',
       corsOrigins: 'http://localhost:7784'
     });
+  };
+
+  const downloadJson = (data, filename) => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+      type: 'application/json'
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const exportSchema = () => {
+    const schema = getSchema();
+    downloadJson(schema, 'chatty-personalization-schema.json');
+    setSchemaExported(true);
+    setTimeout(() => setSchemaExported(false), 3000);
+  };
+
+  const exportHumanCapsule = () => {
+    const identity = {
+      userId: config?.user_id || 'pending-chatty-user',
+      email: config?.user_email || 'pending@vvault.local',
+      vvaultUserId: config?.vvault_user_id || 'pending-vvault-user',
+      linkedAccounts: {
+        neatUserId: config?.neat_user_id || 'pending-neat-user',
+        neatLinked: Boolean(config?.neat_user_id)
+      }
+    };
+
+    const profile = buildDefaultProfile(identity);
+    const payload = toVvaultCapsulePayload(profile);
+    downloadJson({ profile, capsulePayload: payload }, 'vvault-human-capsule.json');
+    setCapsuleExported(true);
+    setTimeout(() => setCapsuleExported(false), 3000);
   };
   
   const exportConfig = () => {
@@ -252,6 +298,32 @@ const Settings = ({ systemInfo }) => {
                   <p className="setting-description">
                     Show detailed debug information in logs
                   </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card mt-4">
+            <div className="card-header">
+              <h3 className="card-title">🧭 Identity & Personalization Capsule</h3>
+            </div>
+            <div className="settings-section">
+              <div className="setting-group">
+                <div className="setting-item">
+                  <p className="setting-description">
+                    Export the centralized Chatty personalization schema and a default
+                    VVAULT-ready human capsule (links Chatty, VVAULT, and neat identities).
+                  </p>
+                  <div className="settings-actions">
+                    <button className="btn btn-secondary" onClick={exportSchema}>
+                      <span>📜</span>
+                      {schemaExported ? 'Schema Exported' : 'Export Schema'}
+                    </button>
+                    <button className="btn btn-primary" onClick={exportHumanCapsule}>
+                      <span>🧠</span>
+                      {capsuleExported ? 'Capsule Exported' : 'Export Human Capsule'}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

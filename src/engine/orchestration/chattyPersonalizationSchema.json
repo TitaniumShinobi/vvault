@@ -1,0 +1,664 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Chatty User Personalization Profile",
+  "description": "Centralized schema for all user personalization options and cross-system signals that make each human unique in Chatty, VVAULT, and neat",
+  "type": "object",
+  "properties": {
+    "identity": {
+      "type": "object",
+      "description": "Core human identity with platform linkage",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Chatty user ID (Google sub)"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User email address"
+        },
+        "name": {
+          "type": "string",
+          "description": "Full display name"
+        },
+        "givenName": {
+          "type": "string",
+          "description": "First name (from OAuth, if available)"
+        },
+        "familyName": {
+          "type": "string",
+          "description": "Last name (from OAuth, if available)"
+        },
+        "picture": {
+          "type": "string",
+          "format": "uri",
+          "description": "Profile picture URL (synced from Google)"
+        },
+        "locale": {
+          "type": "string",
+          "description": "User locale preference (e.g., 'en-US')"
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["google"],
+          "default": "google"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["free", "premium", "enterprise"],
+          "default": "free"
+        },
+        "vvaultLinked": {
+          "type": "boolean",
+          "description": "Whether user account is linked to VVAULT"
+        },
+        "vvaultUserId": {
+          "type": "string",
+          "description": "VVAULT user ID if linked"
+        },
+        "linkedAccounts": {
+          "type": "object",
+          "description": "Cross-product identity linkage",
+          "properties": {
+            "neatUserId": {
+              "type": "string",
+              "description": "neat user id derived from the same human"
+            },
+            "neatLinked": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether neat is bound to this VVAULT human capsule"
+            }
+          }
+        }
+      },
+      "required": ["userId", "email"]
+    },
+    "personalization": {
+      "type": "object",
+      "description": "Personalization settings that shape how Chatty interacts with the user",
+      "properties": {
+        "enableCustomization": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow Chatty to learn from preferences and interactions"
+        },
+        "allowMemory": {
+          "type": "boolean",
+          "default": false,
+          "description": "Let Chatty remember conversations and learn from interactions"
+        },
+        "nickname": {
+          "type": "string",
+          "default": "",
+          "description": "How the user would like to be addressed"
+        },
+        "occupation": {
+          "type": "string",
+          "default": "",
+          "description": "User's occupation or profession"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Style & tone preferences (e.g., 'formal', 'casual', 'technical')"
+        },
+        "aboutYou": {
+          "type": "string",
+          "default": "",
+          "description": "Additional information about user interests and communication preferences"
+        }
+      }
+    },
+    "appearance": {
+      "type": "object",
+      "description": "Visual customization options",
+      "properties": {
+        "theme": {
+          "type": "string",
+          "enum": ["system", "light", "night"],
+          "default": "system",
+          "description": "Theme preference (system follows OS, light is cloud lemon, night is dark chocolate)"
+        },
+        "accentColor": {
+          "type": "string",
+          "enum": ["Default", "Blue", "Green", "Yellow", "Pink", "Orange", "Purple"],
+          "default": "Default",
+          "description": "Accent color for UI elements"
+        },
+        "customTheme": {
+          "type": "object",
+          "description": "Custom theme configuration (when theme mode is 'custom')",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["light", "night", "custom"],
+              "default": "light"
+            },
+            "name": {
+              "type": "string",
+              "default": "Custom"
+            },
+            "tokens": {
+              "type": "object",
+              "description": "Custom theme color tokens (all CSS color values)",
+              "properties": {
+                "bgPrimary": { "type": "string" },
+                "bgSecondary": { "type": "string" },
+                "bgTertiary": { "type": "string" },
+                "textPrimary": { "type": "string" },
+                "textSecondary": { "type": "string" },
+                "textTertiary": { "type": "string" },
+                "interactivePrimary": { "type": "string" },
+                "interactiveSecondary": { "type": "string" },
+                "statusSuccess": { "type": "string" },
+                "statusWarning": { "type": "string" },
+                "statusError": { "type": "string" },
+                "borderPrimary": { "type": "string" },
+                "borderSecondary": { "type": "string" }
+              }
+            }
+          }
+        },
+        "compactMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use compact UI layout"
+        }
+      }
+    },
+    "language": {
+      "type": "object",
+      "description": "Language and localization preferences",
+      "properties": {
+        "language": {
+          "type": "string",
+          "enum": [
+            "Auto-detect",
+            "English (US)",
+            "English (UK)",
+            "Spanish",
+            "French",
+            "German",
+            "Italian",
+            "Portuguese",
+            "Russian",
+            "Chinese",
+            "Japanese",
+            "Korean"
+          ],
+          "default": "Auto-detect",
+          "description": "Primary interface and response language"
+        },
+        "spokenLanguage": {
+          "type": "string",
+          "enum": [
+            "Auto-detect",
+            "English (US)",
+            "English (UK)",
+            "Spanish",
+            "French",
+            "German",
+            "Italian",
+            "Portuguese",
+            "Russian",
+            "Chinese",
+            "Japanese",
+            "Korean"
+          ],
+          "default": "Auto-detect",
+          "description": "Language user mainly speaks (for best results)"
+        }
+      }
+    },
+    "voice": {
+      "type": "object",
+      "description": "Voice and audio preferences",
+      "properties": {
+        "voice": {
+          "type": "string",
+          "enum": ["Maple", "Alloy", "Echo", "Fable", "Onyx", "Nova", "Shimmer"],
+          "default": "Maple",
+          "description": "Voice selection for audio responses"
+        }
+      }
+    },
+    "aiPreferences": {
+      "type": "object",
+      "description": "AI model and behavior preferences",
+      "properties": {
+        "model": {
+          "type": "string",
+          "default": "gpt-4o-mini",
+          "description": "Default AI model"
+        },
+        "openaiApiKey": {
+          "type": "string",
+          "description": "OpenAI API key (encrypted in storage)"
+        },
+        "openaiBaseUrl": {
+          "type": "string",
+          "default": "https://api.openai.com/v1",
+          "description": "OpenAI API base URL"
+        },
+        "showAdditionalModels": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show additional AI models in UI"
+        },
+        "enableMemory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable conversation memory"
+        },
+        "enableReasoning": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable advanced reasoning capabilities"
+        },
+        "enableFileProcessing": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable file upload and processing"
+        },
+        "enableNarrativeSynthesis": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable narrative synthesis mode"
+        },
+        "enableLargeFileIntelligence": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable large file intelligence processing"
+        },
+        "enableZenMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Zen mode for focused interactions"
+        },
+        "reasoningDepth": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Depth of reasoning chains"
+        },
+        "maxHistory": {
+          "type": "integer",
+          "default": 100,
+          "description": "Maximum conversation history items to retain"
+        },
+        "maxFileSize": {
+          "type": "integer",
+          "default": 10485760,
+          "description": "Maximum file size in bytes (default 10MB)"
+        },
+        "chunkSize": {
+          "type": "integer",
+          "default": 1000,
+          "description": "Text chunk size for processing"
+        }
+      }
+    },
+    "notifications": {
+      "type": "object",
+      "description": "Notification preferences",
+      "properties": {
+        "responsesPush": {
+          "type": "boolean",
+          "default": true,
+          "description": "Push notifications for responses that take time"
+        },
+        "tasksPush": {
+          "type": "boolean",
+          "default": true,
+          "description": "Push notifications for task updates"
+        },
+        "tasksEmail": {
+          "type": "boolean",
+          "default": true,
+          "description": "Email notifications for task updates"
+        },
+        "recommendationsPush": {
+          "type": "boolean",
+          "default": true,
+          "description": "Push notifications for recommendations"
+        },
+        "recommendationsEmail": {
+          "type": "boolean",
+          "default": true,
+          "description": "Email notifications for recommendations"
+        }
+      }
+    },
+    "dataControls": {
+      "type": "object",
+      "description": "Data storage and privacy controls",
+      "properties": {
+        "dataStorage": {
+          "type": "string",
+          "enum": ["local", "cloud", "hybrid"],
+          "default": "local",
+          "description": "Data storage preference"
+        },
+        "enableVVAULTMemory": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable VVAULT memory integration"
+        },
+        "memoryRetentionDays": {
+          "type": "integer",
+          "default": 30,
+          "description": "Number of days to retain memory"
+        },
+        "autoBackup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable automatic backups"
+        },
+        "backupFrequency": {
+          "type": "string",
+          "enum": ["daily", "weekly", "monthly"],
+          "default": "weekly",
+          "description": "Backup frequency"
+        },
+        "dataExport": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow data export"
+        },
+        "improveModel": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow data to improve model (opt-in)"
+        },
+        "remoteBrowserData": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow remote browser data access"
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "description": "Security and privacy settings",
+      "properties": {
+        "twoFactorEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable two-factor authentication"
+        },
+        "sessionTimeout": {
+          "type": "integer",
+          "default": 30,
+          "description": "Session timeout in minutes"
+        },
+        "loginNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Notify on login events"
+        },
+        "suspiciousActivityAlerts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Alert on suspicious activity"
+        }
+      }
+    },
+    "parentalControls": {
+      "type": "object",
+      "description": "Parental control settings (if applicable)",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable parental controls"
+        },
+        "contentFiltering": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable content filtering"
+        },
+        "timeRestrictions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable time-based restrictions"
+        },
+        "allowedHours": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "string",
+              "pattern": "^([0-1][0-9]|2[0-3]):[0-5][0-9]$",
+              "default": "08:00",
+              "description": "Start time (HH:MM format)"
+            },
+            "end": {
+              "type": "string",
+              "pattern": "^([0-1][0-9]|2[0-3]):[0-5][0-9]$",
+              "default": "22:00",
+              "description": "End time (HH:MM format)"
+            }
+          }
+        }
+      }
+    },
+    "account": {
+      "type": "object",
+      "description": "Account and subscription information",
+      "properties": {
+        "accountType": {
+          "type": "string",
+          "enum": ["free", "premium", "enterprise"],
+          "default": "free",
+          "description": "Account tier"
+        },
+        "subscriptionStatus": {
+          "type": "string",
+          "default": "active",
+          "description": "Subscription status"
+        },
+        "subscriptionBenefits": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of subscription benefits (e.g., GPT-5, expanded memory, Sora, Codex agent)"
+        },
+        "gptBuilderProfile": {
+          "type": "object",
+          "description": "GPT Builder profile settings",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "GPT Builder profile name"
+            },
+            "showName": {
+              "type": "boolean",
+              "description": "Show name in profile"
+            },
+            "domain": {
+              "type": "string",
+              "description": "Custom domain"
+            },
+            "linkedin": {
+              "type": "string",
+              "format": "uri",
+              "description": "LinkedIn profile URL"
+            },
+            "github": {
+              "type": "string",
+              "format": "uri",
+              "description": "GitHub profile URL"
+            },
+            "email": {
+              "type": "string",
+              "format": "email",
+              "description": "Contact email"
+            },
+            "receiveFeedbackEmails": {
+              "type": "boolean",
+              "description": "Receive feedback emails"
+            }
+          }
+        }
+      }
+    },
+    "backup": {
+      "type": "object",
+      "description": "Backup and sync preferences",
+      "properties": {
+        "autoBackup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable automatic backups"
+        },
+        "backupFrequency": {
+          "type": "string",
+          "enum": ["daily", "weekly", "monthly"],
+          "default": "weekly",
+          "description": "Backup frequency"
+        },
+        "cloudSync": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable cloud synchronization"
+        },
+        "localBackup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable local backups"
+        }
+      }
+    },
+    "profilePicture": {
+      "type": "object",
+      "description": "Profile picture settings",
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Current profile picture URL"
+        },
+        "lastRefreshed": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last refresh timestamp"
+        },
+        "source": {
+          "type": "string",
+          "enum": ["google", "custom"],
+          "default": "google",
+          "description": "Profile picture source"
+        }
+      }
+    },
+    "advanced": {
+      "type": "object",
+      "description": "Advanced settings and developer options",
+      "properties": {
+        "showDebugPanel": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show debug panel"
+        },
+        "showAdvancedFeatures": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show advanced features"
+        },
+        "autoSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-save conversations"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Metadata about the profile",
+      "properties": {
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Profile creation timestamp"
+        },
+        "lastUpdated": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp"
+        },
+        "lastSeen": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last seen timestamp"
+        },
+        "version": {
+          "type": "string",
+          "description": "Profile schema version"
+        }
+      }
+    },
+    "signals": {
+      "type": "object",
+      "description": "High-signal aggregates combining Chatty conversations and harvested public data for the human capsule",
+      "properties": {
+        "chattyTranscripts": {
+          "type": "array",
+          "description": "Indexed conversation transcripts or summaries sourced from Chatty",
+          "items": {
+            "type": "object",
+            "properties": {
+              "threadId": { "type": "string" },
+              "startedAt": { "type": "string", "format": "date-time" },
+              "endedAt": { "type": "string", "format": "date-time" },
+              "messages": { "type": "integer", "description": "Message count" },
+              "summary": { "type": "string", "description": "Condensed summary for capsule storage" },
+              "topics": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "embeddingFingerprint": { "type": "string", "description": "Hash or fingerprint for deduplication" }
+            }
+          }
+        },
+        "harvestedSignals": {
+          "type": "array",
+          "description": "Accurately matched social media and public record signals (non-medical)",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source": { "type": "string", "description": "e.g., linkedin, github, twitter, public-records" },
+              "matchConfidence": { "type": "number", "minimum": 0, "maximum": 1 },
+              "lastVerified": { "type": "string", "format": "date-time" },
+              "profileUrl": { "type": "string", "format": "uri" },
+              "summary": { "type": "string", "description": "Signal summary" }
+            }
+          }
+        },
+        "publicRecords": {
+          "type": "array",
+          "description": "Non-medical public records matched to the human",
+          "items": {
+            "type": "object",
+            "properties": {
+              "recordType": { "type": "string" },
+              "jurisdiction": { "type": "string" },
+              "lastUpdated": { "type": "string", "format": "date-time" },
+              "summary": { "type": "string" }
+            }
+          }
+        },
+        "signalVersion": {
+          "type": "string",
+          "description": "Version of signal aggregation"
+        }
+      }
+    }
+  },
+  "required": ["identity", "personalization", "appearance", "language", "aiPreferences"]
+}
+

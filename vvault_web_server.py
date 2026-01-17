@@ -18,6 +18,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
+from uuid import uuid4
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -106,6 +107,65 @@ def verify_turnstile_token(token: str, remote_ip: str = None) -> bool:
 PROJECT_DIR = "/Users/devonwoodson/Documents/GitHub/VVAULT"
 CAPSULES_DIR = os.path.join(PROJECT_DIR, "capsules")
 VAULT_DIR = os.path.join(PROJECT_DIR, "vvault")
+HUMAN_CAPSULE_TYPE = "human_personalization_profile"
+
+
+def _validate_human_capsule_payload(payload: dict) -> Optional[str]:
+    """Minimal guard for human personalization profile payloads."""
+    if not isinstance(payload, dict):
+        return "Payload must be an object"
+
+    required_blocks = ["identity", "personalization", "appearance", "language", "aiPreferences", "signals"]
+    for block in required_blocks:
+        if block not in payload:
+            return f"Missing required section: {block}"
+
+    identity = payload.get("identity", {})
+    if not identity.get("userId"):
+        return "identity.userId is required"
+    if not identity.get("email"):
+        return "identity.email is required"
+
+    signals = payload.get("signals", {})
+    if not isinstance(signals, dict):
+        return "signals must be an object"
+
+    return None
+
+
+def _build_human_capsule(payload: dict) -> dict:
+    """Normalize a human personalization capsule ready for VVAULT storage."""
+    now = datetime.utcnow().isoformat() + "Z"
+    user_id = payload.get("identity", {}).get("userId", "unknown-human")
+    capsule_name = f"human-{user_id}-{int(time.time())}.capsule"
+
+    return {
+        "name": capsule_name,
+        "title": f"Human personalization profile for {user_id}",
+        "description": "Chatty + VVAULT + neat human capsule with transcripts and harvested signals",
+        "capsule_type": HUMAN_CAPSULE_TYPE,
+        "created": now,
+        "updated": now,
+        "version": "1.0.0",
+        "source": "chatty",
+        "human": payload.get("identity"),
+        "personalization": payload.get("personalization"),
+        "appearance": payload.get("appearance"),
+        "language": payload.get("language"),
+        "voice": payload.get("voice"),
+        "ai_preferences": payload.get("aiPreferences"),
+        "notifications": payload.get("notifications"),
+        "data_controls": payload.get("dataControls"),
+        "security": payload.get("security"),
+        "parental_controls": payload.get("parentalControls"),
+        "account": payload.get("account"),
+        "backup": payload.get("backup"),
+        "profile_picture": payload.get("profilePicture"),
+        "advanced": payload.get("advanced"),
+        "metadata": payload.get("metadata"),
+        "signals": payload.get("signals", {}),
+        "id": str(uuid4())
+    }
 
 class VVAULTWebAPI:
     """VVAULT Web API handler"""
@@ -292,6 +352,32 @@ def create_capsule():
     except Exception as e:
         logger.error(f"Error in create_capsule endpoint: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/human-capsule', methods=['POST'])
+def ingest_human_capsule():
+    """Ingest Chatty/neat human personalization capsule and persist to VVAULT."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        error = _validate_human_capsule_payload(payload)
+        if error:
+            return jsonify({"success": False, "error": error}), 400
+
+        capsule_data = _build_human_capsule(payload)
+        result = api.create_capsule(capsule_data)
+
+        if not result.get("success"):
+            return jsonify({"success": False, "error": result.get("error", "Failed to create capsule")}), 500
+
+        return jsonify({
+            "success": True,
+            "capsule": result.get("capsule"),
+            "capsule_payload": capsule_data
+        })
+
+    except Exception as e:
+        logger.error(f"Error in ingest_human_capsule endpoint: {e}")
+        return jsonify({"success": False, "error": "Human capsule ingestion failed"}), 500
 
 @app.route('/api/health')
 def health_check():
