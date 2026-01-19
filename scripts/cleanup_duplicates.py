@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-VVAULT Duplicate Cleanup Script
+VVAULT Duplicate Cleanup Script v2
 
-Removes duplicate entries from the vault_files table in Supabase,
-keeping only the most recent version of each file.
+Removes ALL duplicate entries from the vault_files table in Supabase,
+using original_path as the canonical unique key (not filename alone).
 
 Usage:
     python scripts/cleanup_duplicates.py [--dry-run]
@@ -29,97 +29,104 @@ def get_supabase_client() -> Client:
         sys.exit(1)
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def find_duplicates(supabase: Client) -> dict:
-    """Find all duplicate files based on filename + user_id + original_path"""
-    print("Fetching all vault files...")
-    
-    result = supabase.table('vault_files').select('*').execute()
-    files = result.data or []
-    
-    print(f"Found {len(files)} total files")
-    
-    duplicates = defaultdict(list)
-    
-    for file in files:
-        metadata = {}
-        if file.get('metadata'):
-            try:
-                metadata = json.loads(file['metadata']) if isinstance(file['metadata'], str) else file['metadata']
-            except:
-                pass
-        
-        original_path = metadata.get('original_path', file.get('filename', ''))
-        key = (file.get('user_id'), file.get('filename'), original_path)
-        duplicates[key].append(file)
-    
-    duplicate_groups = {k: v for k, v in duplicates.items() if len(v) > 1}
-    
-    return duplicate_groups
+def get_original_path(file_record: dict) -> str:
+    """Extract original_path from metadata - this is the canonical key"""
+    metadata = file_record.get('metadata')
+    if metadata:
+        try:
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+            return metadata.get('original_path', '')
+        except:
+            pass
+    return file_record.get('filename', '')
 
 def cleanup_duplicates(supabase: Client, dry_run: bool = False):
-    """Remove duplicate files, keeping the most recent version"""
-    print("=" * 60)
-    print("VVAULT Duplicate Cleanup")
-    print("=" * 60)
-    print(f"Dry run: {dry_run}")
+    """Remove duplicate files using original_path as the unique key"""
+    print("=" * 70)
+    print("VVAULT Duplicate Cleanup v2")
+    print("=" * 70)
+    print(f"Mode: {'DRY RUN (no changes)' if dry_run else 'LIVE CLEANUP'}")
     
-    duplicate_groups = find_duplicates(supabase)
+    print("\n[1/3] Fetching all vault files...")
+    result = supabase.table('vault_files').select('*').execute()
+    files = result.data or []
+    print(f"  Found {len(files)} total records")
     
-    if not duplicate_groups:
-        print("\nNo duplicates found!")
+    print("\n[2/3] Identifying duplicates by original_path...")
+    
+    path_groups = defaultdict(list)
+    for f in files:
+        original_path = get_original_path(f)
+        path_groups[original_path].append(f)
+    
+    duplicates_to_remove = []
+    unique_count = 0
+    
+    for path, group in path_groups.items():
+        if len(group) > 1:
+            sorted_group = sorted(
+                group, 
+                key=lambda x: x.get('created_at') or '', 
+                reverse=True
+            )
+            keep = sorted_group[0]
+            remove = sorted_group[1:]
+            
+            for dup in remove:
+                duplicates_to_remove.append({
+                    'id': dup['id'],
+                    'filename': dup.get('filename'),
+                    'path': path,
+                    'created_at': dup.get('created_at')
+                })
+            unique_count += 1
+        else:
+            unique_count += 1
+    
+    print(f"  Unique files: {unique_count}")
+    print(f"  Duplicates to remove: {len(duplicates_to_remove)}")
+    
+    if not duplicates_to_remove:
+        print("\n  No duplicates found!")
         return
     
-    print(f"\nFound {len(duplicate_groups)} files with duplicates")
+    print(f"\n  Duplicate breakdown:")
+    dup_by_file = defaultdict(int)
+    for d in duplicates_to_remove:
+        dup_by_file[d['filename']] += 1
     
-    total_to_delete = 0
-    ids_to_delete = []
-    
-    for key, files in duplicate_groups.items():
-        user_id, filename, original_path = key
-        
-        sorted_files = sorted(
-            files,
-            key=lambda f: f.get('created_at', '') or '',
-            reverse=True
-        )
-        
-        keep = sorted_files[0]
-        remove = sorted_files[1:]
-        
-        print(f"\n  {filename}")
-        print(f"    Original path: {original_path}")
-        print(f"    Keeping: ID {keep['id']} (created {keep.get('created_at', 'unknown')})")
-        
-        for f in remove:
-            print(f"    Removing: ID {f['id']} (created {f.get('created_at', 'unknown')})")
-            ids_to_delete.append(f['id'])
-            total_to_delete += 1
-    
-    print(f"\n{'=' * 60}")
-    print(f"Total duplicates to remove: {total_to_delete}")
+    for filename, count in sorted(dup_by_file.items(), key=lambda x: -x[1])[:20]:
+        print(f"    {filename}: {count} extra copies")
+    if len(dup_by_file) > 20:
+        print(f"    ... and {len(dup_by_file) - 20} more files with duplicates")
     
     if dry_run:
         print("\n[DRY RUN] No changes made.")
+        print(f"Would remove {len(duplicates_to_remove)} duplicate records.")
         return
     
-    if not ids_to_delete:
-        print("\nNothing to delete.")
-        return
+    print(f"\n[3/3] Removing {len(duplicates_to_remove)} duplicates...")
     
-    print("\nDeleting duplicates...")
+    removed = 0
+    errors = 0
     
-    deleted = 0
-    for file_id in ids_to_delete:
+    for i, dup in enumerate(duplicates_to_remove):
         try:
-            supabase.table('vault_files').delete().eq('id', file_id).execute()
-            deleted += 1
-            print(f"  Deleted ID: {file_id}")
+            supabase.table('vault_files').delete().eq('id', dup['id']).execute()
+            removed += 1
+            if (i + 1) % 10 == 0 or i == len(duplicates_to_remove) - 1:
+                print(f"  Progress: {i + 1}/{len(duplicates_to_remove)} ({removed} removed)")
         except Exception as e:
-            print(f"  Failed to delete ID {file_id}: {e}")
+            errors += 1
+            print(f"  Error removing {dup['id']}: {e}")
     
-    print(f"\n{'=' * 60}")
-    print(f"Cleanup complete! Deleted {deleted}/{total_to_delete} duplicates")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print("CLEANUP COMPLETE!")
+    print(f"  Removed: {removed}")
+    print(f"  Errors: {errors}")
+    print(f"  Remaining unique files: {unique_count}")
+    print("=" * 70)
 
 def main():
     import argparse

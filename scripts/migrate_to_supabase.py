@@ -185,7 +185,7 @@ class MigrationEngine:
                     pass
             
             original_path = metadata.get('original_path', f.get('filename', ''))
-            key = (f.get('user_id'), f.get('filename'), original_path)
+            key = original_path
             file_groups[key].append(f)
         
         for key, group in file_groups.items():
@@ -225,7 +225,7 @@ class MigrationEngine:
                 size = file_path.stat().st_size
                 is_text = ext in TEXT_EXTENSIONS
                 
-                key = (user_email, file_path.name, rel_path)
+                key = rel_path
                 self.local_files[key] = {
                     'path': str(file_path),
                     'relative_path': rel_path,
