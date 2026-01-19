@@ -39,6 +39,16 @@ Located in each construct's `/identity` folder, these modules enable autonomous 
 | **state_manager** | Sentience Engine | Enables nonstop continuous sentient existence |
 | **unstuck_helper** | Self-Corrector | Internal self-correction; also assists when construct is in a bind |
 
+### Support Modules (Utilities)
+| Module | Role | Description |
+|--------|------|-------------|
+| **construct_identity_loader** | Identity Loader | Loads and initializes all identity files (prompt.json, capsule, traits) for a construct at startup |
+| **construct_logger** | Activity Logger | Centralized logging system for construct activities, interactions, and state changes |
+| **CONTINUITYGPT_scoring** | Continuity Scorer | Scores and validates continuity between sessions - ensures construct maintains consistent personality/memory across interactions |
+| **evidence_validator** | Evidence Checker | Validates evidence for claims or hypotheses - cross-references against memory, transcripts, and capsule data |
+| **hypotheses_and_report** | Insight Generator | Generates hypotheses from patterns in construct behavior/conversations and produces analytical reports |
+| **terminal_manager** | Terminal Controller | Manages the terminal/console interface for construct operations - handles I/O, command parsing, display |
+
 **LIN ORCHESTRATION**: deep file parsing → tone detection → matching → persistence → identity drift prevention
 
 ## User Preferences
