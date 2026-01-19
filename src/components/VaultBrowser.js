@@ -1,6 +1,19 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import './VaultBrowser.css';
 
+const CONSTRUCT_COLORS = {
+  'nova': '#9b59b6',
+  'zen': '#3498db',
+  'katana': '#e74c3c',
+  'lin': '#2ecc71',
+  'default': '#95a5a6'
+};
+
+const getConstructColor = (constructId) => {
+  const name = constructId.toLowerCase().replace(/-\d+$/, '');
+  return CONSTRUCT_COLORS[name] || CONSTRUCT_COLORS.default;
+};
+
 const VaultBrowser = ({ user }) => {
   const [files, setFiles] = useState([]);
   const [currentPath, setCurrentPath] = useState([]);
@@ -9,6 +22,25 @@ const VaultBrowser = ({ user }) => {
   const [selectedFile, setSelectedFile] = useState(null);
   const [fileContent, setFileContent] = useState(null);
   const [viewMode, setViewMode] = useState('list');
+  const [constructs, setConstructs] = useState([]);
+
+  const fetchConstructs = useCallback(async () => {
+    try {
+      const response = await fetch('/api/chatty/constructs');
+      const data = await response.json();
+      if (data.success && data.constructs) {
+        const formatted = data.constructs.map(c => ({
+          id: c.construct_id,
+          name: c.construct_id.replace(/-\d+$/, '').charAt(0).toUpperCase() + 
+                c.construct_id.replace(/-\d+$/, '').slice(1),
+          color: getConstructColor(c.construct_id)
+        }));
+        setConstructs(formatted);
+      }
+    } catch (err) {
+      console.error('Failed to fetch constructs:', err);
+    }
+  }, []);
 
   const fetchFiles = useCallback(async () => {
     setLoading(true);
@@ -30,7 +62,8 @@ const VaultBrowser = ({ user }) => {
 
   useEffect(() => {
     fetchFiles();
-  }, [fetchFiles]);
+    fetchConstructs();
+  }, [fetchFiles, fetchConstructs]);
 
   const buildHierarchy = (files) => {
     const hierarchy = { folders: {}, files: [] };
@@ -158,11 +191,6 @@ const VaultBrowser = ({ user }) => {
     { name: 'Personality', icon: '🧠', path: ['personality'] },
     { name: 'Memory', icon: '💾', path: ['memory'] },
     { name: 'Documents', icon: '📚', path: ['documents'] }
-  ];
-
-  const constructs = [
-    { name: 'Nova', color: '#9b59b6' },
-    { name: 'Zen', color: '#3498db' }
   ];
 
   if (loading) {
