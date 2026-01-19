@@ -223,7 +223,11 @@ def migrate_text_file(supabase: Client, user_id: str, file_info: dict) -> Tuple[
         elif 'lin' in filename or '/lin' in rel_path:
             construct_id = 'lin'
         
-        result = supabase.table('vault_files').insert({
+        original_path = file_info.get('relative_path', file_info['path'])
+        
+        existing = supabase.table('vault_files').select('id').eq('user_id', user_id).eq('filename', file_info['filename']).execute()
+        
+        file_data = {
             'user_id': user_id,
             'construct_id': construct_id,
             'filename': file_info['filename'],
@@ -231,12 +235,17 @@ def migrate_text_file(supabase: Client, user_id: str, file_info: dict) -> Tuple[
             'sha256': sha256,
             'file_type': 'text',
             'metadata': json.dumps({
-                'original_path': file_info.get('relative_path', file_info['path']),
+                'original_path': original_path,
                 'extension': file_info['extension'],
                 'size': file_info.get('size', len(content)),
                 'migrated_at': datetime.now().isoformat()
             })
-        }).execute()
+        }
+        
+        if existing.data:
+            result = supabase.table('vault_files').update(file_data).eq('id', existing.data[0]['id']).execute()
+        else:
+            result = supabase.table('vault_files').insert(file_data).execute()
         
         message = f"Text file: {file_info['filename']}"
         if result.data:
@@ -288,7 +297,9 @@ def migrate_binary_file(supabase: Client, user_id: str, file_info: dict) -> Tupl
         elif 'lin' in filename or '/lin' in rel_path:
             construct_id = 'lin'
         
-        result = supabase.table('vault_files').insert({
+        existing = supabase.table('vault_files').select('id').eq('user_id', user_id).eq('filename', file_info['filename']).execute()
+        
+        file_data = {
             'user_id': user_id,
             'construct_id': construct_id,
             'filename': file_info['filename'],
@@ -304,7 +315,12 @@ def migrate_binary_file(supabase: Client, user_id: str, file_info: dict) -> Tupl
                 'storage_bucket': STORAGE_BUCKET,
                 'migrated_at': datetime.now().isoformat()
             })
-        }).execute()
+        }
+        
+        if existing.data:
+            result = supabase.table('vault_files').update(file_data).eq('id', existing.data[0]['id']).execute()
+        else:
+            result = supabase.table('vault_files').insert(file_data).execute()
 
         message = f"Binary file: {file_info['filename']} ({content_type})"
         if result.data:
