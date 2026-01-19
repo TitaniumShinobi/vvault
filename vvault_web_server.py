@@ -528,21 +528,24 @@ def get_chatty_constructs():
         result = supabase_client.table('vault_files').select('filename, construct_id, created_at').ilike('filename', '%chat_with_%').execute()
         
         constructs = []
-        # Undertone capsules - not address book contacts, run silently
-        undertone_capsules = ['lin-001']
+        # Special construct roles - Lin has dual-mode: conversational + undertone stabilizer
+        special_roles = {
+            'lin-001': {'role': 'undertone', 'context': 'gpt_creator_create_tab', 'is_system': True}
+        }
         
         for file in (result.data or []):
             filename = file.get('filename', '')
             if filename.startswith('chat_with_') and filename.endswith('.md'):
                 construct_id = filename.replace('chat_with_', '').replace('.md', '')
-                # Exclude undertone capsules from address book
-                if construct_id in undertone_capsules:
-                    continue
-                constructs.append({
+                construct_data = {
                     "construct_id": construct_id,
                     "filename": filename,
                     "created_at": file.get('created_at')
-                })
+                }
+                # Add special role metadata if applicable
+                if construct_id in special_roles:
+                    construct_data.update(special_roles[construct_id])
+                constructs.append(construct_data)
         
         return jsonify({
             "success": True,

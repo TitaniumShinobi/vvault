@@ -15,8 +15,8 @@ VVAULT is an AI construct memory vault system designed for long-term emotional c
 ### Not Yet Created in Chatty
 - **Nova**: Planned but not yet created as a GPT or Chatty construct
 
-### Special Modules (NOT Address Book contacts)
-- **Lin (lin-001)**: Undertone capsule - runs invisibly as tonal stabilizer, not a conversation target
+### Special Modules (Dual-Role Constructs)
+- **Lin (lin-001)**: Dual-mode construct - conversational agent in GPTCreator's create tab AND undertone stabilizer for other constructs. Users speak to Lin when creating GPTs.
 
 ### Chatty Address Book Requirements
 - Constructs appear in Address Book by parsing `chat_with_{construct}.md` files
