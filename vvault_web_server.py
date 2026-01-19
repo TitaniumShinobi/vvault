@@ -440,6 +440,113 @@ def get_vault_file(file_id):
         logger.error(f"Error fetching vault file: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/api/chatty/transcript/<construct_id>')
+def get_chatty_transcript(construct_id):
+    """Get chat transcript for a construct - used by Chatty integration
+    
+    Example: /api/chatty/transcript/zen-001
+    Returns the chat_with_zen-001.md content from the vault
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        
+        search_filename = f"chat_with_{construct_id}.md"
+        
+        result = supabase_client.table('vault_files').select('*').ilike('filename', f'%{search_filename}%').execute()
+        
+        if result.data and len(result.data) > 0:
+            file_data = result.data[0]
+            return jsonify({
+                "success": True,
+                "construct_id": construct_id,
+                "filename": file_data.get('filename'),
+                "content": file_data.get('content'),
+                "sha256": file_data.get('sha256'),
+                "updated_at": file_data.get('updated_at') or file_data.get('created_at')
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": f"No chat transcript found for {construct_id}"
+            }), 404
+    except Exception as e:
+        logger.error(f"Error fetching chatty transcript: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/chatty/transcript/<construct_id>', methods=['POST'])
+def update_chatty_transcript(construct_id):
+    """Update or create chat transcript for a construct - used by Chatty integration
+    
+    POST body: { "content": "full markdown content" }
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        
+        data = request.get_json()
+        content = data.get('content', '')
+        
+        if not content:
+            return jsonify({"success": False, "error": "Content is required"}), 400
+        
+        import hashlib
+        sha256 = hashlib.sha256(content.encode('utf-8')).hexdigest()
+        search_filename = f"chat_with_{construct_id}.md"
+        
+        existing = supabase_client.table('vault_files').select('id, user_id').ilike('filename', f'%{search_filename}%').execute()
+        
+        if existing.data and len(existing.data) > 0:
+            file_id = existing.data[0]['id']
+            supabase_client.table('vault_files').update({
+                'content': content,
+                'sha256': sha256,
+                'updated_at': datetime.now().isoformat()
+            }).eq('id', file_id).execute()
+            
+            return jsonify({
+                "success": True,
+                "action": "updated",
+                "construct_id": construct_id
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": f"Transcript not found for {construct_id}. Create it via migration first."
+            }), 404
+    except Exception as e:
+        logger.error(f"Error updating chatty transcript: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/chatty/constructs')
+def get_chatty_constructs():
+    """Get all available constructs with chat transcripts"""
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        
+        result = supabase_client.table('vault_files').select('filename, construct_id, created_at').ilike('filename', '%chat_with_%').execute()
+        
+        constructs = []
+        for file in (result.data or []):
+            filename = file.get('filename', '')
+            if filename.startswith('chat_with_') and filename.endswith('.md'):
+                construct_id = filename.replace('chat_with_', '').replace('.md', '')
+                constructs.append({
+                    "construct_id": construct_id,
+                    "filename": filename,
+                    "created_at": file.get('created_at')
+                })
+        
+        return jsonify({
+            "success": True,
+            "constructs": constructs,
+            "count": len(constructs)
+        })
+    except Exception as e:
+        logger.error(f"Error fetching chatty constructs: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 # Legal document routes
 @app.route('/terms-of-service.html')
 def terms_of_service():
