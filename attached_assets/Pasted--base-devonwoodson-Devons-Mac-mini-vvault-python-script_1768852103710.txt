@@ -1,0 +1,61 @@
+(base) devonwoodson@Devons-Mac-mini vvault % python scripts/migrate_to_supabase.py --source users/ --dry-run
+============================================================
+VVAULT Migration to Supabase (Full Media Support)
+============================================================
+
+Source: users
+Dry run: True
+
+[1/4] Scanning directory...
+
+Found:
+  - 1 users
+  - 37 text files (.md, .json, .txt, etc)
+  - 97 binary files (.pdf, images, videos, etc)
+  - 0 root vault files
+
+[DRY RUN] Would migrate:
+
+  User: shard_0000
+    [BINARY] .DS_Store
+    [BINARY] devon_woodson_1762969514958/.DS_Store
+    [BINARY] devon_woodson_1762969514958/library/.DS_Store
+    [BINARY] devon_woodson_1762969514958/capsules/katana-014.capsule
+    [BINARY] devon_woodson_1762969514958/capsules/katana-004.capsule
+    [BINARY] devon_woodson_1762969514958/capsules/ai-004.capsule
+    [BINARY] devon_woodson_1762969514958/capsules/.DS_Store
+    [BINARY] devon_woodson_1762969514958/capsules/katana-005.capsule
+    [BINARY] devon_woodson_1762969514958/capsules/katana-015.capsule
+    [BINARY] devon_woodson_1762969514958/capsules/aurora-001.capsule
+    ... and 124 more files
+(base) devonwoodson@Devons-Mac-mini vvault % python scripts/migrate_to_supabase.py --source users/          
+============================================================
+VVAULT Migration to Supabase (Full Media Support)
+============================================================
+
+Source: users
+Dry run: False
+
+[1/4] Scanning directory...
+
+Found:
+  - 1 users
+  - 37 text files (.md, .json, .txt, etc)
+  - 97 binary files (.pdf, images, videos, etc)
+  - 0 root vault files
+
+[2/4] Connecting to Supabase...
+  ✓ Connected
+
+[3/4] Ensuring storage bucket exists...
+Storage endpoint URL should have a trailing slash.
+  ✓ Storage bucket exists: vault-files
+
+[4/4] Migrating data...
+
+Migrating user: shard_0000
+  ✓ User migrated: shard_0000
+    ✓ UPDATE: .DS_Store (application/octet-stream) (0.0% done, ETA 41h 33m 36s)
+    ✓ UPDATE: .DS_Store (application/octet-stream) (0.0% done, ETA 23h 7m 51s)
+    ✓ UPDATE: .DS_Store (application/octet-stream) (0.0% done, ETA 21h 31m 51s)
+    ✓ SKIP (unchanged): katana-014.capsule (0.2% done, ETA 23m 38s)
