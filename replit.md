@@ -10,8 +10,10 @@ VVAULT is an AI construct memory vault system designed for long-term emotional c
 
 ### Active Constructs
 - **Zen (zen-001)**: Primary construct. *Formerly called Synth - renamed December 2025. There is no synth-001.*
-- **Katana (katana-001)**: Secondary construct
-- **Nova (nova-001)**: Secondary construct
+- **Katana (katana-001)**: Secondary construct (confirmed GPT created)
+
+### Not Yet Created in Chatty
+- **Nova**: Planned but not yet created as a GPT or Chatty construct
 
 ### Special Modules (NOT Address Book contacts)
 - **Lin (lin-001)**: Undertone capsule - runs invisibly as tonal stabilizer, not a conversation target
