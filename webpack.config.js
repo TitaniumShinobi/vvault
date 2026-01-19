@@ -55,23 +55,29 @@ module.exports = {
       }
     ],
     compress: true,
-    port: 7784,
-    host: 'localhost',
+    port: 5000,
+    host: '0.0.0.0',
     hot: true,
-    open: true,
+    open: false,
     historyApiFallback: true,
-    proxy: {
-      '/api': {
+    allowedHosts: 'all',
+    proxy: [
+      {
+        context: ['/api'],
         target: 'http://localhost:8000',
         changeOrigin: true,
-        secure: false
+        secure: false,
+        headers: {
+          'X-Forwarded-Host': 'localhost'
+        }
       }
-    },
+    ],
     client: {
       overlay: {
         errors: true,
         warnings: false
-      }
+      },
+      webSocketURL: 'auto://0.0.0.0:0/ws'
     }
   },
   devtool: 'eval-source-map'

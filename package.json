@@ -4,11 +4,11 @@
   "description": "VVAULT - AI Construct Memory Vault Web Frontend",
   "private": true,
   "scripts": {
-    "start": "webpack-dev-server --mode development --port 7784 --host localhost",
-    "dev": "webpack-dev-server --mode development --port 7784 --host localhost --open",
+    "start": "webpack-dev-server --mode development",
+    "dev": "webpack-dev-server --mode development",
     "dev:full": "concurrently \"npm run backend\" \"npm run frontend\"",
-    "frontend": "webpack-dev-server --mode development --port 7784 --host localhost --open",
-    "backend": "/Users/devonwoodson/Documents/GitHub/vvault/vvault_env/bin/python vvault_web_server.py",
+    "frontend": "webpack-dev-server --mode development",
+    "backend": "python vvault_web_server.py",
     "build": "webpack --mode production",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

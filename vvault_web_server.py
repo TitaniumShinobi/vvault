@@ -104,7 +104,7 @@ def verify_turnstile_token(token: str, remote_ip: str = None) -> bool:
         return False
 
 # VVAULT Configuration
-PROJECT_DIR = "/Users/devonwoodson/Documents/GitHub/VVAULT"
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 CAPSULES_DIR = os.path.join(PROJECT_DIR, "capsules")
 VAULT_DIR = os.path.join(PROJECT_DIR, "vvault")
 HUMAN_CAPSULE_TYPE = "human_personalization_profile"
@@ -653,7 +653,7 @@ def main():
     try:
         logger.info("🚀 Starting VVAULT Web Server on port 8000...")
         app.run(
-            host='localhost',
+            host='0.0.0.0',
             port=8000,
             debug=True,
             threaded=True
