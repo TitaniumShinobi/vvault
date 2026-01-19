@@ -528,10 +528,16 @@ def get_chatty_constructs():
         result = supabase_client.table('vault_files').select('filename, construct_id, created_at').ilike('filename', '%chat_with_%').execute()
         
         constructs = []
+        # Undertone capsules - not address book contacts, run silently
+        undertone_capsules = ['lin-001']
+        
         for file in (result.data or []):
             filename = file.get('filename', '')
             if filename.startswith('chat_with_') and filename.endswith('.md'):
                 construct_id = filename.replace('chat_with_', '').replace('.md', '')
+                # Exclude undertone capsules from address book
+                if construct_id in undertone_capsules:
+                    continue
                 constructs.append({
                     "construct_id": construct_id,
                     "filename": filename,
