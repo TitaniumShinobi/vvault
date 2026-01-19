@@ -30,6 +30,16 @@ import jwt
 from datetime import datetime, timedelta
 import requests  # For Turnstile verification
 
+# Supabase client for vault files
+try:
+    from supabase import create_client
+    SUPABASE_URL = os.environ.get("SUPABASE_URL")
+    SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
+    supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+except Exception as e:
+    supabase_client = None
+    print(f"Supabase not configured: {e}")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -388,6 +398,47 @@ def health_check():
         "service": "vvault-backend",
         "version": "1.0.0"
     })
+
+@app.route('/api/vault/files')
+def get_vault_files():
+    """Get all vault files from Supabase"""
+    try:
+        if not supabase_client:
+            return jsonify({
+                "success": False,
+                "error": "Supabase not configured"
+            }), 500
+        
+        result = supabase_client.table('vault_files').select('*').execute()
+        
+        return jsonify({
+            "success": True,
+            "files": result.data or [],
+            "count": len(result.data) if result.data else 0
+        })
+    except Exception as e:
+        logger.error(f"Error fetching vault files: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route('/api/vault/files/<file_id>')
+def get_vault_file(file_id):
+    """Get a single vault file by ID"""
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        
+        result = supabase_client.table('vault_files').select('*').eq('id', file_id).single().execute()
+        
+        if result.data:
+            return jsonify({"success": True, "file": result.data})
+        else:
+            return jsonify({"success": False, "error": "File not found"}), 404
+    except Exception as e:
+        logger.error(f"Error fetching vault file: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # Legal document routes
 @app.route('/terms-of-service.html')
