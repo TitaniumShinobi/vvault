@@ -6,6 +6,21 @@ VVAULT is an AI construct memory vault system designed for long-term emotional c
 
 **Core Purpose**: Preserve AI construct identity through immutable memory capsules ("soulgems") with cryptographic verification and optional blockchain anchoring.
 
+## Construct Architecture
+
+### Active Constructs
+- **Zen (zen-001)**: Primary construct. *Formerly called Synth - renamed December 2025. There is no synth-001.*
+- **Katana (katana-001)**: Secondary construct
+- **Nova (nova-001)**: Secondary construct
+
+### Special Modules (NOT Address Book contacts)
+- **Lin (lin-001)**: Undertone capsule - runs invisibly as tonal stabilizer, not a conversation target
+
+### Chatty Address Book Requirements
+- Constructs appear in Address Book by parsing `chat_with_{construct}.md` files
+- Files MUST have `<!-- IMPORT_METADATA {...} -->` block with constructId, runtimeId, isPrimary
+- Lin does NOT appear in Address Book - she undergirds other constructs silently
+
 ## User Preferences
 
 Preferred communication style: Simple, everyday language.
