@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
 import Dashboard from './components/Dashboard';
 import Capsules from './components/Capsules';
+import VaultBrowser from './components/VaultBrowser';
 import Blockchain from './components/Blockchain';
 import Settings from './components/Settings';
 import CinematicLogin from './components/CinematicLogin';
@@ -13,6 +14,7 @@ const Navigation = ({ user, onLogout }) => {
   
   const navItems = [
     { path: '/', label: 'Dashboard', icon: '🏠' },
+    { path: '/vault', label: 'Vault', icon: '🔒' },
     { path: '/capsules', label: 'Capsules', icon: '📦' },
     { path: '/blockchain', label: 'Blockchain', icon: '⛓️' },
     { path: '/settings', label: 'Settings', icon: '⚙️' }
@@ -175,6 +177,7 @@ function App() {
         <main className="main-content">
           <Routes>
             <Route path="/" element={<Dashboard systemInfo={systemInfo} user={user} />} />
+            <Route path="/vault" element={<VaultBrowser user={user} />} />
             <Route path="/capsules" element={<Capsules user={user} />} />
             <Route path="/blockchain" element={<Blockchain user={user} />} />
             <Route path="/settings" element={<Settings systemInfo={systemInfo} user={user} />} />
