@@ -203,11 +203,17 @@ def migrate_text_file(supabase: Client, user_id: str, file_info: dict) -> Tuple[
     """Migrate a text file to Supabase database"""
     try:
         file_path = Path(file_info['path'])
+        original_path = file_info.get('relative_path', file_info['path'])
         
         with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
         
         sha256 = compute_sha256(content.encode('utf-8'))
+        
+        existing = supabase.table('vault_files').select('id, sha256').eq('user_id', user_id).eq('filename', file_info['filename']).execute()
+        
+        if existing.data and existing.data[0].get('sha256') == sha256:
+            return True, f"SKIP (unchanged): {file_info['filename']}"
         
         construct_id = None
         filename = file_info['filename'].lower()
@@ -222,10 +228,6 @@ def migrate_text_file(supabase: Client, user_id: str, file_info: dict) -> Tuple[
             construct_id = 'katana'
         elif 'lin' in filename or '/lin' in rel_path:
             construct_id = 'lin'
-        
-        original_path = file_info.get('relative_path', file_info['path'])
-        
-        existing = supabase.table('vault_files').select('id').eq('user_id', user_id).eq('filename', file_info['filename']).execute()
         
         file_data = {
             'user_id': user_id,
@@ -244,13 +246,14 @@ def migrate_text_file(supabase: Client, user_id: str, file_info: dict) -> Tuple[
         
         if existing.data:
             result = supabase.table('vault_files').update(file_data).eq('id', existing.data[0]['id']).execute()
+            message = f"UPDATE: {file_info['filename']}"
         else:
             result = supabase.table('vault_files').insert(file_data).execute()
+            message = f"NEW: {file_info['filename']}"
         
-        message = f"Text file: {file_info['filename']}"
         if result.data:
             return True, message
-        return False, f"No insert response for {message}"
+        return False, f"No response for {message}"
     except Exception as e:
         return False, f"{file_info['filename']} - {e}"
 
@@ -263,8 +266,13 @@ def migrate_binary_file(supabase: Client, user_id: str, file_info: dict) -> Tupl
             content = f.read()
         
         sha256 = compute_sha256(content)
-        content_type = get_content_type(file_path)
         
+        existing = supabase.table('vault_files').select('id, sha256').eq('user_id', user_id).eq('filename', file_info['filename']).execute()
+        
+        if existing.data and existing.data[0].get('sha256') == sha256:
+            return True, f"SKIP (unchanged): {file_info['filename']}"
+        
+        content_type = get_content_type(file_path)
         storage_path = f"{user_id}/{file_info.get('relative_path', file_info['filename'])}"
         
         try:
@@ -297,8 +305,6 @@ def migrate_binary_file(supabase: Client, user_id: str, file_info: dict) -> Tupl
         elif 'lin' in filename or '/lin' in rel_path:
             construct_id = 'lin'
         
-        existing = supabase.table('vault_files').select('id').eq('user_id', user_id).eq('filename', file_info['filename']).execute()
-        
         file_data = {
             'user_id': user_id,
             'construct_id': construct_id,
@@ -319,13 +325,14 @@ def migrate_binary_file(supabase: Client, user_id: str, file_info: dict) -> Tupl
         
         if existing.data:
             result = supabase.table('vault_files').update(file_data).eq('id', existing.data[0]['id']).execute()
+            message = f"UPDATE: {file_info['filename']} ({content_type})"
         else:
             result = supabase.table('vault_files').insert(file_data).execute()
+            message = f"NEW: {file_info['filename']} ({content_type})"
 
-        message = f"Binary file: {file_info['filename']} ({content_type})"
         if result.data:
             return True, message
-        return False, f"No insert response for {message}"
+        return False, f"No response for {message}"
     except Exception as e:
         return False, f"{file_info['filename']} - {e}"
 
