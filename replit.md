@@ -88,6 +88,42 @@ Preferred communication style: Simple, everyday language.
 - **Provider Memory Router**: Routes memories by provider context while maintaining construct identity
 - **Style Extractor**: Extracts provider-specific style patterns for LLM style modulation
 
+### Chatty Integration API
+VVAULT serves as the stateful backend for Chatty (and any frontend). Key endpoints:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/chatty/constructs` | GET | List all constructs with chat transcripts |
+| `/api/chatty/transcript/{id}` | GET | Fetch full transcript for a construct |
+| `/api/chatty/transcript/{id}` | POST | Replace entire transcript content |
+| `/api/chatty/transcript/{id}/message` | POST | Append single message to transcript |
+| `/api/chatty/message` | POST | **Main endpoint**: Send message → LLM inference → save both messages |
+
+**Message endpoint request format:**
+```json
+{
+  "constructId": "zen-001",
+  "message": "user message text",
+  "userName": "Devon",
+  "timezone": "EST"
+}
+```
+
+**Transcript message format:**
+```markdown
+## January 20, 2026
+
+**9:44:02 AM EST - Devon** [2026-01-20T14:44:02.553Z]: Hello Zen
+
+**9:44:03 AM EST - Zen** [2026-01-20T14:44:03.123Z]: Hello Devon!
+```
+
+### LLM Backend (Ollama)
+- **Model**: qwen2.5:0.5b (small, fast, fits Replit memory)
+- **Port**: 11434 (internal)
+- **Workflow**: "Ollama LLM" runs `ollama serve`
+- **Identity Loading**: Constructs load system prompts from `instances/{construct_id}/identity/prompt.json`
+
 ## External Dependencies
 
 ### Python Packages
