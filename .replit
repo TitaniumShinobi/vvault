@@ -16,6 +16,10 @@ args = "VVAULT Backend"
 task = "workflow.run"
 args = "VVAULT Web App"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Ollama LLM"
+
 [[workflows.workflow]]
 name = "VVAULT Backend"
 author = "agent"
@@ -40,6 +44,17 @@ waitForPort = 5000
 [workflows.workflow.metadata]
 outputType = "webview"
 
+[[workflows.workflow]]
+name = "Ollama LLM"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "OLLAMA_HOST=0.0.0.0:11434 ollama serve"
+
 [[ports]]
 localPort = 5000
 externalPort = 80
@@ -52,8 +67,13 @@ externalPort = 3000
 localPort = 8000
 externalPort = 8000
 
+[[ports]]
+localPort = 11434
+externalPort = 3001
+
 [agent]
 expertMode = true
 
 [nix]
 channel = "stable-25_05"
+packages = ["ollama"]

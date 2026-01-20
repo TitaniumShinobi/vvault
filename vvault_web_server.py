@@ -620,6 +620,174 @@ def get_chatty_constructs():
         logger.error(f"Error fetching chatty constructs: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+
+@app.route('/api/chatty/message', methods=['POST'])
+def chatty_message():
+    """Handle a message to a construct and return LLM response
+    
+    POST body: {
+        "constructId": "zen-001",
+        "message": "user message text",
+        "userName": "Devon" (optional, defaults to "User"),
+        "timezone": "EST" (optional, defaults to "EST")
+    }
+    
+    This endpoint:
+    1. Loads construct identity/system prompt
+    2. Calls Ollama for LLM inference
+    3. Appends both user and assistant messages to transcript
+    4. Returns the assistant response
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        
+        # Parse JSON with error handling
+        data = request.get_json(silent=True)
+        if not data or not isinstance(data, dict):
+            return jsonify({"success": False, "error": "Invalid or missing JSON body"}), 400
+        
+        construct_id = data.get('constructId')
+        user_message = data.get('message', '')
+        user_name = data.get('userName', 'User')
+        timezone = data.get('timezone', 'EST')
+        
+        if not construct_id:
+            return jsonify({"success": False, "error": "constructId is required"}), 400
+        if not user_message:
+            return jsonify({"success": False, "error": "message is required"}), 400
+        
+        # Get construct name from ID (e.g., zen-001 -> Zen)
+        construct_name = construct_id.split('-')[0].title()
+        
+        # Load construct identity/system prompt
+        system_prompt = _load_construct_identity(construct_id, construct_name)
+        
+        # Call Ollama for LLM inference
+        try:
+            ollama_response = requests.post(
+                'http://localhost:11434/api/generate',
+                json={
+                    'model': 'qwen2.5:0.5b',
+                    'prompt': user_message,
+                    'system': system_prompt,
+                    'stream': False
+                },
+                timeout=60
+            )
+            
+            # Check for non-200 responses
+            if not ollama_response.ok:
+                logger.error(f"Ollama returned {ollama_response.status_code}: {ollama_response.text[:200]}")
+                return jsonify({
+                    "success": False,
+                    "error": f"LLM inference failed with status {ollama_response.status_code}"
+                }), 503
+            
+            ollama_data = ollama_response.json()
+            assistant_response = ollama_data.get('response')
+            if not assistant_response:
+                return jsonify({
+                    "success": False,
+                    "error": "LLM returned empty response"
+                }), 503
+                
+        except requests.RequestException as e:
+            logger.error(f"Ollama error: {e}")
+            return jsonify({
+                "success": False, 
+                "error": "LLM inference failed. Is Ollama running?"
+            }), 503
+        
+        # Format timestamp - use UTC for ISO, convert to user timezone for display
+        from datetime import timezone as tz
+        now_utc = datetime.now(tz.utc)
+        iso_timestamp = now_utc.strftime('%Y-%m-%dT%H:%M:%S.') + f'{now_utc.microsecond // 1000:03d}Z'
+        
+        # Convert to EST for human-readable display (UTC-5)
+        est_offset = timedelta(hours=-5)
+        now_est = now_utc + est_offset
+        human_time = now_est.strftime('%I:%M:%S %p').lstrip('0')
+        date_header = now_est.strftime('%B %d, %Y')
+        
+        # Get current transcript
+        search_filename = f"chat_with_{construct_id}.md"
+        existing = supabase_client.table('vault_files').select('id, content').ilike('filename', f'%{search_filename}%').execute()
+        
+        if not existing.data or len(existing.data) == 0:
+            return jsonify({
+                "success": False,
+                "error": f"Transcript not found for {construct_id}. Create it via migration first."
+            }), 404
+        
+        file_id = existing.data[0]['id']
+        current_content = existing.data[0].get('content', '')
+        
+        # Check if we need a new date header
+        new_content = current_content
+        if f"## {date_header}" not in current_content:
+            new_content += f"\n\n## {date_header}\n"
+        
+        # Format and append user message
+        user_formatted = f"\n**{human_time} {timezone} - {user_name}** [{iso_timestamp}]: {user_message}\n"
+        new_content += user_formatted
+        
+        # Format and append assistant message (use UTC for consistency)
+        now_response_utc = datetime.now(tz.utc)
+        iso_timestamp_response = now_response_utc.strftime('%Y-%m-%dT%H:%M:%S.') + f'{now_response_utc.microsecond // 1000:03d}Z'
+        now_response_est = now_response_utc + est_offset
+        human_time_response = now_response_est.strftime('%I:%M:%S %p').lstrip('0')
+        
+        assistant_formatted = f"\n**{human_time_response} {timezone} - {construct_name}** [{iso_timestamp_response}]: {assistant_response}\n"
+        new_content += assistant_formatted
+        
+        # Update transcript in Supabase
+        sha256 = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
+        supabase_client.table('vault_files').update({
+            'content': new_content,
+            'sha256': sha256
+        }).eq('id', file_id).execute()
+        
+        logger.info(f"Message exchange with {construct_id}: user sent {len(user_message)} chars, got {len(assistant_response)} chars")
+        
+        return jsonify({
+            "success": True,
+            "response": assistant_response,
+            "constructId": construct_id,
+            "constructName": construct_name,
+            "timestamp": iso_timestamp
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in chatty message: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _load_construct_identity(construct_id: str, construct_name: str) -> str:
+    """Load the system prompt for a construct from its identity files"""
+    try:
+        # Try to load from prompt.json in construct's identity folder
+        prompt_path = os.path.join(PROJECT_DIR, 'instances', construct_id, 'identity', 'prompt.json')
+        if os.path.exists(prompt_path):
+            with open(prompt_path, 'r') as f:
+                prompt_data = json.load(f)
+                return prompt_data.get('system_prompt', '') or prompt_data.get('prompt', '')
+        
+        # Try to load from Supabase if not local
+        if supabase_client:
+            result = supabase_client.table('vault_files').select('content').eq('construct_id', construct_id).ilike('filename', '%prompt.json%').execute()
+            if result.data and len(result.data) > 0:
+                content = result.data[0].get('content', '{}')
+                prompt_data = json.loads(content)
+                return prompt_data.get('system_prompt', '') or prompt_data.get('prompt', '')
+        
+        # Fallback default prompt
+        return f"You are {construct_name}, an AI assistant. Be helpful, concise, and friendly."
+    except Exception as e:
+        logger.warning(f"Could not load identity for {construct_id}: {e}")
+        return f"You are {construct_name}, an AI assistant. Be helpful, concise, and friendly."
+
+
 # Legal document routes
 @app.route('/terms-of-service.html')
 def terms_of_service():
