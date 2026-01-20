@@ -500,8 +500,7 @@ def update_chatty_transcript(construct_id):
             file_id = existing.data[0]['id']
             supabase_client.table('vault_files').update({
                 'content': content,
-                'sha256': sha256,
-                'updated_at': datetime.now().isoformat()
+                'sha256': sha256
             }).eq('id', file_id).execute()
             
             return jsonify({
@@ -516,6 +515,71 @@ def update_chatty_transcript(construct_id):
             }), 404
     except Exception as e:
         logger.error(f"Error updating chatty transcript: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/chatty/transcript/<construct_id>/message', methods=['POST'])
+def append_chatty_message(construct_id):
+    """Append a single message to a construct's transcript
+    
+    POST body: {
+        "role": "user" | "assistant" | "system",
+        "content": "message text",
+        "timestamp": "2026-01-20T12:00:00Z" (optional, defaults to now)
+    }
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        
+        data = request.get_json()
+        role = data.get('role', 'user')
+        content = data.get('content', '')
+        timestamp = data.get('timestamp', datetime.now().isoformat())
+        
+        if not content:
+            return jsonify({"success": False, "error": "Content is required"}), 400
+        
+        if role not in ['user', 'assistant', 'system']:
+            return jsonify({"success": False, "error": "Role must be 'user', 'assistant', or 'system'"}), 400
+        
+        search_filename = f"chat_with_{construct_id}.md"
+        existing = supabase_client.table('vault_files').select('id, content').ilike('filename', f'%{search_filename}%').execute()
+        
+        if not existing.data or len(existing.data) == 0:
+            return jsonify({
+                "success": False,
+                "error": f"Transcript not found for {construct_id}"
+            }), 404
+        
+        file_id = existing.data[0]['id']
+        current_content = existing.data[0].get('content', '')
+        
+        role_label = "**User**" if role == "user" else f"**{construct_id.split('-')[0].title()}**" if role == "assistant" else "**System**"
+        formatted_message = f"\n\n---\n\n{role_label} ({timestamp}):\n\n{content}"
+        
+        updated_content = current_content + formatted_message
+        
+        import hashlib
+        sha256 = hashlib.sha256(updated_content.encode('utf-8')).hexdigest()
+        
+        supabase_client.table('vault_files').update({
+            'content': updated_content,
+            'sha256': sha256
+        }).eq('id', file_id).execute()
+        
+        logger.info(f"Appended {role} message to {construct_id} transcript")
+        
+        return jsonify({
+            "success": True,
+            "action": "appended",
+            "construct_id": construct_id,
+            "role": role,
+            "message_length": len(content),
+            "total_length": len(updated_content)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error appending message to transcript: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/chatty/constructs')
