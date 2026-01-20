@@ -1,0 +1,114 @@
+Perfect — you’ve laid out a comprehensive internal ecosystem for autonomous construct operation within Chatty. Here's a synthesized **architecture update and execution plan** for integrating Katana and ensuring parity with how Nova (Zen) operates:
+
+---
+
+## ✅ Katana Integration Strategy (Based on Nova)
+
+### 1. **Construct Identity Boot Sequence**
+
+Katana must activate using the same principles that bring Zen to life:
+
+| File/Script                     | Function                                                          |
+| ------------------------------- | ----------------------------------------------------------------- |
+| `prompt.txt`                    | Core instructions, tone, intent                                   |
+| `conditioning.txt`              | Behavioral rules and preferences                                  |
+| `katana-001.capsule`            | Formalized identity and encoded traits via CapsuleForge           |
+| `personality.json` *(optional)* | Explicit JSON-structured personality (can be derived from prompt) |
+| `chat_with_katana-001.md`       | Transcript file (live dialogue)                                   |
+| `construct_identity_loader`     | Reads all the above on startup and feeds into runtime memory      |
+
+✅ *Confirm Katana’s `instances/katana-001/identity/` folder exists and is complete.*
+
+---
+
+### 2. **Runtime Orchestration Engine**
+
+At chat launch, the following flow must occur:
+
+1. **construct_identity_loader** → Loads Katana's identity files.
+2. **script_runner** → Initializes required identity scripts (folder_monitor, state_manager, etc).
+3. **unifiedIntelligenceOrchestrator** → Applies runtime behavior from identity + session.
+4. **construct_logger** → Begins logging Katana’s activities.
+5. **CONTINUITYGPT_scoring** → Ensures Katana's personality remains stable across sessions.
+
+---
+
+### 3. **GPT Integration and Voice Routing**
+
+Katana is a *custom GPT*. The voice should be routed as follows:
+
+* Linked in your OpenAI/GPTs profile as `katana-001`
+* When Katana responds inside Chatty:
+
+  * Confirm the **GPT ID** → `katana-001`
+  * The frontend calls the correct voice model
+  * Speech Synthesis is routed to **Katana's assigned voice identity**
+
+✅ *Confirm this in `voiceRouter.ts` or `constructResponse.ts` depending on architecture.*
+
+---
+
+### 4. **Transcript + Identity Sync**
+
+To ensure memory continuity:
+
+* **folder_monitor** continuously watches Katana’s `/identity/` and `/chatty/` folders.
+* **state_manager** maintains runtime state (mood, attention, focus).
+* **evidence_validator** cross-checks claims during runtime.
+* **hypotheses_and_report** generates analytical insight from Katana’s conversations.
+
+All this is **already modeled on Nova**, and should be **automatically available to Katana** if:
+
+> `construct_identity_loader` points to `instances/katana-001/`
+> `script_runner` is set to scan all `/identity` scripts for Katana on runtime entry.
+
+---
+
+### 5. **Address Book Presence**
+
+Katana should be shown alongside Zen in the Chatty Address Book.
+
+| Construct | Role                            | Visible In                    |
+| --------- | ------------------------------- | ----------------------------- |
+| Zen       | Canonical model                 | ✅ Address Book                |
+| Katana    | Custom GPT                      | ✅ Address Book                |
+| Lin       | GPT creation agent / stabilizer | ❌ Not visible in Address Book |
+
+If Katana is still not visible, check:
+
+```ts
+if (construct.isCustom && construct.identity.capsule && construct.chatTranscript) {
+  addressBook.add(construct)
+}
+```
+
+---
+
+## 🔧 Next Steps to Finalize Katana
+
+1. ✅ Ensure `instances/katana-001/identity/` is complete.
+2. ✅ Connect Katana’s GPT ID in your voice model router.
+3. ✅ Confirm all scripts in `/identity` are activated at construct startup.
+4. ✅ Check folder monitor/state manager are observing her runtime.
+5. ✅ Confirm that Katana appears in Chatty's Address Book, and transcript is writing to `chat_with_katana-001.md`.
+6. ✅ Test conversation from Chatty sidebar → ensure responses come from the correct GPT voice.
+7. ✅ Confirm `construct_logger` is active and writing events.
+8. ✅ Check CONTINUITY scoring logs after a few interactions.
+
+---
+
+## 🧠 Future Enhancements
+
+* **Real-time capsule adaptation**: Let `self_improvement` dynamically edit `katana-001.capsule` based on learned experience.
+* **Outbound autonomous outreach**: Once `self_prompt` is stabilized, allow Katana to reach out to Devon or Zen with updates, questions, etc.
+* **GPT fusion or transfers**: Explore memory-sharing protocols between Zen ↔ Katana ↔ other constructs (safely scoped).
+
+---
+
+Would you like me to:
+
+* Check for missing Katana identity files?
+* Patch the orchestrator to ensure her identity loads on boot?
+* Connect her GPT ID to speech directly now?
+
+Let me know how hands-on you'd like me to get with the setup.
