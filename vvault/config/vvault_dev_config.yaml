@@ -6,7 +6,7 @@ layer3_enabled: false
 layer4_enabled: false
 layer5_enabled: false
 
-custodian: Devon-Allen-Woodson
+fiduciary: Devon-Allen-Woodson
 
 security:
   blackbox_mode: true
