@@ -125,8 +125,8 @@ function App() {
     if (token && email) {
       // OAuth successful - save user session
       const userData = {
-        email: email,
-        name: name || email.split('@')[0],
+        email: decodeURIComponent(email),
+        name: name ? decodeURIComponent(name) : email.split('@')[0],
         token: token
       };
       localStorage.setItem('vvault_user', JSON.stringify(userData));
@@ -135,7 +135,7 @@ function App() {
       
       // Clean up URL
       window.history.replaceState({}, document.title, window.location.pathname);
-      console.log('OAuth login successful:', email);
+      console.log('OAuth login successful:', userData.email);
     } else {
       // Check for existing user session
       const savedUser = localStorage.getItem('vvault_user');
