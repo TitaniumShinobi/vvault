@@ -966,7 +966,7 @@ class VVAULTCore:
         """
         try:
             # Lazy import to avoid circular dependencies
-            from energy_mask_field import get_energy_mask
+            from vvault.security.energy_mask_field import get_energy_mask
             
             # Initialize energy mask
             self.energy_mask = get_energy_mask(vault_path=self.vault_path, pocketverse_mode=True)

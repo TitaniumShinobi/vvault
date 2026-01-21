@@ -9,7 +9,7 @@ Author: Devon Allen Woodson
 Date: 2025-01-27
 """
 
-from dawnlock import (
+from vvault.security.dawnlock import (
     DawnlockProtocol,
     ThreatCategory,
     ThreatSeverity,

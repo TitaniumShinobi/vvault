@@ -17,7 +17,7 @@ def test_login_screen():
     print("🧪 Testing VVAULT Desktop Login Screen...")
     
     try:
-        from desktop_login import VVAULTLoginScreen
+        from vvault.desktop.desktop_login import VVAULTLoginScreen
         print("✅ Login screen module imported successfully")
         
         # Test creating the login screen

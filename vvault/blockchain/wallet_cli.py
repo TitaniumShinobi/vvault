@@ -21,12 +21,12 @@ from datetime import datetime
 # Add current directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from blockchain_identity_wallet import (
+from vvault.blockchain.blockchain_identity_wallet import (
     VVAULTBlockchainWallet, BlockchainType, SecurityLevel,
     create_wallet, load_wallet
 )
-from blockchain_config import get_config, BlockchainNetwork
-from backup_recovery import create_backup_manager
+from vvault.blockchain.blockchain_config import get_config, BlockchainNetwork
+from vvault.audit.backup_recovery import create_backup_manager
 
 # Configure logging
 logging.basicConfig(

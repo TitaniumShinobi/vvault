@@ -16,13 +16,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Any
 
-from dawnlock import (
+from vvault.security.dawnlock import (
     DawnlockProtocol,
     ThreatCategory,
     ThreatSeverity,
     get_dawnlock
 )
-from nullshell_generator import NULLSHELLGenerator
+from vvault.security.nullshell_generator import NULLSHELLGenerator
 
 logging.basicConfig(
     level=logging.INFO,

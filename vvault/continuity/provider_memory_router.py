@@ -9,7 +9,7 @@ import logging
 from typing import Dict, List, Any, Optional
 from collections import defaultdict
 
-from style_extractor import StyleExtractor, StylePattern
+from vvault.continuity.style_extractor import StyleExtractor, StylePattern
 
 logger = logging.getLogger(__name__)
 

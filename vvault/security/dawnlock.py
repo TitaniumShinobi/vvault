@@ -26,11 +26,11 @@ import uuid
 
 # Import VVAULT components
 from capsuleforge import CapsuleForge, CapsuleData
-from vvault_core import VVAULTCore
-from security_layer import VVAULTSecurityLayer, ThreatType
-from leak_sentinel import LeakSentinel
+from vvault.memory.vvault_core import VVAULTCore
+from vvault.security.security_layer import VVAULTSecurityLayer, ThreatType
+from vvault.security.leak_sentinel import LeakSentinel
 from capsule_blockchain_integration import VVAULTCapsuleBlockchain
-from audit_compliance import AuditCompliance, AuditLevel
+from vvault.audit.audit_compliance import AuditCompliance, AuditLevel
 
 logger = logging.getLogger(__name__)
 
@@ -1016,7 +1016,7 @@ def dawnlock_trigger(
     Convenience function to trigger Dawnlock protocol
     
     Usage:
-        from dawnlock import dawnlock_trigger, ThreatCategory, ThreatSeverity
+        from vvault.security.dawnlock from vvault.security import dawnlock_trigger, ThreatCategory, ThreatSeverity
         
         dawnlock_trigger(
             construct_name="Nova",

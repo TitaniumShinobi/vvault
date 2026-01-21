@@ -171,8 +171,8 @@ class ContinuityBridge:
         if not instructions:
             # Try to extract provider styles from memories
             try:
-                from provider_memory_router import ProviderMemoryRouter
-                from style_extractor import StyleExtractor
+                from vvault.continuity.provider_memory_router import ProviderMemoryRouter
+                from vvault.continuity.style_extractor import StyleExtractor
                 
                 router = ProviderMemoryRouter()
                 extractor = StyleExtractor()
@@ -271,7 +271,7 @@ class ContinuityBridge:
             Import result
         """
         if use_fast_importer:
-            from fast_memory_import import FastMemoryImporter
+            from vvault.memory.fast_memory_import import FastMemoryImporter
             
             importer = FastMemoryImporter(
                 construct_id=construct_id,

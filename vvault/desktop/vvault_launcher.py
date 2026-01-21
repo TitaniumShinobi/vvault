@@ -30,12 +30,12 @@ PROJECT_DIR = "/Users/devonwoodson/Documents/GitHub/VVAULT"
 sys.path.append(PROJECT_DIR)
 
 # Import VVAULT components
-from vvault_gui import VVAULTApp
+from vvault.desktop.vvault_gui import VVAULTApp
 from process_manager import VVAULTProcessManager, ProcessConfig
 from capsule_viewer import CapsuleViewer
-from security_layer import VVAULTSecurityLayer
-from blockchain_sync import VVAULTBlockchainSync
-from desktop_login import VVAULTLoginScreen
+from vvault.security.security_layer import VVAULTSecurityLayer
+from vvault.blockchain.blockchain_sync import VVAULTBlockchainSync
+from vvault.desktop.desktop_login import VVAULTLoginScreen
 
 # Configure logging
 logging.basicConfig(

@@ -29,7 +29,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 
-from blockchain_identity_wallet import VVAULTBlockchainWallet, BlockchainType
+from vvault.blockchain.blockchain_identity_wallet import VVAULTBlockchainWallet, BlockchainType
 
 logger = logging.getLogger(__name__)
 

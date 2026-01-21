@@ -27,7 +27,7 @@ from capsule_blockchain_integration import (
     create_blockchain_capsule,
     verify_all_capsules
 )
-from blockchain_identity_wallet import BlockchainType
+from vvault.blockchain.blockchain_identity_wallet import BlockchainType
 
 class TestIPFSManager(unittest.TestCase):
     """Test IPFS integration functionality"""

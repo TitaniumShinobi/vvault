@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from user_capsule_forge import UserCapsuleForge, UserInteraction, UserPreference, ConstructRelationship
+from vvault.memory.user_capsule_forge import UserCapsuleForge, UserInteraction, UserPreference, ConstructRelationship
 
 
 def load_user_profile(user_id: str) -> dict:

@@ -21,13 +21,13 @@ from datetime import datetime, timezone
 # Add current directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from blockchain_identity_wallet import (
+from vvault.blockchain.blockchain_identity_wallet import (
     VVAULTBlockchainWallet, BlockchainType, SecurityLevel, KeyType,
     WalletIdentity, KeyPair, Transaction, IdentityAttestation,
     HardwareSecurityModule, BlockchainConnector
 )
-from blockchain_config import BlockchainConfigManager, BlockchainNetwork, NetworkType
-from backup_recovery import BackupManager, BackupType, RecoveryPhrase
+from vvault.blockchain.blockchain_config import BlockchainConfigManager, BlockchainNetwork, NetworkType
+from vvault.audit.backup_recovery import BackupManager, BackupType, RecoveryPhrase
 
 class TestVVAULTBlockchainWallet(unittest.TestCase):
     """Test cases for VVAULTBlockchainWallet"""

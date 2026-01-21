@@ -21,7 +21,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 
 from capsuleforge import CapsuleForge, CapsuleData, CapsuleMetadata, PersonalityProfile, MemorySnapshot, EnvironmentalState, AdditionalDataFields
-from quantum_identity_engine import QuantumIdentityEngine, QuantumIdentity, HeuristicSignal
+from vvault.continuity.quantum_identity_engine import QuantumIdentityEngine, QuantumIdentity, HeuristicSignal
 
 # Configure logging
 logging.basicConfig(

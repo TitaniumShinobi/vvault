@@ -85,7 +85,7 @@ def main():
     
     try:
         # Import and run the launcher with login
-        from vvault_launcher import VVAULTDesktopLauncher
+        from vvault.desktop.vvault_launcher import VVAULTDesktopLauncher
         
         print("🎯 Initializing VVAULT Desktop Launcher...")
         launcher = VVAULTDesktopLauncher()

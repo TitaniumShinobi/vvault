@@ -96,11 +96,11 @@ def test_vvault_components():
         print("✅ capsule_viewer imported successfully")
         
         # Test security layer
-        from security_layer import VVAULTSecurityLayer
+        from vvault.security.security_layer import VVAULTSecurityLayer
         print("✅ security_layer imported successfully")
         
         # Test blockchain sync
-        from blockchain_sync import VVAULTBlockchainSync
+        from vvault.blockchain.blockchain_sync import VVAULTBlockchainSync
         print("✅ blockchain_sync imported successfully")
         
         return True

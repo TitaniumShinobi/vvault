@@ -6,7 +6,7 @@ Test script for VVAULT Core functionality
 import os
 import json
 import logging
-from vvault_core import VVAULTCore, store_capsule, retrieve_capsule, add_tag, list_capsules
+from vvault.memory.vvault_core import VVAULTCore, store_capsule, retrieve_capsule, add_tag, list_capsules
 from capsuleforge import generate_capsule
 
 # Configure logging

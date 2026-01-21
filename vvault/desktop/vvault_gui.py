@@ -496,7 +496,7 @@ Features:
         try:
             # Import blockchain components
             sys.path.append(self.PROJECT_DIR)
-            from blockchain_identity_wallet import VVAULTBlockchainWallet, BlockchainType
+            from vvault.blockchain.blockchain_identity_wallet import VVAULTBlockchainWallet, BlockchainType
             
             # Initialize wallet
             wallet = VVAULTBlockchainWallet(
