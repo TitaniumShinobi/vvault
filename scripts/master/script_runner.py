@@ -15,7 +15,7 @@ SCRIPTS = {
     "Monitors changes in a specific folder and updates the short-term memory pool.",
     "nova_identity_guardian.py":
     "Monitors identity files for integrity and updates the short-term memory pool.",
-    "independent_runner.py":
+    "independence.py":
     "Runs and monitors multiple scripts, restarting them if they terminate.",
     "aviator_script.py":
     "Manages and monitors scripts, providing logging and process management.",
