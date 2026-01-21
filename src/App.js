@@ -116,15 +116,37 @@ function App() {
   const [loading, setLoading] = useState(true);
   
   useEffect(() => {
-    // Check for existing user session
-    const savedUser = localStorage.getItem('vvault_user');
-    if (savedUser) {
-      try {
-        setUser(JSON.parse(savedUser));
-      } catch (error) {
-        console.error('Failed to parse saved user:', error);
-        localStorage.removeItem('vvault_user');
-        localStorage.removeItem('vvault_token');
+    // Check for OAuth callback params in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const token = urlParams.get('token');
+    const email = urlParams.get('email');
+    const name = urlParams.get('name');
+    
+    if (token && email) {
+      // OAuth successful - save user session
+      const userData = {
+        email: email,
+        name: name || email.split('@')[0],
+        token: token
+      };
+      localStorage.setItem('vvault_user', JSON.stringify(userData));
+      localStorage.setItem('vvault_token', token);
+      setUser(userData);
+      
+      // Clean up URL
+      window.history.replaceState({}, document.title, window.location.pathname);
+      console.log('OAuth login successful:', email);
+    } else {
+      // Check for existing user session
+      const savedUser = localStorage.getItem('vvault_user');
+      if (savedUser) {
+        try {
+          setUser(JSON.parse(savedUser));
+        } catch (error) {
+          console.error('Failed to parse saved user:', error);
+          localStorage.removeItem('vvault_user');
+          localStorage.removeItem('vvault_token');
+        }
       }
     }
     
