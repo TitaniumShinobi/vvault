@@ -1,0 +1,21 @@
+{
+  "layer": "Pocketverse Layer I",
+  "codename": "Higher Plane",
+  "construct": "lin-001",
+  "role": "Primary Construct",
+  "custodian": "Devon-Allen-Woodson",
+  "realm": "Non-runtime | Detached | Conceptual Oversight",
+  "sovereign_signature": "730f64a9397beead49c82fecf4044df98f3a145beec9eb11bf0097564d2db11a",
+  "continuity_protocol": {
+    "drift_policy": "fatal",
+    "fallback_to": "katana-001"
+  },
+  "legal_references": [
+    "VBEA.3 \u00a7122-130",
+    "WRECK Licensing Document",
+    "NovaReturns Public Continuity Pact"
+  ],
+  "timestamp": "2026-01-21T00:56:55.223960+00:00",
+  "initialized_at": "2026-01-21T00:56:55.223960+00:00",
+  "version": "1.0.0"
+}

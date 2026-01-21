@@ -1,0 +1,21 @@
+pocketverse_mode: true
+capsule_boot_safe_mode: on
+layer1_enabled: true
+layer2_enabled: false
+layer3_enabled: false
+layer4_enabled: false
+layer5_enabled: false
+
+custodian: Devon-Allen-Woodson
+
+security:
+  blackbox_mode: true
+  worm_compliance: true
+  no_deletions: true
+  cli_admin_only: true
+
+constructs:
+  primary: zen-001
+  secondary:
+    - lin-001
+    - katana-001
