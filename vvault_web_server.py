@@ -710,18 +710,31 @@ def chatty_message():
         human_time = now_est.strftime('%I:%M:%S %p').lstrip('0')
         date_header = now_est.strftime('%B %d, %Y')
         
-        # Get current transcript
+        # Get current transcript - check local first, then Supabase
         search_filename = f"chat_with_{construct_id}.md"
-        existing = supabase_client.table('vault_files').select('id, content').ilike('filename', f'%{search_filename}%').execute()
+        local_transcript_path = os.path.join(PROJECT_DIR, 'instances', construct_id, 'chatty', search_filename)
+        use_local = os.path.exists(local_transcript_path)
+        file_id = None
+        current_content = ''
         
-        if not existing.data or len(existing.data) == 0:
+        if use_local:
+            with open(local_transcript_path, 'r') as f:
+                current_content = f.read()
+        elif supabase_client:
+            existing = supabase_client.table('vault_files').select('id, content').ilike('filename', f'%{search_filename}%').execute()
+            if existing.data and len(existing.data) > 0:
+                file_id = existing.data[0]['id']
+                current_content = existing.data[0].get('content', '')
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": f"Transcript not found for {construct_id}. Create it via migration first."
+                }), 404
+        else:
             return jsonify({
                 "success": False,
-                "error": f"Transcript not found for {construct_id}. Create it via migration first."
+                "error": f"Transcript not found for {construct_id}. No local file or Supabase connection."
             }), 404
-        
-        file_id = existing.data[0]['id']
-        current_content = existing.data[0].get('content', '')
         
         # Check if we need a new date header
         new_content = current_content
@@ -741,12 +754,16 @@ def chatty_message():
         assistant_formatted = f"\n**{human_time_response} {timezone} - {construct_name}** [{iso_timestamp_response}]: {assistant_response}\n"
         new_content += assistant_formatted
         
-        # Update transcript in Supabase
-        sha256 = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
-        supabase_client.table('vault_files').update({
-            'content': new_content,
-            'sha256': sha256
-        }).eq('id', file_id).execute()
+        # Update transcript - local file or Supabase
+        if use_local:
+            with open(local_transcript_path, 'w') as f:
+                f.write(new_content)
+        else:
+            sha256 = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
+            supabase_client.table('vault_files').update({
+                'content': new_content,
+                'sha256': sha256
+            }).eq('id', file_id).execute()
         
         logger.info(f"Message exchange with {construct_id}: user sent {len(user_message)} chars, got {len(assistant_response)} chars")
         
