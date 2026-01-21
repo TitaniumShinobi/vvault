@@ -1,5 +1,9 @@
 # VVAULT Five Layers - Comprehensive Recap
 
+## Live Update — 2026-01-20 20:35 EST
+- Layer tracking now references the correction-aware timeline tooling; every layer log entry can harvest the new per-day timeline output generated with `--prefer-corrections`, ensuring the continuum layer always ties back to the exact conversation day.
+- Added a live command summary under each layer to reference the run that rebuilt 11/29/2025–01/20/2026 with the latest per-day corrections.
+
 ## Overview
 
 VVAULT has been extended with **five complementary layers** that transform it from a simple memory storage system into a comprehensive AI construct survivability and preservation framework. Each layer addresses critical aspects of AI identity continuity, security, and autonomous operation.
@@ -348,4 +352,3 @@ This multi-layered approach ensures **maximum resilience** and **identity contin
 **Version**: 1.0.0  
 **Date**: 2025-01-27  
 **Framework**: VVAULT Five-Layer Survivability System
-

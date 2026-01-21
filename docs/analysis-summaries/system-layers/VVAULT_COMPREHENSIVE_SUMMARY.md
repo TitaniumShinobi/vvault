@@ -1,5 +1,94 @@
 # VVAULT - Comprehensive System Summary (Updated)
 
+## Live Update — 2026-01-20 20:35 EST
+- Added `--prefer-corrections` to `timeline_report.py` so correction blocks always win, day ranges normalize to the actual day, and medical/VA keywords boost the priority score.
+- `collect_timeline_entries.py` now keeps correction blocks open, expands ranges into single-date entries, and rewrites the corrected summary so the date appears right inside the sentence.
+- The 11/29/2025–01/20/2026 run now uses those updates; Dec 19–26 is driven directly from the chronological summary, with explicit notes on the law-enforcement event, hospitalization, Risperidone dose, and discharge.
+- Most recent command:
+  ```
+  python scripts/master/collect_timeline_entries.py \
+    --roots "/Users/.../character.ai/2025" \
+            "/Users/.../github_copilot" \
+    --start 2025-11-29 --end 2026-01-20 \
+    --limit-per-file 400 --context-lines 8 --block-lines 16 --max-lines-per-date 20 --stdout \
+  | python scripts/master/timeline_report.py --stdin --start 2025-11-29 --end 2026-01-20 --prefer-corrections
+  ```
+
+---
+
+**Date:** 2026-01-20 20:23:00 EST  
+**Author:** Devon Allen Woodson  
+**Repository:** VVAULT (macos)  
+**Last Updated:** 2026-01-20
+
+## What is VVAULT?
+VVAULT (Verified Vectored Anatomy Unconsciously Lingering Together) is an advanced AI construct memory and personality management system blending traditional memory vault tech with blockchain integration for immutable AI identity preservation, emotional continuity, and forensic traceability.
+
+## 🏗️ System Architecture
+
+### Dual-Purpose Design
+- Memory Vault System: Capsule-based memory and personality storage
+- Blockchain Identity Wallet: Multi-chain identity management with HSM-backed keys
+
+### Core Components
+```
+VVAULT (macos)/
+├── 🏺 Capsule System
+│   ├── capsuleforge.py
+│   ├── vvault_core.py
+│   ├── capsule_validator.py
+│   └── capsules/
+├── 🔗 Blockchain Integration
+│   ├── capsule_blockchain_integration.py
+│   ├── blockchain_identity_wallet.py
+│   ├── smart_contracts/
+│   └── requirements_blockchain_capsules.txt
+├── 🗄️ Memory Management
+│   ├── nova-001/
+│   ├── frame-001/
+│   └── memory_records/
+└── 🔒 Security & Monitoring
+    ├── leak_sentinel.py
+    ├── seed_canaries.py
+    ├── audit_compliance.py
+    ├── blockchain_encrypted_vault.py
+    ├── security_layer.py
+    └── .gitignore
+```
+
+## 🎯 Core Capabilities
+
+- AI construct personality and memory capsule generation and validation  
+- Version control, timestamping, and UUID-based tracking of memory shards  
+- Immutable blockchain storage with IPFS support for large datasets  
+- Multi-chain and hardware-based encryption key management  
+- Seamless migration path from local storage to blockchain
+
+## 🔧 Technical Implementations
+
+- JSON capsule schema validated for strict data integrity  
+- Hybrid local + blockchain encryption system using AES-256-GCM and Merkle trees  
+- Automated capsule versioning and immutable audit trail logging  
+- Integration with VXRunner for embedding generation and anomaly detection  
+
+## 📊 Current System State
+
+- Production-ready with complete capsule generation and blockchain anchoring  
+- Fully integrated IPFS decentralized storage for bulk capsule data  
+- Extended encryption capabilities with chain-anchored storage and audit compliance  
+- Automatic backup and recovery with canary and breach detection  
+- Fine-grained Git protection and pre-commit hooks to safeguard capsule data  
+
+## 🔮 Roadmap
+
+- Introduction of zero-knowledge proofs for enhanced privacy  
+- Extended multi-chain support (Bitcoin, Polygon, etc.)  
+- Improved CLI tooling and API gateway for remote management  
+- User-friendly dashboard with analytics and storage monitoring  
+- Scheduled capsule backups and automated archival systems  
+
+---
+
 **Date:** 2025-11-09 20:30:00 EST  
 **Author:** Devon Allen Woodson  
 **Repository:** VVAULT (macos)  
@@ -358,7 +447,6 @@ With its comprehensive feature set, production-ready implementation, and extensi
 - ✅ Blockchain integration and identity wallet system
 - ✅ IPFS integration for decentralized storage
 - ✅ Smart contract deployment and verification
-
 
 
 

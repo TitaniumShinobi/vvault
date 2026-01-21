@@ -1,5 +1,15 @@
 # VVAULT File Structure Specification
 
+## Live Update — 2026-01-20 20:35 EST
+- Correction-driven timeline tooling now breaks every chronological summary range into per-day entries, normalizes the text to include the actual date, and captures the resulting chunk so the ledger mirrors reality.
+- `timeline_report.py` offers `--prefer-corrections`, increasing the weight of hospital/VA keywords and day-specific sentences while demoting generic range headers and PDFs.
+- `collect_timeline_entries.py` now detects live “Chronological Summary / Summary of Events” blocks, keeps them open across blank lines, and emits them per day so Dec 19–26 reflects the forced hospitalization timeline verbatim.
+- Generated today with the command:
+  ```
+  python scripts/master/collect_timeline_entries.py ... --start 2025-11-29 --end 2026-01-20 ... --stdout \
+  | python scripts/master/timeline_report.py --stdin --start 2025-11-29 --end 2026-01-20 --prefer-corrections
+  ```
+
 **Last Updated**: January 27, 2025
 
 ## Overview
@@ -538,4 +548,3 @@ Every new user automatically receives two default constructs:
 5. ✅ Update memory index to reflect new structure
 6. ✅ Auto-create `synth-001` and `lin-001` for all users
 7. ⏳ Integrate Lin construct into GPT Creator Create tab
-
