@@ -200,9 +200,11 @@ const CinematicLogin = ({ onLogin }) => {
   };
 
   const handleOAuth = (provider) => {
-    // Simulate OAuth flow
-    console.log(`OAuth login with ${provider}`);
-    // In a real app, this would redirect to OAuth provider
+    if (provider === 'Google') {
+      window.location.href = '/api/auth/oauth/google';
+    } else {
+      console.log(`${provider} OAuth not yet implemented`);
+    }
   };
 
   const backgroundImage = isSignInMode ? 'vvault_sunrise.png' : 'vvault_sunset.png';

@@ -29,6 +29,7 @@ import secrets
 import jwt
 from datetime import datetime, timedelta
 import requests  # For Turnstile verification
+from oauthlib.oauth2 import WebApplicationClient
 
 # Supabase client for vault files
 try:
@@ -51,6 +52,19 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'vvault-secret-key-change-in-production'
 CORS(app, origins=["http://localhost:7784"])  # Allow requests from frontend
+
+# Google OAuth Configuration
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+GOOGLE_DISCOVERY_URL = "https://accounts.google.com/.well-known/openid-configuration"
+
+# Initialize Google OAuth client
+google_client = None
+if GOOGLE_CLIENT_ID:
+    google_client = WebApplicationClient(GOOGLE_CLIENT_ID)
+
+# Get Replit domain for OAuth callbacks
+REPLIT_DEV_DOMAIN = os.environ.get("REPLIT_DEV_DOMAIN", "localhost:5000")
 
 # Mock user database (replace with real database in production)
 USERS_DB = {
@@ -1021,6 +1035,134 @@ def verify_token():
     except Exception as e:
         logger.error(f"Token verification error: {e}")
         return jsonify({"success": False, "error": "Token verification failed"}), 500
+
+# Google OAuth Routes
+@app.route('/api/auth/oauth/google')
+def google_oauth_login():
+    """Initiate Google OAuth login"""
+    try:
+        from flask import redirect
+        
+        if not google_client or not GOOGLE_CLIENT_ID:
+            return jsonify({"success": False, "error": "Google OAuth not configured"}), 500
+        
+        # Get Google's OAuth endpoints
+        google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
+        authorization_endpoint = google_provider_cfg["authorization_endpoint"]
+        
+        # Build callback URL - use REPLIT_DEV_DOMAIN for Replit environment
+        if REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
+            host = REPLIT_DEV_DOMAIN
+        else:
+            host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
+        callback_url = f"https://{host}/api/auth/oauth/google/callback"
+        
+        # Prepare the OAuth request
+        request_uri = google_client.prepare_request_uri(
+            authorization_endpoint,
+            redirect_uri=callback_url,
+            scope=["openid", "email", "profile"],
+        )
+        
+        logger.info(f"Redirecting to Google OAuth with callback: {callback_url}")
+        return redirect(request_uri)
+        
+    except Exception as e:
+        logger.error(f"Google OAuth init error: {e}")
+        return jsonify({"success": False, "error": "OAuth initialization failed"}), 500
+
+@app.route('/api/auth/oauth/google/callback')
+def google_oauth_callback():
+    """Handle Google OAuth callback"""
+    try:
+        from flask import redirect
+        
+        if not google_client or not GOOGLE_CLIENT_ID:
+            return jsonify({"success": False, "error": "Google OAuth not configured"}), 500
+        
+        # Get the authorization code from Google
+        code = request.args.get("code")
+        if not code:
+            error = request.args.get("error", "Unknown error")
+            error_desc = request.args.get("error_description", "")
+            logger.error(f"OAuth error: {error} - {error_desc}")
+            return jsonify({"success": False, "error": f"OAuth failed: {error} - {error_desc}"}), 400
+        
+        # Get Google's OAuth endpoints
+        google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
+        token_endpoint = google_provider_cfg["token_endpoint"]
+        
+        # Build callback URL (must match initial request)
+        if REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
+            host = REPLIT_DEV_DOMAIN
+        else:
+            host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
+        callback_url = f"https://{host}/api/auth/oauth/google/callback"
+        authorization_response = f"https://{host}{request.full_path}"
+        
+        logger.info(f"Processing OAuth callback with redirect_url: {callback_url}")
+        
+        # Exchange authorization code for tokens
+        token_url, headers, body = google_client.prepare_token_request(
+            token_endpoint,
+            authorization_response=authorization_response,
+            redirect_url=callback_url,
+            code=code,
+        )
+        
+        token_response = requests.post(
+            token_url,
+            headers=headers,
+            data=body,
+            auth=(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET),
+        )
+        
+        # Parse the token response
+        google_client.parse_request_body_response(json.dumps(token_response.json()))
+        
+        # Get user info from Google
+        userinfo_endpoint = google_provider_cfg["userinfo_endpoint"]
+        uri, headers, body = google_client.add_token(userinfo_endpoint)
+        userinfo_response = requests.get(uri, headers=headers, data=body)
+        userinfo = userinfo_response.json()
+        
+        # Verify email
+        if not userinfo.get("email_verified"):
+            return jsonify({"success": False, "error": "Email not verified by Google"}), 400
+        
+        users_email = userinfo["email"]
+        users_name = userinfo.get("given_name", userinfo.get("name", "User"))
+        
+        # Create or get user in mock database
+        if users_email not in USERS_DB:
+            USERS_DB[users_email] = {
+                'password': None,
+                'name': users_name,
+                'role': 'user',
+                'oauth_provider': 'google'
+            }
+            logger.info(f"Created new OAuth user: {users_email}")
+        
+        # Create session token
+        session_token = secrets.token_urlsafe(32)
+        expires_at = datetime.now() + timedelta(hours=24)
+        
+        ACTIVE_SESSIONS[session_token] = {
+            'email': users_email,
+            'user_id': users_email,
+            'expires_at': expires_at,
+            'created_at': datetime.now()
+        }
+        
+        logger.info(f"Google OAuth login successful: {users_email}")
+        
+        # Redirect to frontend with token
+        frontend_url = f"https://{REPLIT_DEV_DOMAIN}"
+        return redirect(f"{frontend_url}/?token={session_token}&email={users_email}&name={users_name}")
+        
+    except Exception as e:
+        logger.error(f"Google OAuth callback error: {e}")
+        return jsonify({"success": False, "error": "OAuth callback failed"}), 500
 
 def get_current_user():
     """Helper function to get current user from token"""
