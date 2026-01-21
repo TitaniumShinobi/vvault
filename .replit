@@ -24,13 +24,13 @@ args = "Ollama LLM"
 name = "VVAULT Backend"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python vvault_web_server.py"
-waitForPort = 8000
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python vvault/server/vvault_web_server.py"
+waitForPort = 8000
 
 [[workflows.workflow]]
 name = "VVAULT Web App"
@@ -66,10 +66,6 @@ externalPort = 3000
 [[ports]]
 localPort = 8000
 externalPort = 8000
-
-[[ports]]
-localPort = 11434
-externalPort = 3001
 
 [agent]
 expertMode = true
