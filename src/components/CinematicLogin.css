@@ -11,20 +11,22 @@
 
 /* Enhanced Background Images with Overlays */
 .cinematic-login-container {
-  background-size: 100% auto;
-  background-position: center top;
+  background-size: cover;
+  background-position: center center;
   background-repeat: no-repeat;
   background-attachment: fixed;
+  background-color: #1a1a2e;
   position: relative;
 }
 
 /* Sunset Background - Observatory at Dusk with Enhanced Effects */
 .vvault-sunset-bg {
   background-image: url('/assets/vvault_sunset.png');
-  background-size: 100% auto;
-  background-position: center top;
+  background-size: cover;
+  background-position: center center;
   background-repeat: no-repeat;
   background-attachment: fixed;
+  background-color: #2d1f3d;
   position: relative;
 }
 
@@ -35,10 +37,11 @@
 /* Sunrise Background - Snowy Pine Landscape with Enhanced Effects */
 .vvault-sunrise-bg {
   background-image: url('/assets/vvault_sunrise.png');
-  background-size: 100% auto;
-  background-position: center top;
+  background-size: cover;
+  background-position: center center;
   background-repeat: no-repeat;
   background-attachment: fixed;
+  background-color: #3d2f1f;
   position: relative;
 }
 
