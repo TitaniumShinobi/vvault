@@ -259,16 +259,7 @@
 }
 
 .login-form-container::before {
-  content: '';
-  position: absolute;
-  top: -10px;
-  left: -10px;
-  right: -10px;
-  bottom: -10px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 15px;
-  backdrop-filter: blur(5px);
-  z-index: -1;
+  display: none;
 }
 
 /* Form Styling */
@@ -297,7 +288,7 @@
 .form-input {
   width: 100% !important;
   padding: 12px 16px !important;
-  border: 2px solid rgba(255, 255, 255, 0.5) !important;
+  border: none !important;
   border-radius: 8px !important;
   font-size: 1rem !important;
   transition: all 0.3s ease !important;
@@ -312,8 +303,7 @@
 
 .form-input:focus {
   outline: none !important;
-  border-color: rgba(255, 255, 255, 0.9) !important;
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.2) !important;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.3) !important;
   background: rgba(255, 255, 255, 0.2) !important;
 }
 
@@ -441,7 +431,7 @@
   align-items: center;
   justify-content: center;
   padding: 10px 16px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
+  border: none;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.1);
   color: white;
