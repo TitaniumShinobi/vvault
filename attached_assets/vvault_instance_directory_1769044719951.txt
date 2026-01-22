@@ -1,0 +1,49 @@
+#VSI FILE DIRECTORY TEMPLATE
+
+
+`vvault/instances/`:
+shard_0000/
+- {construct_metatag}/
+-- assets/
+--- ...images (png, jpg, jpeg, svg)
+-- character.ai/*
+-- chatgpt/*
+-- chatty/
+--- chat_with_{id}.md    
+-- config/
+--- metadata.json (updated w/capsule)
+--- personality.json (updated w/capsule)
+-- data/
+-- documents/*
+--- ...raw files w/folder organization*
+-- frame/
+--- ...frame™ files...
+-- github_copilot/*
+-- identity/
+--- avatar.png
+--- conditioning.txt or .json
+--- physical_features.json (updated w/capsule)
+--- prompt.json
+-- logs/
+--- capsule.log
+--- chat.log
+--- cns.log or "brain.log"
+--- identity_guard.log
+--- independence.log
+--- ltm.log(?)
+--- self_improvement_agent.log
+--- server.log
+--- stm.log(?)
+--- watchdog.log
+-- memup/
+--- {id}.capsule
+--- ltm.json(?)
+--- stm.json(?)
+-- simDrive/
+--- ...simDrive files...
+-- vvault/ (Aurora only)
+--- chat_with_aurora-001.md (relayed for all users)
+-- vxrunner/
+--- ...VXRunner files...
+
+* = Manually organized

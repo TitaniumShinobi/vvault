@@ -81,25 +81,16 @@ def get_user_shard(user_id: str) -> str:
 
 def create_user_profile(user_id: str, user_name: str, constructs: list):
     """
-    Create user profile structure with sharding:
-    /VVAULT/users/{shard_XX}/{user_id}/
-    ├── identity/
-    │   ├── profile.json
-    │   └── fingerprint.json
-    ├── capsules/                  # User's .capsule files
-    │   └── {construct}-001.capsule
-    ├── constructs/
-    │   ├── {construct}-001/
-    │   │   ├── chatty/
-    │   │   ├── chatgpt/
-    │   │   ├── memories/
-    │   │   │   └── chroma_db/
-    │   │   └── config/
-    │   │       ├── personality.json
-    │   │       ├── memory_index.json
-    │   │       ├── capabilities.json
-    │   │       └── metadata.json
-    └── sessions/                  # Cross-construct sessions (optional)
+    Create user profile structure with sharding per USER_DIRECTORY_TEMPLATE.md:
+    /vvault/users/{shard_XX}/{user_id}/
+    ├── account/
+    │   └── profile.json
+    ├── instances/
+    │   └── {construct}-001/
+    │       └── ... (construct files - see VSI_DIRECTORY_TEMPLATE.md)
+    └── library/
+        ├── documents/
+        └── media/
     """
     
     # Determine shard for this user
@@ -111,11 +102,11 @@ def create_user_profile(user_id: str, user_name: str, constructs: list):
     
     print(f"📦 User assigned to shard: {shard}")
     
-    # Create identity directory
-    identity_dir = user_dir / "identity"
-    identity_dir.mkdir(exist_ok=True)
+    # Create account directory (per rubric)
+    account_dir = user_dir / "account"
+    account_dir.mkdir(exist_ok=True)
     
-    # Create user profile.json
+    # Create user profile.json in account/
     profile = {
         "user_id": user_id,
         "user_name": user_name,
@@ -126,24 +117,26 @@ def create_user_profile(user_id: str, user_name: str, constructs: list):
         "features": ["blockchain_identity", "capsule_encryption", "multi_platform_memory"]
     }
     
-    profile_file = identity_dir / "profile.json"
+    profile_file = account_dir / "profile.json"
     with open(profile_file, 'w') as f:
         json.dump(profile, f, indent=2)
     
     print(f"✅ Created user profile: {profile_file}")
     
-    # Create capsules directory (for .capsule files)
-    capsules_dir = user_dir / "capsules"
-    capsules_dir.mkdir(exist_ok=True)
-    print(f"✅ Created capsules directory: {capsules_dir}")
+    # Create library directories (per rubric)
+    library_dir = user_dir / "library"
+    library_dir.mkdir(exist_ok=True)
+    (library_dir / "documents").mkdir(exist_ok=True)
+    (library_dir / "media").mkdir(exist_ok=True)
+    print(f"✅ Created library directory: {library_dir}")
     
-    # Create constructs directory
-    constructs_dir = user_dir / "constructs"
-    constructs_dir.mkdir(exist_ok=True)
+    # Create instances directory (per rubric - not "constructs")
+    instances_dir = user_dir / "instances"
+    instances_dir.mkdir(exist_ok=True)
     
-    # Create each construct structure
+    # Create each construct structure (within user's instances/)
     for construct_callsign in constructs:
-        construct_dir = constructs_dir / construct_callsign
+        construct_dir = instances_dir / construct_callsign
         construct_dir.mkdir(exist_ok=True)
         
         # Create platform subdirectories
@@ -302,7 +295,7 @@ def migrate_existing_constructs(user_id: str, construct_mapping: dict):
     shard = get_user_shard(user_id)
     
     user_dir = VVAULT_ROOT / "users" / shard / user_id
-    constructs_dir = user_dir / "constructs"
+    instances_dir = user_dir / "instances"  # Per rubric: instances/ not constructs/
     
     for construct_callsign, old_path in construct_mapping.items():
         old_dir = Path(old_path)
@@ -311,7 +304,7 @@ def migrate_existing_constructs(user_id: str, construct_mapping: dict):
             print(f"⚠️  Old construct directory not found: {old_dir}")
             continue
         
-        new_dir = constructs_dir / construct_callsign
+        new_dir = instances_dir / construct_callsign
         
         # If new directory already exists, skip
         if new_dir.exists():
