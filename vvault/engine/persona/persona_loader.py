@@ -28,9 +28,7 @@ class PersonaLoader:
     
     def __init__(self, vvault_root: Optional[str] = None):
         self.vvault_root = Path(vvault_root) if vvault_root else Path(__file__).parent.parent.parent
-        self.instances_dir = self.vvault_root / "vvault" / "instances"
-        if not self.instances_dir.exists():
-            self.instances_dir = self.vvault_root / "instances"
+        self.instances_dir = self.vvault_root / "instances"
         self._cache: Dict[str, PersonaContext] = {}
     
     def _find_construct_path(self, construct_id: str) -> Optional[Path]:

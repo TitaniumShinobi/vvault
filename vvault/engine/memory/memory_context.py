@@ -38,9 +38,7 @@ class MemoryContextBuilder:
     
     def __init__(self, vvault_root: Optional[str] = None, max_stm: int = 20, max_ltm: int = 10):
         self.vvault_root = Path(vvault_root) if vvault_root else Path(__file__).parent.parent.parent
-        self.instances_dir = self.vvault_root / "vvault" / "instances"
-        if not self.instances_dir.exists():
-            self.instances_dir = self.vvault_root / "instances"
+        self.instances_dir = self.vvault_root / "instances"
         self.max_stm = max_stm
         self.max_ltm = max_ltm
     
