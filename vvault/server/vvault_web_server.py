@@ -88,6 +88,131 @@ USERS_DB = {
 # Active sessions (replace with Redis/database in production)
 ACTIVE_SESSIONS = {}
 
+# Audit log for zero trust compliance
+AUTH_AUDIT_LOG = []
+
+def log_auth_decision(action: str, user_id: str, resource: str, result: str, reason: str = None, ip: str = None):
+    """Log authentication/authorization decisions for zero trust audit trail"""
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "action": action,
+        "user_id": user_id,
+        "resource": resource,
+        "result": result,
+        "reason": reason,
+        "ip_address": ip,
+        "user_agent": request.headers.get('User-Agent', 'unknown') if request else None
+    }
+    AUTH_AUDIT_LOG.append(entry)
+    if len(AUTH_AUDIT_LOG) > 10000:
+        AUTH_AUDIT_LOG.pop(0)
+    
+    log_level = logging.INFO if result == "allowed" else logging.WARNING
+    logger.log(log_level, f"AUTH: {action} | user={user_id} | resource={resource} | result={result} | reason={reason}")
+
+def get_current_user():
+    """Extract and validate current user from request token"""
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return None, None
+        
+        token = auth_header.split(' ')[1]
+        
+        if token not in ACTIVE_SESSIONS:
+            return None, None
+        
+        session = ACTIVE_SESSIONS[token]
+        
+        if datetime.now() > session['expires_at']:
+            del ACTIVE_SESSIONS[token]
+            return None, None
+        
+        return session, token
+    except Exception as e:
+        logger.error(f"Error in get_current_user: {e}")
+        return None, None
+
+def require_auth(f):
+    """Zero Trust: Decorator to require authentication on every request"""
+    from functools import wraps
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        session, token = get_current_user()
+        ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        
+        if not session:
+            log_auth_decision(
+                action="access_attempt",
+                user_id="anonymous",
+                resource=request.path,
+                result="denied",
+                reason="no_valid_session",
+                ip=ip
+            )
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+        
+        log_auth_decision(
+            action="access_granted",
+            user_id=session.get('email', 'unknown'),
+            resource=request.path,
+            result="allowed",
+            reason="valid_session",
+            ip=ip
+        )
+        
+        request.current_user = session
+        request.current_token = token
+        return f(*args, **kwargs)
+    return decorated_function
+
+def require_role(*roles):
+    """Zero Trust: Decorator to require specific role(s) for access"""
+    from functools import wraps
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            session, token = get_current_user()
+            ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+            
+            if not session:
+                log_auth_decision(
+                    action="role_check",
+                    user_id="anonymous",
+                    resource=request.path,
+                    result="denied",
+                    reason="no_valid_session",
+                    ip=ip
+                )
+                return jsonify({"success": False, "error": "Authentication required"}), 401
+            
+            user_role = session.get('role', 'user')
+            if user_role not in roles:
+                log_auth_decision(
+                    action="role_check",
+                    user_id=session.get('email', 'unknown'),
+                    resource=request.path,
+                    result="denied",
+                    reason=f"insufficient_role: has={user_role}, needs={roles}",
+                    ip=ip
+                )
+                return jsonify({"success": False, "error": "Insufficient permissions"}), 403
+            
+            log_auth_decision(
+                action="role_check",
+                user_id=session.get('email', 'unknown'),
+                resource=request.path,
+                result="allowed",
+                reason=f"role_match: {user_role}",
+                ip=ip
+            )
+            
+            request.current_user = session
+            request.current_token = token
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
 def verify_turnstile_token(token: str, remote_ip: str = None) -> bool:
     """Verify Cloudflare Turnstile token"""
     try:
@@ -333,6 +458,7 @@ def get_status():
     return jsonify(api.get_status())
 
 @app.route('/api/capsules')
+@require_auth
 def get_capsules():
     """Get list of all capsules"""
     try:
@@ -347,6 +473,7 @@ def get_capsules():
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/capsules/<capsule_name>')
+@require_auth
 def get_capsule(capsule_name):
     """Get data for a specific capsule"""
     try:
@@ -363,6 +490,7 @@ def get_capsule(capsule_name):
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/capsules', methods=['POST'])
+@require_auth
 def create_capsule():
     """Create a new capsule"""
     try:
@@ -379,6 +507,7 @@ def create_capsule():
 
 
 @app.route('/api/human-capsule', methods=['POST'])
+@require_auth
 def ingest_human_capsule():
     """Ingest Chatty/neat human personalization capsule and persist to VVAULT."""
     try:
@@ -414,6 +543,7 @@ def health_check():
     })
 
 @app.route('/api/vault/files')
+@require_auth
 def get_vault_files():
     """Get all vault files from Supabase"""
     try:
@@ -438,6 +568,7 @@ def get_vault_files():
         }), 500
 
 @app.route('/api/vault/files/<file_id>')
+@require_auth
 def get_vault_file(file_id):
     """Get a single vault file by ID"""
     try:
@@ -455,6 +586,7 @@ def get_vault_file(file_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/chatty/transcript/<construct_id>')
+@require_auth
 def get_chatty_transcript(construct_id):
     """Get chat transcript for a construct - used by Chatty integration
     
@@ -489,6 +621,7 @@ def get_chatty_transcript(construct_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/chatty/transcript/<construct_id>', methods=['POST'])
+@require_auth
 def update_chatty_transcript(construct_id):
     """Update or create chat transcript for a construct - used by Chatty integration
     
@@ -532,6 +665,7 @@ def update_chatty_transcript(construct_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/chatty/transcript/<construct_id>/message', methods=['POST'])
+@require_auth
 def append_chatty_message(construct_id):
     """Append a single message to a construct's transcript
     
@@ -597,6 +731,7 @@ def append_chatty_message(construct_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/chatty/constructs')
+@require_auth
 def get_chatty_constructs():
     """Get all available constructs with chat transcripts"""
     try:
@@ -636,6 +771,7 @@ def get_chatty_constructs():
 
 
 @app.route('/api/chatty/message', methods=['POST'])
+@require_auth
 def chatty_message():
     """Handle a message to a construct and return LLM response
     
@@ -818,6 +954,50 @@ def _load_construct_identity(construct_id: str, construct_name: str) -> str:
         logger.warning(f"Could not load identity for {construct_id}: {e}")
         return f"You are {construct_name}, an AI assistant. Be helpful, concise, and friendly."
 
+
+# Zero Trust Audit API
+@app.route('/api/admin/audit-log')
+@require_role('admin')
+def get_audit_log():
+    """Get authentication audit log - admin only (Zero Trust telemetry)"""
+    limit = request.args.get('limit', 100, type=int)
+    result_filter = request.args.get('result', None)
+    
+    logs = AUTH_AUDIT_LOG[-limit:]
+    
+    if result_filter:
+        logs = [l for l in logs if l.get('result') == result_filter]
+    
+    return jsonify({
+        "success": True,
+        "audit_log": logs,
+        "total_entries": len(AUTH_AUDIT_LOG),
+        "returned": len(logs)
+    })
+
+@app.route('/api/admin/security-summary')
+@require_role('admin')
+def get_security_summary():
+    """Get zero trust security summary - admin only"""
+    total = len(AUTH_AUDIT_LOG)
+    denied = len([l for l in AUTH_AUDIT_LOG if l.get('result') == 'denied'])
+    allowed = len([l for l in AUTH_AUDIT_LOG if l.get('result') == 'allowed'])
+    
+    unique_users = set(l.get('user_id') for l in AUTH_AUDIT_LOG if l.get('user_id') != 'anonymous')
+    anonymous_attempts = len([l for l in AUTH_AUDIT_LOG if l.get('user_id') == 'anonymous'])
+    
+    return jsonify({
+        "success": True,
+        "summary": {
+            "total_auth_events": total,
+            "allowed": allowed,
+            "denied": denied,
+            "denial_rate": round(denied / total * 100, 2) if total > 0 else 0,
+            "unique_users": len(unique_users),
+            "anonymous_attempts": anonymous_attempts,
+            "active_sessions": len(ACTIVE_SESSIONS)
+        }
+    })
 
 # Legal document routes
 @app.route('/terms-of-service.html')
@@ -1168,31 +1348,6 @@ def google_oauth_callback():
     except Exception as e:
         logger.error(f"Google OAuth callback error: {e}")
         return jsonify({"success": False, "error": "OAuth callback failed"}), 500
-
-def get_current_user():
-    """Helper function to get current user from token"""
-    try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return None
-        
-        token = auth_header.split(' ')[1]
-        
-        if token not in ACTIVE_SESSIONS:
-            return None
-        
-        session = ACTIVE_SESSIONS[token]
-        
-        # Check if session expired
-        if datetime.now() > session['expires_at']:
-            del ACTIVE_SESSIONS[token]
-            return None
-        
-        return session['email']
-        
-    except Exception as e:
-        logger.error(f"Get current user error: {e}")
-        return None
 
 # Error handlers
 @app.errorhandler(404)
