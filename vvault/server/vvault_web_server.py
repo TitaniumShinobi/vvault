@@ -189,27 +189,39 @@ def db_get_session(token: str) -> Optional[Dict]:
         return None
 
 def db_get_user(email: str) -> Optional[Dict]:
-    """Get user from database with fallback to local admin"""
+    """Get user from database with fallback to local storage"""
     try:
+        supabase_user = None
+        fallback_user = USERS_DB_FALLBACK.get(email)
+        
         if supabase_client:
             result = supabase_client.table('users').select('*').eq('email', email).execute()
             if result.data:
-                user = result.data[0]
-                return {
-                    'id': user['id'],
-                    'email': user['email'],
-                    'name': user.get('name'),
-                    'password_hash': user.get('password_hash'),
-                    'role': user.get('role', 'user'),
-                    'oauth_provider': user.get('oauth_provider')
-                }
+                supabase_user = result.data[0]
         
-        if email in USERS_DB_FALLBACK:
-            return USERS_DB_FALLBACK[email]
+        if supabase_user:
+            user_data = {
+                'id': supabase_user['id'],
+                'email': supabase_user['email'],
+                'name': supabase_user.get('name'),
+                'password_hash': supabase_user.get('password_hash'),
+                'role': supabase_user.get('role', 'user'),
+                'oauth_provider': supabase_user.get('oauth_provider'),
+                'source': 'supabase'
+            }
+            if not user_data['password_hash'] and fallback_user:
+                user_data['password_hash'] = fallback_user.get('password_hash')
+                user_data['role'] = fallback_user.get('role', 'user')
+            return user_data
+        
+        if fallback_user:
+            fallback_user['source'] = 'fallback'
+            return fallback_user
         return None
     except Exception as e:
         logger.error(f"Failed to get user from database: {e}")
         if email in USERS_DB_FALLBACK:
+            USERS_DB_FALLBACK[email]['source'] = 'fallback'
             return USERS_DB_FALLBACK[email]
         return None
 
@@ -1221,7 +1233,8 @@ def login():
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
-    """User registration endpoint"""
+    """User registration endpoint with bcrypt password hashing and Supabase storage"""
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     try:
         data = request.get_json()
         email = data.get('email', '').strip().lower()
@@ -1230,65 +1243,93 @@ def register():
         name = data.get('name', '').strip()
         turnstile_token = data.get('turnstileToken', '')
         
-        # Validate input
         if not email or not password or not confirm_password or not name:
+            log_auth_decision('registration_failed', 'anonymous', '/api/auth/register', 'denied', 'missing_fields', ip)
             return jsonify({"success": False, "error": "All fields are required"}), 400
         
-        # Validate email format
         if '@' not in email or '.' not in email.split('@')[1]:
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'invalid_email', ip)
             return jsonify({"success": False, "error": "Invalid email format"}), 400
         
-        # Validate password confirmation
         if password != confirm_password:
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'password_mismatch', ip)
             return jsonify({"success": False, "error": "Passwords do not match"}), 400
         
-        # Validate password strength
-        if len(password) < 6:
-            return jsonify({"success": False, "error": "Password must be at least 6 characters"}), 400
+        if len(password) < 8:
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'weak_password', ip)
+            return jsonify({"success": False, "error": "Password must be at least 8 characters"}), 400
         
-        # Check if user already exists
-        if email in USERS_DB:
+        existing_user = db_get_user(email)
+        if existing_user and existing_user.get('source') != 'fallback':
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'user_exists', ip)
             return jsonify({"success": False, "error": "User already exists"}), 409
         
-        # Verify Turnstile token
         if not verify_turnstile_token(turnstile_token, request.remote_addr):
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'turnstile_failed', ip)
             return jsonify({"success": False, "error": "Human verification failed. Please try again."}), 400
         
-        # Create new user (in production, hash the password)
-        USERS_DB[email] = {
-            'password': password,  # In production, use proper password hashing
-            'name': name,
-            'role': 'user',
-            'created_at': datetime.now().isoformat()
-        }
+        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         
-        # Generate session token
+        user_stored = False
+        if supabase_client:
+            try:
+                supabase_client.table('users').insert({
+                    'email': email,
+                    'password_hash': password_hash,
+                    'name': name,
+                    'role': 'user',
+                    'created_at': datetime.now().isoformat()
+                }).execute()
+                logger.info(f"User registered in Supabase: {email}")
+                user_stored = True
+            except Exception as e:
+                if 'password_hash' in str(e) or 'role' in str(e):
+                    logger.warning(f"Supabase schema missing columns, using basic insert: {e}")
+                    try:
+                        supabase_client.table('users').insert({
+                            'email': email,
+                            'name': name,
+                            'created_at': datetime.now().isoformat()
+                        }).execute()
+                        USERS_DB_FALLBACK[email] = {
+                            'password_hash': password_hash,
+                            'name': name,
+                            'role': 'user'
+                        }
+                        logger.info(f"User registered in Supabase (basic) + local fallback: {email}")
+                        user_stored = True
+                    except Exception as e2:
+                        logger.error(f"Failed to register in Supabase: {e2}")
+                else:
+                    logger.error(f"Failed to register in Supabase: {e}")
+        
+        if not user_stored:
+            USERS_DB_FALLBACK[email] = {
+                'password_hash': password_hash,
+                'name': name,
+                'role': 'user'
+            }
+            logger.info(f"User registered in local fallback: {email}")
+        
         token = secrets.token_urlsafe(32)
         expires_at = datetime.now() + timedelta(hours=24)
+        db_create_session(email, 'user', token, expires_at)
         
-        ACTIVE_SESSIONS[token] = {
-            'email': email,
-            'expires_at': expires_at,
-            'created_at': datetime.now()
-        }
-        
-        user_data = {
-            'email': email,
-            'name': name,
-            'role': 'user'
-        }
-        
+        user_data = {'email': email, 'name': name, 'role': 'user'}
+        log_auth_decision('registration_success', email, '/api/auth/register', 'allowed', 'user_created', ip)
         logger.info(f"New user registered: {email}")
         
         return jsonify({
             "success": True,
             "user": user_data,
             "token": token,
+            "expires_at": expires_at.isoformat(),
             "message": "Registration successful"
         })
         
     except Exception as e:
         logger.error(f"Registration error: {e}")
+        log_auth_decision('registration_error', 'unknown', '/api/auth/register', 'denied', str(e), ip)
         return jsonify({"success": False, "error": "Registration failed"}), 500
 
 @app.route('/api/auth/logout', methods=['POST'])

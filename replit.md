@@ -182,3 +182,30 @@ VVAULT serves as the stateful backend for Chatty (and any frontend). Key endpoin
 - **Indexes**: JSON indexes in `indexes/` directory for fast retrieval
 - **ChromaDB**: Vector database for embedding persistence (optional)
 - **SQLite**: Audit logs and compliance data
+
+## Zero Trust Security Implementation
+
+### Current Status (Phase 1 MVP)
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Per-request authorization middleware | ✅ Active | @require_auth, @require_role decorators |
+| Database-backed sessions | ✅ Active | In-memory fallback when Supabase table unavailable |
+| bcrypt password hashing | ✅ Active | All new registrations use bcrypt |
+| Audit logging | ✅ Active | log_auth_decision tracks all auth events |
+| Turnstile CAPTCHA | ✅ Active | Bot protection on registration |
+
+### Required Supabase Migration
+Run `docs/migrations/add_auth_columns.sql` in Supabase SQL Editor to enable full database-backed auth:
+- Adds `password_hash` column to users table
+- Adds `role` column to users table
+- Creates `user_sessions` table for persistent sessions
+
+### Authentication Flow
+1. Login: bcrypt verify → create session (DB or memory) → return token
+2. Request: Bearer token → db_get_session → validate expiration → allow/deny
+3. Audit: All auth decisions logged to AUTH_AUDIT_LOG
+
+### Fallback Behavior
+- **Missing session table**: Auto-detects and uses in-memory sessions
+- **Missing password_hash column**: Merges Supabase user with local fallback storage
+- **Test admin**: admin@vvault.com / admin123 (only when Supabase unavailable)
