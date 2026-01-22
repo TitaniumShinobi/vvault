@@ -1,0 +1,14 @@
+The Home page cycles the Chatty.png logo into a collapsing text animation by swapping through specific sprite frames stored under /assets/logo/ (see Home.tsx (lines 18-86)). There’s a primaryHoverFrames sequence that runs when you hover (startLogoCycle) and a separate per-letter schedule (letterConfigs) that animates each character of “Chatty” by swapping in variants like c'H'atty.png/chat'T'y.png/chatt'Y' plus collapsed versions—each letter animation is played once per hover cycle and is scheduled by letterScheduleMs (lines 18‑140).
+
+The animation runner (runFrameSequence, lines 219‑253) keeps track of a frame index, sets logoSrc, waits holdFirstMs on the first frame, and then advances at stepMs until the final frame before calling the completion callback. Hover state hooks (startLogoCycle/stopLogoCycle, lines 265‑318) ensure the hover animation plays only once per cursor entry by locking with hoverLockedRef, resetting the logo to Chatty.png when the cursor leaves, and preventing the sequence from restarting mid-flight.
+
+Inactivity tracking (lines 182‑215) watches mouse/keyboard/click events; after each idle threshold defined in letterScheduleMs, it triggers the per-letter animation so the text periodically “collapses on itself” even without hover, keeping the home logo lively.
+
+---
+
+The collapse animation is what happens when you hover over the logo: startLogoCycle runs primaryHoverFrames (Chatty → collapsed frames → Chatty) with locked hover state so the cycle plays once per hover, holding the initial frame slightly longer before the rapid swaps (see runFrameSequence and hoverLockedRef around Home.tsx (lines 219-318)).
+The inactivity animation is the scheduled, letter-by-letter effect that fires every 60 s (then 120, 180, etc.) of idle time; it runs letterConfigs sequences (e.g., c'H'atty.png) through runFrameSequence via runLetterCheck, so each letter temporarily “collapses on itself” even without hover (see letterScheduleMs, runLetterCheck, and the idle timer setup around Home.tsx (lines 122-215)).
+
+---
+
+The distinction came from cursor_implementing_inactivity_animatio.md—that discussion drills into the Home logo’s two behaviors (hover-driven collapse vs. scheduled inactivity jiggle) and the animation sequences/resets defined in Home.tsx (see lines around 18‑140 and 93‑134 in that doc).
