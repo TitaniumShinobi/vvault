@@ -1,6 +1,12 @@
 # VSI File Directory Template
 ## VVAULT Shard Instance - Construct Organization
 
+### Construct ID Format
+Construct IDs use millisecond timestamps (not sequential numbers):
+- **Format**: `{name}-{milliseconds_timestamp}`
+- **Example**: `aurora-1769045516087` (not `aurora-001`)
+- **Why**: Guarantees uniqueness, encodes creation time, sortable
+
 `vvault/instances/`:
 ```
 shard_0000/
