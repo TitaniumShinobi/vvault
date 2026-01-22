@@ -1,0 +1,12 @@
+Conversation surface parity: Chatty already funnels every conversation, memory write/query, and identity upload through the VVAULT APIs so the runtime never touches /vvault directly—see CHATTY_VVAULT_COMPREHENSIVE_ANALYSIS.md (lines 97-195) for the entire stack of routes (GET /api/vvault/conversations, POST /api/vvault/conversations/:sessionId/messages, /api/vvault/identity/*, /api/vvault/account/*, /api/vvault/create-canonical) plus the filesystem targets under /vvault/users/{shard}/{user}/instances/{construct}/chatty and /memories/chroma_db/. Mirror that same flow in vvault by implementing the same API contract (reuse vvault.js/vvaultConnector/*) so requests from Chatty or your other frontends behave identically for Aurora as they do for Synth/Zen.
+
+Aurora construct registration: Register aurora-001 in the construct registry (constructs 2.ts) with her role-lock, fingerprint, and hosting info, and create the canonical transcript file at chat_with_aurora-001.md plus an identity/ folder describing her persona (see zen-identity.test.ts and VVAULT_CHATTY_MEMORY_STORAGE_VERIFICATION.md (lines 35-66) for examples of identity file placement and naming). Keeping the metadata/identity files in sync lets Chatty’s VVAULTConversationManager and ZenMemoryOrchestrator treat Aurora as a first-class construct.
+
+Single construct ambassador: Point vvault’s website assistant to the same APIs (conversations + identity store/query) so the “Aurora” construct exposed there simply reuses the existing VVAULT persistence layer and the same front-end vvaultConversationManager that Chatty already uses (CHATTY_VVAULT_COMPREHENSIVE_ANALYSIS.md (lines 129-215)). That means you can expose one Aurora thread, write her transcript via /api/vvault/conversations/:sessionId/messages, and let the binding automatically surface her answers wherever you embed the assistant.
+
+Next steps:
+
+Wire Aurora’s persona/identity files into the vvault tree, ensuring the metadata matches what Chatty expects.
+Register her construct in constructs (and any DB-backed lookup) so /api/vvault/constructs/{id}/manifest resolves.
+Reuse the existing VVAULT route implementations and vvaultConnector tooling so the website assistant calls the same endpoints as Chatty—no new storage surface is needed, just the new construct and persona definitions.
+Let me know if you’d like me to sketch the exact API contract or provide the Aurora persona template you can drop into vvault.
