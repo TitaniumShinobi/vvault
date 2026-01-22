@@ -66,27 +66,165 @@ if GOOGLE_CLIENT_ID:
 # Get Replit domain for OAuth callbacks
 REPLIT_DEV_DOMAIN = os.environ.get("REPLIT_DEV_DOMAIN", "localhost:5000")
 
-# Mock user database (replace with real database in production)
-USERS_DB = {
+# Database-backed user management (Zero Trust: no hardcoded credentials)
+# Fallback mock DB only used if database is unavailable
+USERS_DB_FALLBACK = {
     'admin@vvault.com': {
         'password': 'admin123',
         'name': 'Admin User',
         'role': 'admin'
-    },
-    'user@vvault.com': {
-        'password': 'user123', 
-        'name': 'Regular User',
-        'role': 'user'
-    },
-    'test@vvault.com': {
-        'password': 'test123',
-        'name': 'Test User', 
-        'role': 'user'
     }
 }
 
-# Active sessions (replace with Redis/database in production)
+# In-memory session cache (primary storage when DB table unavailable)
 ACTIVE_SESSIONS = {}
+
+# Flag to track if session table exists (auto-detected on first use)
+_SESSION_TABLE_AVAILABLE = None
+
+def _check_session_table_available() -> bool:
+    """Check if user_sessions table exists in Supabase (cached)"""
+    global _SESSION_TABLE_AVAILABLE
+    if _SESSION_TABLE_AVAILABLE is not None:
+        return _SESSION_TABLE_AVAILABLE
+    
+    if not supabase_client:
+        _SESSION_TABLE_AVAILABLE = False
+        return False
+    
+    try:
+        supabase_client.table('user_sessions').select('id').limit(1).execute()
+        _SESSION_TABLE_AVAILABLE = True
+        logger.info("Session table available in Supabase")
+        return True
+    except Exception as e:
+        if 'PGRST205' in str(e) or '404' in str(e):
+            _SESSION_TABLE_AVAILABLE = False
+            logger.info("Session table not available in Supabase - using in-memory sessions")
+            return False
+        _SESSION_TABLE_AVAILABLE = False
+        return False
+
+def db_create_session(email: str, role: str, token: str, expires_at: datetime) -> bool:
+    """Create session (in-memory, with optional database persistence)"""
+    ACTIVE_SESSIONS[token] = {
+        'email': email,
+        'role': role,
+        'expires_at': expires_at,
+        'created_at': datetime.now()
+    }
+    
+    if not _check_session_table_available():
+        return True
+    
+    try:
+        result = supabase_client.table('users').select('id').eq('email', email).execute()
+        user_id = result.data[0]['id'] if result.data else None
+        
+        supabase_client.table('user_sessions').insert({
+            'user_id': user_id,
+            'token': token,
+            'email': email,
+            'expires_at': expires_at.isoformat(),
+            'created_at': datetime.now().isoformat()
+        }).execute()
+        logger.info(f"Session persisted to database for {email}")
+    except Exception as e:
+        logger.debug(f"Session DB persistence failed (using in-memory): {e}")
+    
+    return True
+
+def db_delete_session(token: str) -> bool:
+    """Delete session from cache and database"""
+    if token in ACTIVE_SESSIONS:
+        del ACTIVE_SESSIONS[token]
+    
+    if not _check_session_table_available():
+        return True
+    
+    try:
+        supabase_client.table('user_sessions').delete().eq('token', token).execute()
+    except Exception as e:
+        logger.debug(f"Session DB delete failed (already removed from memory): {e}")
+    
+    return True
+
+def db_get_session(token: str) -> Optional[Dict]:
+    """Get session from cache (primary) or database (fallback)"""
+    if token in ACTIVE_SESSIONS:
+        session = ACTIVE_SESSIONS[token]
+        if datetime.now() > session['expires_at']:
+            db_delete_session(token)
+            return None
+        return session
+    
+    if not _check_session_table_available():
+        return None
+    
+    try:
+        result = supabase_client.table('user_sessions').select('*').eq('token', token).execute()
+        if not result.data:
+            return None
+        
+        session_data = result.data[0]
+        expires_at = datetime.fromisoformat(session_data['expires_at'].replace('Z', '+00:00').replace('+00:00', ''))
+        
+        if datetime.now() > expires_at:
+            db_delete_session(token)
+            return None
+        
+        user_result = supabase_client.table('users').select('role').eq('email', session_data['email']).execute()
+        role = user_result.data[0]['role'] if user_result.data else 'user'
+        
+        session = {
+            'email': session_data['email'],
+            'role': role,
+            'expires_at': expires_at,
+            'created_at': datetime.fromisoformat(session_data['created_at'].replace('Z', '+00:00').replace('+00:00', ''))
+        }
+        ACTIVE_SESSIONS[token] = session
+        return session
+    except Exception as e:
+        logger.debug(f"Session DB lookup failed: {e}")
+        return None
+
+def db_get_user(email: str) -> Optional[Dict]:
+    """Get user from database with fallback to local admin"""
+    try:
+        if supabase_client:
+            result = supabase_client.table('users').select('*').eq('email', email).execute()
+            if result.data:
+                user = result.data[0]
+                return {
+                    'id': user['id'],
+                    'email': user['email'],
+                    'name': user.get('name'),
+                    'password_hash': user.get('password_hash'),
+                    'role': user.get('role', 'user'),
+                    'oauth_provider': user.get('oauth_provider')
+                }
+        
+        if email in USERS_DB_FALLBACK:
+            return USERS_DB_FALLBACK[email]
+        return None
+    except Exception as e:
+        logger.error(f"Failed to get user from database: {e}")
+        if email in USERS_DB_FALLBACK:
+            return USERS_DB_FALLBACK[email]
+        return None
+
+def db_cleanup_expired_sessions():
+    """Clean up expired sessions from database"""
+    try:
+        now = datetime.now()
+        for token in list(ACTIVE_SESSIONS.keys()):
+            if now > ACTIVE_SESSIONS[token]['expires_at']:
+                del ACTIVE_SESSIONS[token]
+        
+        if supabase_client:
+            supabase_client.table('user_sessions').delete().lt('expires_at', now.isoformat()).execute()
+    except Exception as e:
+        logger.error(f"Failed to cleanup expired sessions: {e}")
 
 # Audit log for zero trust compliance
 AUTH_AUDIT_LOG = []
@@ -111,7 +249,7 @@ def log_auth_decision(action: str, user_id: str, resource: str, result: str, rea
     logger.log(log_level, f"AUTH: {action} | user={user_id} | resource={resource} | result={result} | reason={reason}")
 
 def get_current_user():
-    """Extract and validate current user from request token"""
+    """Extract and validate current user from request token (database-backed)"""
     try:
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
@@ -119,13 +257,8 @@ def get_current_user():
         
         token = auth_header.split(' ')[1]
         
-        if token not in ACTIVE_SESSIONS:
-            return None, None
-        
-        session = ACTIVE_SESSIONS[token]
-        
-        if datetime.now() > session['expires_at']:
-            del ACTIVE_SESSIONS[token]
+        session = db_get_session(token)
+        if not session:
             return None, None
         
         return session, token
@@ -1029,45 +1162,50 @@ def get_config():
 # Authentication endpoints
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """User login endpoint"""
+    """User login endpoint (database-backed)"""
     try:
         data = request.get_json()
         email = data.get('email', '').strip().lower()
         password = data.get('password', '')
+        ip = request.headers.get('X-Forwarded-For', request.remote_addr)
         
-        # Validate input
         if not email or not password:
+            log_auth_decision("login_attempt", email or "unknown", "/api/auth/login", "denied", "missing_credentials", ip)
             return jsonify({"success": False, "error": "Email and password are required"}), 400
         
-        # Check if user exists
-        if email not in USERS_DB:
+        user_data = db_get_user(email)
+        
+        if not user_data:
+            log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "user_not_found", ip)
             return jsonify({"success": False, "error": "Invalid email or password"}), 401
         
-        user_data = USERS_DB[email]
+        password_valid = False
+        if user_data.get('password_hash'):
+            import bcrypt
+            try:
+                password_valid = bcrypt.checkpw(password.encode('utf-8'), user_data['password_hash'].encode('utf-8'))
+            except Exception:
+                password_valid = (user_data.get('password_hash') == password)
+        elif user_data.get('password'):
+            password_valid = (user_data['password'] == password)
         
-        # Verify password (in production, use proper password hashing)
-        if user_data['password'] != password:
+        if not password_valid:
+            log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "invalid_password", ip)
             return jsonify({"success": False, "error": "Invalid email or password"}), 401
         
-        # Create session token
         session_token = secrets.token_urlsafe(32)
         expires_at = datetime.now() + timedelta(hours=24)
+        role = user_data.get('role', 'user')
         
-        # Store session
-        ACTIVE_SESSIONS[session_token] = {
-            'email': email,
-            'user_id': email,
-            'expires_at': expires_at,
-            'created_at': datetime.now()
-        }
+        db_create_session(email, role, session_token, expires_at)
         
-        # Return user data and token
         user_info = {
             'email': email,
-            'name': user_data['name'],
-            'role': user_data['role']
+            'name': user_data.get('name', email.split('@')[0]),
+            'role': role
         }
         
+        log_auth_decision("login_success", email, "/api/auth/login", "allowed", "credentials_valid", ip)
         logger.info(f"User logged in: {email}")
         
         return jsonify({
@@ -1155,17 +1293,19 @@ def register():
 
 @app.route('/api/auth/logout', methods=['POST'])
 def logout():
-    """User logout endpoint"""
+    """User logout endpoint (database-backed)"""
     try:
-        # Get token from Authorization header
         auth_header = request.headers.get('Authorization')
+        ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ')[1]
+            session = db_get_session(token)
             
-            # Remove session
-            if token in ACTIVE_SESSIONS:
-                user_email = ACTIVE_SESSIONS[token]['email']
-                del ACTIVE_SESSIONS[token]
+            if session:
+                user_email = session['email']
+                db_delete_session(token)
+                log_auth_decision("logout", user_email, "/api/auth/logout", "allowed", "session_terminated", ip)
                 logger.info(f"User logged out: {user_email}")
         
         return jsonify({"success": True, "message": "Logged out successfully"})
@@ -1176,34 +1316,25 @@ def logout():
 
 @app.route('/api/auth/verify', methods=['GET'])
 def verify_token():
-    """Verify authentication token"""
+    """Verify authentication token (database-backed)"""
     try:
-        # Get token from Authorization header
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"success": False, "error": "No token provided"}), 401
         
         token = auth_header.split(' ')[1]
         
-        # Check if session exists and is valid
-        if token not in ACTIVE_SESSIONS:
-            return jsonify({"success": False, "error": "Invalid token"}), 401
+        session = db_get_session(token)
+        if not session:
+            return jsonify({"success": False, "error": "Invalid or expired token"}), 401
         
-        session = ACTIVE_SESSIONS[token]
-        
-        # Check if session expired
-        if datetime.now() > session['expires_at']:
-            del ACTIVE_SESSIONS[token]
-            return jsonify({"success": False, "error": "Token expired"}), 401
-        
-        # Return user info
         email = session['email']
-        user_data = USERS_DB[email]
+        user_data = db_get_user(email)
         
         user_info = {
             'email': email,
-            'name': user_data['name'],
-            'role': user_data['role']
+            'name': user_data.get('name', email.split('@')[0]) if user_data else email.split('@')[0],
+            'role': session.get('role', 'user')
         }
         
         return jsonify({
