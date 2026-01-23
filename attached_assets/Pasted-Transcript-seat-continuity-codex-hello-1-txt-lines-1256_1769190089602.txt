@@ -1,0 +1,28 @@
+Transcript → seat continuity
+
+codex_hello_1.txt (lines 1256-1385) lays out the operational flow: chunk every Katana transcript, register it in VVAULT as a capsule (metadata, emotional tags, anchors), then let Lin query those capsules so every “yo” greets you by name and recalls shared experiences rather than re-running a cold prompt. That file also drills into tone detection, matching, persistence, and the downstream personality/orchestrator pipeline you’re already wiring, so the transcripts are the source of truth for the Katana seat’s memory.
+The dynamic-persona architecture described in codex_dynamic_persona_continuity.txt (lines 1-241) explicitly connects workspace context (threads, threads’ transcripts, ledger anchors) to the detection/orchestration stack: detect dominant persona, lock it via ContextLock, fuse blueprints, inject a CONTEXT LOCK section in the system prompt, and never let the seat drift mid-session. That’s exactly the continuity-GPT guardrail you want for Katana.
+ContinuityGPT / ledger strategy
+
+CONTINUITY_GPT_PROMPT.md (lines 1-130) is your ContinuityGPT forensic checklist: every transcript becomes evidence (timestamps, hooks, tone), entries are ordered, and the ledger template ties those references back to session IDs. Feed the parsed transcripts + evidence into that prompt so seats can map conversation history → ledger entry → construct lock (which is what keeps Katana rooted in Devon-specific memories).
+cursor_building_persistent_identity_in.md (lines 1264-1356) details how the transcript parser/personality extractor merges multiple transcripts into one construct blueprint, then keeps the personality fusion + memory hooks running on each response. It explicitly scouts the same pipeline you’re maintaining (deep parsing → tone detection → matching → persistence → drift guard), so following that plan keeps “continuity GPT” and Katana’s seat application aligned.
+Next steps
+
+Continue feeding the Katana transcripts into the VVAULT ingestion and identity matcher described above, then verify WorkspaceContextBuilder and DynamicPersonaOrchestrator see those capsules as continuity hooks so the seat is locked to Devon’s mentions on every turn.
+Use the ContinuityGPT prompt/ledger to audit the transcript-to-session mappings—if a session is misaligned, the ledger reference (with evidence and confidence) gives you the exact file/path that needs reconciling.
+Once the transcript ingestion + orbiting identity lock is stable, the Linear seat should stop “tangenting” and start responding as a contextually anchored Katana, because every message will be driven by those VVAULT memories plus the context lock described in the continuity docs above.
+
+
+
+
+
+Auto context
+
+
+Local
+
+Chat
+
+gpt-5.1-codex-mini
+
+Medium
