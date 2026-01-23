@@ -1,0 +1,39 @@
+The CHATTY_VVAULT_TRANSCRIPT_SAVING_RUBRIC defines a clean architecture:
+
+Single append-only markdown file per construct at instances/{construct-001}/chatty/chat_with_{construct-001}.md
+Immediate writes before UI shows "sent"
+No new .txt shards - everything in consolidated markdown
+Headers with metadata, chronological blocks, ISO timestamps
+Files Created for Transcript Uploads
+Backend:
+
+server/routes/transcripts.js - API for saving transcripts to Supabase with VVAULT path structure (vvault/users/shard_0000/{userId}/instances/{constructId}/{source}/{filename})
+Frontend (in GPTCreator.tsx):
+
+Transcript source dropdown (ChatGPT, Gemini, Grok, Copilot, Claude, Chai, Character.AI, DeepSeek, Other)
+Upload button with staging
+Dynamic file count badge
+Files for GPT Seat Connection Attempts
+server/lib/capsuleIntegration.js - Loads transcript data from instance directories (loadTranscriptData())
+server/lib/unifiedIntelligenceOrchestrator.js - Has getRelevantContext() for searching transcripts
+server/lib/gptRuntimeBridge.js - Routes GPT messages through orchestrator
+server/services/hybridMemoryService.js - Wrapper for memup integration
+Do We Need All 3 Memory Systems?
+Short answer: No. Here's the breakdown:
+
+System	Location	Status	Needed for Chatty?
+chatgpt-retrieval-plugin	frame™	Semantic search with embeddings	❌ No - requires separate infrastructure
+memup	frame™	Production-ready but needs Python + local ChromaDB	⚠️ Optional - adds complexity
+Chatty custom scripts	capsuleIntegration, MemoryRetrievalEngine	Works, loads transcripts	✅ Yes - simplest path
+Recommendation: Use only the Chatty custom scripts (capsuleIntegration.js). They already:
+
+Load transcripts from VVAULT path structure
+Parse and index conversations
+Search for relevant context via getRelevantContext()
+The missing piece is just routing that context to actual LLM calls instead of hardcoded template responses. The VVAULT already has your master identity scripts - we just need to connect them.
+
+Next step: Connect GPT seats to linChat.js with:
+
+User identity injection (from VVAULT)
+Transcript context from getRelevantContext()
+Replace template responses with actual LLM calls
