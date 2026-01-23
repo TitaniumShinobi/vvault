@@ -12,9 +12,15 @@ from typing import Dict, List, Optional, Any
 from pathlib import Path
 
 try:
-    from .chroma_config import get_long_term_collection, get_short_term_collection
+    from .chroma_config import (
+        get_long_term_collection, get_short_term_collection,
+        get_instance_chroma_path, get_instance_memory_summary
+    )
 except ImportError:
-    from chroma_config import get_long_term_collection, get_short_term_collection
+    from chroma_config import (
+        get_long_term_collection, get_short_term_collection,
+        get_instance_chroma_path, get_instance_memory_summary
+    )
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -25,31 +31,47 @@ SHORT_TERM_THRESHOLD_DAYS = 7
 class UnifiedMemoryBank:
     """
     Unified memory bank supporting both single-construct and multi-construct operations.
+    Each construct instance gets isolated ChromaDB storage at:
+      instances/{shard}/{construct_id}/memup/chroma/
+    
     Manages STM/LTM with ChromaDB, sovereign identity validation, and profile signatures.
     """
     
-    def __init__(self, construct_id: Optional[str] = None):
+    def __init__(self, construct_id: Optional[str] = None, shard: str = "shard_0000"):
         self.construct_id = construct_id
-        self.long_term = get_long_term_collection()
-        self.short_term = get_short_term_collection()
+        self.shard = shard
         self.construct_collections: Dict[str, Dict] = {}
-        logger.info(f"✅ UnifiedMemoryBank initialized" + (f" for {construct_id}" if construct_id else ""))
-
-    def _get_construct_collections(self, construct_id: str):
-        """Get or create collections for a specific construct"""
-        if construct_id not in self.construct_collections:
-            long_term_name = f"long_term_memory_{construct_id}"
-            short_term_name = f"short_term_memory_{construct_id}"
-            
-            long_term = get_long_term_collection(collection_name=long_term_name)
-            short_term = get_short_term_collection(collection_name=short_term_name)
-            
-            self.construct_collections[construct_id] = {
-                'long_term': long_term,
-                'short_term': short_term
-            }
         
-        return self.construct_collections[construct_id]
+        if construct_id:
+            self.long_term = get_long_term_collection(construct_id=construct_id, shard=shard)
+            self.short_term = get_short_term_collection(construct_id=construct_id, shard=shard)
+            logger.info(f"✅ UnifiedMemoryBank initialized for {construct_id} (shard: {shard})")
+        else:
+            self.long_term = get_long_term_collection()
+            self.short_term = get_short_term_collection()
+            logger.info(f"✅ UnifiedMemoryBank initialized (global)")
+
+    def _get_construct_collections(self, construct_id: str, shard: Optional[str] = None):
+        """
+        Get or create collections for a specific construct.
+        Each construct gets ISOLATED ChromaDB storage - no godpool!
+        """
+        shard = shard or self.shard
+        cache_key = f"{shard}/{construct_id}"
+        
+        if cache_key not in self.construct_collections:
+            long_term = get_long_term_collection(construct_id=construct_id, shard=shard)
+            short_term = get_short_term_collection(construct_id=construct_id, shard=shard)
+            
+            self.construct_collections[cache_key] = {
+                'long_term': long_term,
+                'short_term': short_term,
+                'shard': shard,
+                'path': get_instance_chroma_path(construct_id, shard)
+            }
+            logger.info(f"📦 Created isolated collections for {construct_id} at {self.construct_collections[cache_key]['path']}")
+        
+        return self.construct_collections[cache_key]
 
     def _determine_memory_type(self, timestamp_str: Optional[str] = None) -> str:
         """Determine if a memory should be short-term or long-term based on timestamp."""

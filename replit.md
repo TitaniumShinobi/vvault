@@ -92,7 +92,12 @@ The `memup/` folder is the real-time memory processing pipeline shared between V
 - Instance capsules (`.capsule` files in construct directories)
 - Identity files (prompt.json, traits, etc. that evolve with construct)
 
-**Multi-Construct Support**: `UnifiedMemoryBank("zen-001")` creates construct-specific collections
+**Per-Instance Isolation** (no godpool!): `UnifiedMemoryBank("zen-001", shard="shard_0000")` creates isolated ChromaDB storage at:
+```
+instances/shard_0000/zen-001/memup/chroma/
+├── long_term/
+└── short_term/
+```
 
 - **Fast Memory Import**: Streaming batch processing for 100k+ lines with ChromaDB persistence and parallel embedding generation
 - **Schema Gate**: JSON schema validation for memory records ensuring data integrity
