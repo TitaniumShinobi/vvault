@@ -73,7 +73,27 @@ Preferred communication style: Simple, everyday language.
 - **VVAULT Core**: Manages capsule storage/retrieval with automatic versioning, tagging, and SHA-256 integrity validation
 - **Capsule Validator**: Strict schema validation with Merkle chain verification and canary token leak detection
 
-### Memory Management
+### Memory Management (memup/)
+The `memup/` folder is the real-time memory processing pipeline shared between VVAULT and Chatty. Files are mirrored to Supabase storage (`vault-files/memup/`) for cross-platform access.
+
+**Architecture**: New interactions flow through stm/ltm collectors → bank.py processes → routes to destinations
+
+| File | Purpose |
+|------|---------|
+| `stm.py` | Short-term memory collector - captures new interactions for immediate processing |
+| `ltm.py` | Long-term memory collector - handles durable memory storage and retrieval |
+| `bank.py` | Unified memory bank - processes collected memories, routes to proper destinations |
+| `memcheck.py` | Memory validation - checks memory integrity and consistency |
+| `context.py` | Context tracking - maintains conversation context state |
+| `chroma_config.py` | ChromaDB configuration - vector database settings |
+
+**Routing Destinations** (from bank.py):
+- ChromaDB collections (long_term_memory, short_term_memory, construct-specific)
+- Instance capsules (`.capsule` files in construct directories)
+- Identity files (prompt.json, traits, etc. that evolve with construct)
+
+**Multi-Construct Support**: `UnifiedMemoryBank("zen-001")` creates construct-specific collections
+
 - **Fast Memory Import**: Streaming batch processing for 100k+ lines with ChromaDB persistence and parallel embedding generation
 - **Schema Gate**: JSON schema validation for memory records ensuring data integrity
 - **Time Relay Engine**: Nonlinear memory replay with relay depth tracking and entropy management
