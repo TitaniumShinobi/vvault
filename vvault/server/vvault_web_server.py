@@ -1485,9 +1485,9 @@ def google_oauth_callback():
         users_email = userinfo["email"]
         users_name = userinfo.get("given_name", userinfo.get("name", "User"))
         
-        # Create or get user in mock database
-        if users_email not in USERS_DB:
-            USERS_DB[users_email] = {
+        # Create or get user in fallback database
+        if users_email not in USERS_DB_FALLBACK:
+            USERS_DB_FALLBACK[users_email] = {
                 'password': None,
                 'name': users_name,
                 'role': 'user',
