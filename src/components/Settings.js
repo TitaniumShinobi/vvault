@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   buildDefaultProfile,
   getSchema,
   toVvaultCapsulePayload
 } from '../engine/orchestration/personalizationProfileService';
 
-const Settings = ({ systemInfo }) => {
+const Settings = ({ systemInfo, user }) => {
   const [settings, setSettings] = useState({
     autoSync: true,
     backupInterval: '24',
@@ -22,13 +22,20 @@ const Settings = ({ systemInfo }) => {
   const [schemaExported, setSchemaExported] = useState(false);
   const [capsuleExported, setCapsuleExported] = useState(false);
   
+  const getAuthHeaders = useCallback(() => {
+    const token = user?.token || localStorage.getItem('vvault_token');
+    return token ? { 'Authorization': `Bearer ${token}` } : {};
+  }, [user]);
+  
   useEffect(() => {
     loadConfig();
   }, []);
   
   const loadConfig = async () => {
     try {
-      const response = await fetch('/api/config');
+      const response = await fetch('/api/config', {
+        headers: getAuthHeaders()
+      });
       const data = await response.json();
       setConfig(data);
     } catch (error) {

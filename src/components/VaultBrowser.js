@@ -24,9 +24,16 @@ const VaultBrowser = ({ user }) => {
   const [viewMode, setViewMode] = useState('list');
   const [constructs, setConstructs] = useState([]);
 
+  const getAuthHeaders = useCallback(() => {
+    const token = user?.token || localStorage.getItem('vvault_token');
+    return token ? { 'Authorization': `Bearer ${token}` } : {};
+  }, [user]);
+
   const fetchConstructs = useCallback(async () => {
     try {
-      const response = await fetch('/api/chatty/constructs');
+      const response = await fetch('/api/chatty/constructs', {
+        headers: getAuthHeaders()
+      });
       const data = await response.json();
       if (data.success && data.constructs) {
         const formatted = data.constructs.map(c => ({
@@ -40,13 +47,15 @@ const VaultBrowser = ({ user }) => {
     } catch (err) {
       console.error('Failed to fetch constructs:', err);
     }
-  }, []);
+  }, [getAuthHeaders]);
 
   const fetchFiles = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('/api/vault/files');
+      const response = await fetch('/api/vault/files', {
+        headers: getAuthHeaders()
+      });
       const data = await response.json();
       if (data.success) {
         setFiles(data.files || []);
@@ -58,7 +67,7 @@ const VaultBrowser = ({ user }) => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     fetchFiles();
