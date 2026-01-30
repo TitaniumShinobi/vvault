@@ -174,6 +174,25 @@ VVAULT serves as the stateful backend for Chatty (and any frontend). Key endpoin
 **9:44:03 AM EST - Zen** [2026-01-20T14:44:03.123Z]: Hello Devon!
 ```
 
+### Service API (for FXShinobi/Chatty backend-to-backend)
+VVAULT serves as the config and credentials vault for external services.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/vault/health` | GET | Health check (no auth) - returns service status |
+| `/api/vault/configs/{service}` | GET | Get strategy configs for a service |
+| `/api/vault/configs/{service}` | POST | Store/update strategy configs |
+| `/api/vault/credentials/{key}` | GET | Get credential (decrypted) |
+| `/api/vault/credentials` | POST | Store credential (encrypted at rest) |
+
+**Authentication**: All config/credential endpoints require `Authorization: Bearer {VVAULT_SERVICE_TOKEN}` header.
+
+**Required Tables** (run `docs/migrations/add_service_api_tables.sql` in Supabase):
+- `strategy_configs` - Strategy parameters, symbols, risk limits
+- `service_credentials` - Encrypted API keys and secrets
+
+**See**: `docs/role-in-ecosystem.md` for full integration guide.
+
 ### LLM Backend (Ollama)
 - **Model**: qwen2.5:0.5b (small, fast, fits Replit memory)
 - **Port**: 11434 (internal)
