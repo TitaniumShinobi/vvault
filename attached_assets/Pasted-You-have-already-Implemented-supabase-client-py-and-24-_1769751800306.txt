@@ -1,0 +1,128 @@
+You have already:
+
+
+Implemented supabase_client.py and 24/7 worker.py with health, snapshot, trades, and performance APIs.
+
+
+Added vvault_client.py and integrated VVAULT‑backed config/credentials with env fallbacks.
+
+
+Updated docs/integration-with-chatty.md with API usage, VVAULT integration, runbook, and env vars.
+
+
+Currently: API is on port 5000, VVAULT is disabled, config source = defaults.
+
+
+Your goal now is to flip FXShinobi into full “live engine” mode, consuming real VVAULT + Supabase, and making sure Chatty can depend on it.
+Tasks:
+
+
+Finalize live‑mode wiring:
+
+
+Treat the combination:
+
+
+VVAULT_URL, VVAULT_SERVICE_TOKEN
+
+
+SUPABASE_URL, SUPABASE_KEY
+as the signal that we’re in “live” mode.
+
+
+
+
+Ensure that when those vars are present:
+
+
+vvault_client.py is used as the primary config/credential source.
+
+
+Supabase writes are active for trades, strategy runs, snapshots, health pings.
+
+
+
+
+
+
+Tighten health and status:
+
+
+Make /api/health and /api/status accurately reflect:
+
+
+VVAULT status (up/down/disabled),
+
+
+Supabase connectivity,
+
+
+Worker loop status (running / degraded).
+
+
+
+
+Make sure any failures are logged clearly but without leaking secrets.
+
+
+
+
+Confirm Chatty contracts:
+
+
+Re‑check docs/integration-with-chatty.md now that VVAULT is integrated:
+
+
+/api/snapshot, /api/trades/history, /api/performance, /api/status response shapes must match what Chatty expects.
+
+
+Keep the TypeScript examples and schemas aligned with what’s currently implemented.
+
+
+
+
+
+
+“Turnkey” start procedure:
+
+
+Ensure that one command (python worker.py) is enough to:
+
+
+Start the API on the configured port,
+
+
+Start the trading loop and health pings,
+
+
+Fail fast if core env vars are missing (with clear error).
+
+
+
+
+Add a short “LIVE START” section to the doc that lists:
+
+
+Required envs for full mode,
+
+
+Exact command to run,
+
+
+How to verify (health endpoint URLs and expected JSON).
+
+
+
+
+
+
+Deliverables:
+
+
+Confirmed code paths for live mode (uses VVAULT + Supabase).
+
+
+Polished /api/health and /api/status.
+
+
+Updated doc section detailing the exact steps for me to make FXShinobi run 24/7 as the Chatty finance engine.
