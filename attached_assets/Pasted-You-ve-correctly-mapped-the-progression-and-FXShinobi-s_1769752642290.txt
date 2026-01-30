@@ -1,0 +1,109 @@
+You’ve correctly mapped the progression and FXShinobi’s live‑mode contract:
+
+Live mode = VVAULT_URL + VVAULT_SERVICE_TOKEN + SUPABASE_URL + SUPABASE_KEY present
+VVAULT = configs/creds, Supabase = trades/events
+Goal: python worker.py in FXShinobi boots, pulls configs/creds from VVAULT, connects to broker, writes to Supabase, and surfaces through Chatty’s Finance tab.
+
+I want you to go ahead and build VVAULT’s service API layer now.
+Requirements
+
+
+Implement these endpoints, production‑ready:
+
+
+GET  /api/vault/configs/{service}
+
+
+Returns strategy configs for that service (e.g., fxshinobi): symbols, risk limits, params, enabled flags.
+
+
+
+
+GET  /api/vault/credentials/{key}
+
+
+Returns encrypted credentials (e.g., OANDA_API_KEY, OANDA_ACCOUNT_ID, KALSHI_API_KEY), never logs raw values.
+
+
+
+
+POST /api/vault/credentials
+
+
+Stores/updates credentials payloads { key, service, value, metadata? }, encrypts at rest, and redacts in logs.
+
+
+
+
+GET  /api/vault/health
+
+
+Returns { status: "ok" | "degraded" | "down", storeStatus: ... } so FXShinobi and Chatty can display health.
+
+
+
+
+
+
+Auth model:
+
+
+Use VVAULT_SERVICE_TOKEN header for backend‑to‑backend calls (FXShinobi, Chatty).
+
+
+Reject unauthenticated calls to configs/credentials with 401, but still return 200 on /api/vault/health with a clear message.
+
+
+
+
+Data model:
+
+
+Create or confirm internal storage for:
+
+
+strategy_configs (service, strategy_id, params JSON, risk limits, symbols, version, updated_at).
+
+
+service_credentials (key, service, encrypted_value, created_at, updated_at).
+
+
+
+
+Keep this tightly focused; Supabase stays the transactional store for trades/sessions.
+
+
+
+
+Documentation:
+
+
+Create/complete docs/role-in-ecosystem.md that:
+
+
+Describes the FXShinobi→VVAULT pattern exactly as you outlined.
+
+
+Documents these endpoints with request/response examples and error codes.
+
+
+Defines env vars: VVAULT_SERVICE_TOKEN, any DB/storage config, encryption key.
+
+
+Includes a short integration checklist for FXShinobi and Chatty (which endpoints they call, at what lifecycle points).
+
+
+
+
+
+
+When you’re done, I should be able to:
+
+
+Set VVAULT_URL and VVAULT_SERVICE_TOKEN in FXShinobi and Chatty.
+
+
+Call /api/vault/health, /api/vault/configs/fxshinobi, and /api/vault/credentials/OANDA_API_KEY successfully.
+
+
+Start python worker.py in FXShinobi and have it use VVAULT in live mode without code changes.

@@ -66,6 +66,63 @@ if GOOGLE_CLIENT_ID:
 # Get Replit domain for OAuth callbacks
 REPLIT_DEV_DOMAIN = os.environ.get("REPLIT_DEV_DOMAIN", "localhost:5000")
 
+# Service API Configuration (for FXShinobi/Chatty backend-to-backend calls)
+VVAULT_SERVICE_TOKEN = os.environ.get("VVAULT_SERVICE_TOKEN")
+VVAULT_ENCRYPTION_KEY = os.environ.get("VVAULT_ENCRYPTION_KEY", os.environ.get("SECRET_KEY", "default-encryption-key"))
+
+# Encryption helpers for service credentials
+from cryptography.fernet import Fernet
+import base64
+
+def _get_fernet_key():
+    """Generate a valid Fernet key from VVAULT_ENCRYPTION_KEY"""
+    key_bytes = VVAULT_ENCRYPTION_KEY.encode()[:32].ljust(32, b'0')
+    return base64.urlsafe_b64encode(key_bytes)
+
+def encrypt_credential(value: str) -> str:
+    """Encrypt a credential value"""
+    f = Fernet(_get_fernet_key())
+    return f.encrypt(value.encode()).decode()
+
+def decrypt_credential(encrypted_value: str) -> str:
+    """Decrypt a credential value"""
+    f = Fernet(_get_fernet_key())
+    return f.decrypt(encrypted_value.encode()).decode()
+
+# Service token auth decorator
+from functools import wraps
+
+def require_service_token(f):
+    """Decorator to require VVAULT_SERVICE_TOKEN for backend-to-backend calls"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization', '')
+        provided_token = None
+        
+        if auth_header.startswith('Bearer '):
+            provided_token = auth_header[7:]
+        elif auth_header.startswith('ServiceToken '):
+            provided_token = auth_header[13:]
+        else:
+            provided_token = request.headers.get('X-Service-Token')
+        
+        if not VVAULT_SERVICE_TOKEN:
+            logger.warning("SERVICE_API: VVAULT_SERVICE_TOKEN not configured")
+            return jsonify({
+                "success": False,
+                "error": "Service API not configured"
+            }), 503
+        
+        if provided_token != VVAULT_SERVICE_TOKEN:
+            logger.warning(f"SERVICE_API: Invalid service token attempt")
+            return jsonify({
+                "success": False,
+                "error": "Invalid service token"
+            }), 401
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
 # Database-backed user management (Zero Trust: no hardcoded credentials)
 # Fallback mock DB only used if database is unavailable
 USERS_DB_FALLBACK = {
@@ -729,6 +786,303 @@ def get_vault_file(file_id):
     except Exception as e:
         logger.error(f"Error fetching vault file: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+# ============================================================================
+# SERVICE API ENDPOINTS (for FXShinobi/Chatty backend-to-backend integration)
+# ============================================================================
+
+@app.route('/api/vault/health')
+def service_health():
+    """Service health check - returns VVAULT availability status
+    
+    No auth required - allows services to check if VVAULT is up before auth
+    """
+    supabase_status = "connected" if supabase_client else "not_configured"
+    service_api_status = "enabled" if VVAULT_SERVICE_TOKEN else "disabled"
+    
+    # Check Supabase connectivity
+    store_status = "unknown"
+    if supabase_client:
+        try:
+            supabase_client.table('strategy_configs').select('id').limit(1).execute()
+            store_status = "connected"
+        except Exception as e:
+            store_status = "error"
+            logger.debug(f"Supabase connectivity check failed: {e}")
+    else:
+        store_status = "not_configured"
+    
+    overall_status = "ok"
+    if store_status != "connected":
+        overall_status = "degraded"
+    if service_api_status == "disabled":
+        overall_status = "degraded"
+    
+    return jsonify({
+        "status": overall_status,
+        "service": "vvault",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat(),
+        "components": {
+            "supabase": supabase_status,
+            "store": store_status,
+            "service_api": service_api_status
+        },
+        "message": "VVAULT service API" if service_api_status == "enabled" else "Service API disabled (VVAULT_SERVICE_TOKEN not set)"
+    })
+
+@app.route('/api/vault/configs/<service>')
+@require_service_token
+def get_service_configs(service):
+    """Get strategy configs for a service (e.g., fxshinobi)
+    
+    Returns: symbols, risk limits, params, enabled flags
+    Auth: Requires VVAULT_SERVICE_TOKEN
+    """
+    try:
+        if not supabase_client:
+            return jsonify({
+                "success": False,
+                "error": "Supabase not configured"
+            }), 503
+        
+        result = supabase_client.table('strategy_configs').select('*').eq('service', service).execute()
+        
+        if not result.data:
+            # Return defaults if no configs found
+            return jsonify({
+                "success": True,
+                "service": service,
+                "configs": [],
+                "message": "No configs found, using defaults"
+            })
+        
+        configs = []
+        for row in result.data:
+            configs.append({
+                "strategy_id": row.get('strategy_id'),
+                "params": row.get('params', {}),
+                "symbols": row.get('symbols', []),
+                "risk_limits": row.get('risk_limits', {}),
+                "enabled": row.get('enabled', True),
+                "version": row.get('version', 1),
+                "updated_at": row.get('updated_at')
+            })
+        
+        logger.info(f"SERVICE_API: Configs retrieved for {service} ({len(configs)} strategies)")
+        
+        return jsonify({
+            "success": True,
+            "service": service,
+            "configs": configs
+        })
+        
+    except Exception as e:
+        logger.error(f"SERVICE_API: Error fetching configs for {service}: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to retrieve configs"
+        }), 500
+
+@app.route('/api/vault/credentials/<key>')
+@require_service_token
+def get_service_credential(key):
+    """Get a credential by key (decrypted)
+    
+    Auth: Requires VVAULT_SERVICE_TOKEN
+    NEVER logs the actual credential value
+    """
+    try:
+        if not supabase_client:
+            return jsonify({
+                "success": False,
+                "error": "Supabase not configured"
+            }), 503
+        
+        result = supabase_client.table('service_credentials').select('*').eq('key', key).execute()
+        
+        if not result.data:
+            logger.info(f"SERVICE_API: Credential not found: {key}")
+            return jsonify({
+                "success": False,
+                "error": f"Credential '{key}' not found"
+            }), 404
+        
+        row = result.data[0]
+        
+        try:
+            decrypted_value = decrypt_credential(row['encrypted_value'])
+        except Exception as decrypt_error:
+            logger.error(f"SERVICE_API: Decryption failed for {key}")
+            return jsonify({
+                "success": False,
+                "error": "Credential decryption failed"
+            }), 500
+        
+        logger.info(f"SERVICE_API: Credential retrieved: {key}")
+        
+        return jsonify({
+            "success": True,
+            "key": key,
+            "service": row.get('service'),
+            "value": decrypted_value,
+            "metadata": row.get('metadata', {}),
+            "updated_at": row.get('updated_at')
+        })
+        
+    except Exception as e:
+        logger.error(f"SERVICE_API: Error fetching credential {key}: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to retrieve credential"
+        }), 500
+
+@app.route('/api/vault/credentials', methods=['POST'])
+@require_service_token
+def store_service_credential():
+    """Store or update a credential (encrypted at rest)
+    
+    Request body: { key, service, value, metadata? }
+    Auth: Requires VVAULT_SERVICE_TOKEN
+    NEVER logs the actual credential value
+    """
+    try:
+        if not supabase_client:
+            return jsonify({
+                "success": False,
+                "error": "Supabase not configured"
+            }), 503
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "Request body required"}), 400
+        
+        key = data.get('key')
+        service = data.get('service', 'default')
+        value = data.get('value')
+        metadata = data.get('metadata', {})
+        
+        if not key or not value:
+            return jsonify({"success": False, "error": "key and value are required"}), 400
+        
+        # Encrypt the value
+        encrypted_value = encrypt_credential(value)
+        
+        # Upsert: update if exists, insert if not
+        existing = supabase_client.table('service_credentials').select('id').eq('key', key).eq('service', service).execute()
+        
+        if existing.data:
+            # Update existing
+            supabase_client.table('service_credentials').update({
+                'encrypted_value': encrypted_value,
+                'metadata': metadata,
+                'updated_at': datetime.now().isoformat()
+            }).eq('key', key).eq('service', service).execute()
+            action = "updated"
+        else:
+            # Insert new
+            supabase_client.table('service_credentials').insert({
+                'key': key,
+                'service': service,
+                'encrypted_value': encrypted_value,
+                'metadata': metadata,
+                'created_at': datetime.now().isoformat(),
+                'updated_at': datetime.now().isoformat()
+            }).execute()
+            action = "created"
+        
+        logger.info(f"SERVICE_API: Credential {action}: {key} (service: {service})")
+        
+        return jsonify({
+            "success": True,
+            "key": key,
+            "service": service,
+            "action": action,
+            "message": f"Credential {action} successfully"
+        })
+        
+    except Exception as e:
+        logger.error(f"SERVICE_API: Error storing credential: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to store credential"
+        }), 500
+
+@app.route('/api/vault/configs/<service>', methods=['POST'])
+@require_service_token
+def store_service_config(service):
+    """Store or update strategy config for a service
+    
+    Request body: { strategy_id, params, symbols, risk_limits, enabled }
+    Auth: Requires VVAULT_SERVICE_TOKEN
+    """
+    try:
+        if not supabase_client:
+            return jsonify({
+                "success": False,
+                "error": "Supabase not configured"
+            }), 503
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "Request body required"}), 400
+        
+        strategy_id = data.get('strategy_id', 'default')
+        params = data.get('params', {})
+        symbols = data.get('symbols', [])
+        risk_limits = data.get('risk_limits', {})
+        enabled = data.get('enabled', True)
+        
+        # Upsert: update if exists, insert if not
+        existing = supabase_client.table('strategy_configs').select('id, version').eq('service', service).eq('strategy_id', strategy_id).execute()
+        
+        if existing.data:
+            current_version = existing.data[0].get('version', 1)
+            supabase_client.table('strategy_configs').update({
+                'params': params,
+                'symbols': symbols,
+                'risk_limits': risk_limits,
+                'enabled': enabled,
+                'version': current_version + 1,
+                'updated_at': datetime.now().isoformat()
+            }).eq('service', service).eq('strategy_id', strategy_id).execute()
+            action = "updated"
+            new_version = current_version + 1
+        else:
+            supabase_client.table('strategy_configs').insert({
+                'service': service,
+                'strategy_id': strategy_id,
+                'params': params,
+                'symbols': symbols,
+                'risk_limits': risk_limits,
+                'enabled': enabled,
+                'version': 1,
+                'created_at': datetime.now().isoformat(),
+                'updated_at': datetime.now().isoformat()
+            }).execute()
+            action = "created"
+            new_version = 1
+        
+        logger.info(f"SERVICE_API: Config {action} for {service}/{strategy_id} (v{new_version})")
+        
+        return jsonify({
+            "success": True,
+            "service": service,
+            "strategy_id": strategy_id,
+            "action": action,
+            "version": new_version
+        })
+        
+    except Exception as e:
+        logger.error(f"SERVICE_API: Error storing config: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to store config"
+        }), 500
+
+# ============================================================================
+# END SERVICE API ENDPOINTS
+# ============================================================================
 
 @app.route('/api/chatty/transcript/<construct_id>')
 @require_auth
