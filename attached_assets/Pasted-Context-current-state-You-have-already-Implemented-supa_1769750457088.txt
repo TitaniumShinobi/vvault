@@ -1,0 +1,176 @@
+Context (current state):
+
+
+You have already:
+
+
+Implemented supabase_client.py with repository‑pattern methods writing trades, strategy runs, snapshots, and health pings.
+
+
+Added worker.py as a 24/7 orchestrator (API on port 5000, trading loop with backoff and restart logic).
+
+
+Exposed /api/health, /api/snapshot, /api/trades/history, /api/performance.
+
+
+Wired trade logging into TradeManager and written docs/integration-with-chatty.md including SQL, TS types and response shapes.
+
+
+
+
+Your goals now:
+
+
+Treat FXShinobi as the canonical finance engine plugged into Chatty’s Finance tab.
+
+
+Wire in VVAULT for configs and credentials instead of hardcoding or using ad‑hoc envs.
+
+
+Ensure the 24/7 flow is production‑ready and easy for Chatty to consume.
+
+
+Tasks:
+
+
+Tighten the Chatty integration contract:
+
+
+Review docs/integration-with-chatty.md and:
+
+
+Confirm endpoint URLs, auth expectations, and response shapes.
+
+
+Ensure the Supabase tables and TS types match what Chatty needs for:
+
+
+FX dashboard stats,
+
+
+Trade history,
+
+
+Strategy performance and snapshots.
+
+
+
+
+
+
+Add an “API usage from Chatty” section with example requests and responses.
+
+
+
+
+Integrate VVAULT:
+
+
+Replace any direct use of raw env credentials (where reasonable) with VVAULT‑backed retrieval:
+
+
+E.g., OANDA or broker keys fetched from VVAULT at startup or on schedule.
+
+
+
+
+Add a small VVAULT client module (HTTP or SDK) that:
+
+
+Requests strategy_configs (parameters, symbols, risk limits) from VVAULT.
+
+
+Requests user_credentials or service credentials as needed.
+
+
+
+
+Update docs to specify:
+
+
+Required VVAULT endpoints,
+
+
+Fallback behavior if VVAULT is unavailable.
+
+
+
+
+
+
+Harden 24/7 worker behavior:
+
+
+Double‑check worker.py:
+
+
+Logging is sufficient to debug issues,
+
+
+Health checks route to /api/health and reflect worker state,
+
+
+Snapshot cadence (e.g., 60s) is configurable via env.
+
+
+
+
+Add a brief runbook section in docs/integration-with-chatty.md:
+
+
+How to start in full mode (python worker.py),
+
+
+How to monitor health (endpoints, logs),
+
+
+What failure/restart behavior to expect.
+
+
+
+
+
+
+Production secrets and safety:
+
+
+Ensure no secrets are printed or logged.
+
+
+Confirm all secrets come from env or VVAULT, and document required env vars:
+
+
+SUPABASE_URL, SUPABASE_KEY,
+
+
+VVAULT_URL, VVAULT_SERVICE_TOKEN,
+
+
+broker API keys account IDs (or their VVAULT keys).
+
+
+
+
+
+
+Deliverables:
+
+
+Updated docs/integration-with-chatty.md with:
+
+
+Concrete API usage examples for Chatty,
+
+
+VVAULT integration section,
+
+
+24/7 runbook.
+
+
+
+
+A small VVAULT client integrated where configs/credentials are needed.
+
+
+Confirmation in code and docs that FXShinobi is a backend engine with no user‑facing UI, meant to be surfaced solely through Chatty’s Finance tab.
