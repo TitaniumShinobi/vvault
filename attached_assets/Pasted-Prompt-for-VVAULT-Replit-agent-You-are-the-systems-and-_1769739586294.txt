@@ -1,0 +1,41 @@
+Prompt for VVAULT Replit agent
+You are the systems and data engineer for the VVAULT repository. Your goals:
+	1	Understand what VVAULT currently FXShinobi.      ◦	How to wire VVAULT into Chatty and FXShinobis) and how it can support Chatty + FXShinobi.
+	2	Define how VVAULT can act as a shared “vault” for credentials, configs, and maybe historical data indexing, while Supabase remains the main transactional store for finance events.
+Tasks:
+	1	Scan the repo and write a concise architecture summary:
+	◦	Tech stack, purpose (secrets vault, file storage, vector search, etc.).
+	◦	Existing integrations with external services (databases, clouds).
+	2	Decide its role in the combined system:
+	◦	Recommend how VVAULT should support:
+	▪	Chatty (e.g., storing API keys or connection configs for user‑linked finance services).
+	▪	FXShinobi (strategy configs, model parameters, maybe historical archives).
+	◦	Clarify boundaries between:
+	▪	Supabase (structured trade/session data),
+	▪	VVAULT (secrets, configs, embeddings, maybe file blobs).
+	3	API and data model:
+	◦	Document how other repos should talk to VVAULT:
+	▪	HTTP API, SDK, or internal library.
+	▪	Auth mechanisms and how to avoid leaking secrets.
+	◦	Outline any minimal changes needed to make it reliable for production.
+	4	Deployment:
+	◦	Specify how VVAULT is deployed and kept available (Replit service, external host).
+	◦	Document required env vars and how they relate to Chatty/FXShinobi configs.
+Deliverables:
+	•	A markdown file docs/role-in-ecosystem.md that:
+	◦	Explains VVAULT’s responsibilities relative to Chatty and FXShinobi.
+	◦	Documents the APIs and data types that the other repos will use.
+	•	A short “Next Actions” list with:
+	◦	Any endpoints or functions to add/clean up.
+	◦	How to wire VVAULT into Chatty and FXShinobi without tight coupling.
+
+---
+
+System design decision:
+	•	Chatty is the primary app.
+	•	The Finance tFXShinobitty is the host for finance integrations.
+	•	FXShinobi is a finance engine + app module that plugs into the Finance tab, with its own dashboard page (/finance/fxshinobi) modeled visually as a blend of:
+	◦	TradingView‑style chart widgets for price/technical views.tradingview+3 (https://www.tradingview.com/widget-docs/tutorials/build-page/widget-integration/)
+	◦	Kalshi‑style event/market tiles for probabilistic markets and positions.reddit+1 (https://www.reddit.com/r/Kalshi/comments/1moltxv/built_a_custom_live_kalshi_market_dashboard/)
+	◦	A Perplexity‑style finance insight panel summarizing fundamentals, news, and metrics.youtube+1 (https://www.youtube.com/watch?v=QjZm4Z1l3cc)
+	•	Users will eventually be able to connect multiple finance services to the Finance tab, and FXShinobi will be just one of the available integrations.
