@@ -1,0 +1,110 @@
+You’re very close; you mainly need to (1) confirm the right tables exist in Supabase for VVAULT’s service API, and (2) make sure keys are wired correctly and safely.
+
+### 1. Make sure the VVAULT tables exist in Supabase
+
+From the VVAULT agent’s summary, you already have a migration file like `docs/migrations/add_service_api_tables.sql` that creates:
+
+- `strategy_configs`
+- `service_credentials`[file:code_file]
+
+Do this in the **Supabase project VVAULT is configured to use**:
+
+1. Open your Supabase dashboard → select that project.  
+2. Go to **SQL Editor**.  
+3. Paste the full contents of `docs/migrations/add_service_api_tables.sql` and run it.[1][2][3]
+4. After it runs, open the **Table editor** and confirm both tables now exist in the `public` schema.[2][1]
+
+Then hit VVAULT’s health endpoint:
+
+```bash
+curl https://YOUR_VVAULT_URL/api/vault/health
+```
+
+You want to see something like `store: ok` instead of “table doesn’t exist.”[file:code_file]
+
+***
+
+### 2. Confirm FXShinobi’s Supabase env vars
+
+FXShinobi needs the **project that will store trades / snapshots / strategy runs**:
+
+- `SUPABASE_URL` – your Supabase project URL.
+- `SUPABASE_KEY` – the **service role key** used only on the backend.[4][5]
+
+Make sure:
+
+- These env vars in FXShinobi match the project you intend to use for **trades/events**, not VVAULT’s config project.
+- `supabase_client.py` in FXShinobi is using the server‑side key (service role), not the anon key, and is **never** imported on the client.[5][4]
+
+With that set, run:
+
+```bash
+curl https://YOUR_FXSHINOBI_URL/api/status
+```
+
+You want `supabase_status: "ok"` and, once all four envs are set, `live_mode: true`.[file:code_file]
+
+***
+
+### 3. Confirm VVAULT’s Supabase connection (for configs/creds)
+
+VVAULT’s service API uses Supabase as its backing store for:
+
+- `strategy_configs`
+- `service_credentials`[file:code_file]
+
+Check in VVAULT’s env:
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY` (or whatever env you bound for the service key).[4][5]
+
+Then:
+
+```bash
+curl https://YOUR_VVAULT_URL/api/vault/health
+```
+
+You want:
+
+- `service_api: enabled`
+- `store: ok`
+- `supabase: connected` (or equivalent).[file:code_file]
+
+If `store: error` appears, it’s almost always:
+
+- Wrong project URL/key (pointing to a different Supabase project), or
+- Migration not run in the correct project.
+
+***
+
+### 4. Sanity‑check RLS and keys
+
+Because these are backend flows:
+
+- For FXShinobi’s trade/event tables:
+  - Using the **service role key** is fine, and RLS can be off or permissive, since only the worker writes there.[6][4]
+- For anything the Chatty frontend reads directly:
+  - Use the **anon key** (never the service key) and enable RLS with user‑scoped policies.[6][4]
+
+If you keep all FXShinobi writes on the server side and all secret configs in VVAULT, you’re aligned with Supabase’s best practices for service keys and RLS.[5][4][6]
+
+***
+
+If you paste:
+
+- The Supabase project URL you plan for FXShinobi trades, and
+- The project URL you plan for VVAULT configs,
+
+I can give you exact SQL snippets for both sets of tables (trades/events and configs/creds) so you know you’re 100% aligned.
+
+Sources
+[1] Creating a new Supabase table - Nextbase Starter Kit https://usenextbase.com/docs/v2/guides/creating-new-supabase-table
+[2] Create basic table - Supabase SQL https://supabase-sql.vercel.app/create-table
+[3] Supabase Tutorial #2 Create table and insert first row - YouTube https://www.youtube.com/watch?v=V28w5zOg5cY
+[4] How to Secure Your Supabase Service Role Key - Chat2DB https://chat2db.ai/resources/blog/secure-supabase-role-key
+[5] Performing administration tasks on the server side with ... - Supabase https://supabase.com/docs/guides/troubleshooting/performing-administration-tasks-on-the-server-side-with-the-servicerole-secret-BYM4Fa
+[6] Supabase RLS Monitoring: Logs and Alerts for Secure Apps https://promptxl.com/supabase-rls-monitoring/
+[7] Supabase RLS policies issues, please help - Reddit https://www.reddit.com/r/Supabase/comments/1kgl8tl/supabase_rls_policies_issues_please_help/
+[8] Anon and Service key for Supabase local - Answer Overflow https://www.answeroverflow.com/m/1435330933241675846
+[9] Realtime Reports | Supabase Docs https://supabase.com/docs/guides/realtime/reports
+[10] 2 Simple Steps Needed to Create Tables in Supabase ... - YouTube https://www.youtube.com/watch?v=-ydJNopP8nU
