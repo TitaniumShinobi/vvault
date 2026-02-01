@@ -162,13 +162,14 @@ def _check_session_table_available() -> bool:
         _SESSION_TABLE_AVAILABLE = False
         return False
 
-def db_create_session(email: str, role: str, token: str, expires_at: datetime) -> bool:
+def db_create_session(email: str, role: str, token: str, expires_at: datetime, remember_me: bool = False) -> bool:
     """Create session (in-memory, with optional database persistence)"""
     ACTIVE_SESSIONS[token] = {
         'email': email,
         'role': role,
         'expires_at': expires_at,
-        'created_at': datetime.now()
+        'created_at': datetime.now(),
+        'remember_me': remember_me
     }
     
     if not _check_session_table_available():
@@ -182,10 +183,11 @@ def db_create_session(email: str, role: str, token: str, expires_at: datetime) -
             'user_id': user_id,
             'token': token,
             'email': email,
+            'remember_me': remember_me,
             'expires_at': expires_at.isoformat(),
             'created_at': datetime.now().isoformat()
         }).execute()
-        logger.info(f"Session persisted to database for {email}")
+        logger.info(f"Session persisted to database for {email} (remember_me={remember_me})")
     except Exception as e:
         logger.debug(f"Session DB persistence failed (using in-memory): {e}")
     
@@ -1560,10 +1562,14 @@ def login():
             return jsonify({"success": False, "error": "Invalid email or password"}), 401
         
         session_token = secrets.token_urlsafe(32)
-        expires_at = datetime.now() + timedelta(hours=24)
+        remember_me = data.get('rememberMe', False)
+        if remember_me:
+            expires_at = datetime.now() + timedelta(days=90)
+        else:
+            expires_at = datetime.now() + timedelta(days=30)
         role = user_data.get('role', 'user')
         
-        db_create_session(email, role, session_token, expires_at)
+        db_create_session(email, role, session_token, expires_at, remember_me=remember_me)
         
         user_info = {
             'email': email,
@@ -1666,7 +1672,7 @@ def register():
             logger.info(f"User registered in local fallback: {email}")
         
         token = secrets.token_urlsafe(32)
-        expires_at = datetime.now() + timedelta(hours=24)
+        expires_at = datetime.now() + timedelta(days=30)
         db_create_session(email, 'user', token, expires_at)
         
         user_data = {'email': email, 'name': name, 'role': 'user'}
@@ -1849,9 +1855,9 @@ def google_oauth_callback():
             }
             logger.info(f"Created new OAuth user: {users_email}")
         
-        # Create session token
+        # Create session token (30 days for OAuth logins)
         session_token = secrets.token_urlsafe(32)
-        expires_at = datetime.now() + timedelta(hours=24)
+        expires_at = datetime.now() + timedelta(days=30)
         
         ACTIVE_SESSIONS[session_token] = {
             'email': users_email,

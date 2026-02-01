@@ -85,6 +85,29 @@
   color: #6b7280;
 }
 
+.remember-me-group {
+  flex-direction: row;
+  align-items: center;
+  margin-top: 5px;
+}
+
+.remember-me-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #9ca3af;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.remember-me-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: #3b82f6;
+  cursor: pointer;
+}
+
 .login-button {
   background-color: #1a1a1a;
   border: 1px solid #374151;

@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS public.user_sessions (
     user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
     token TEXT NOT NULL UNIQUE,
     email TEXT NOT NULL,
+    remember_me BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL
 );
@@ -30,3 +31,6 @@ CREATE POLICY "service_role_access" ON public.user_sessions
     TO service_role
     USING (true)
     WITH CHECK (true);
+
+-- Auto-cleanup expired sessions (run periodically or via cron)
+-- DELETE FROM public.user_sessions WHERE expires_at < NOW();

@@ -4,6 +4,7 @@ import './LoginScreen.css';
 const LoginScreen = ({ onLogin }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -35,7 +36,7 @@ const LoginScreen = ({ onLogin }) => {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, rememberMe }),
       });
 
       const data = await response.json();
@@ -99,6 +100,19 @@ const LoginScreen = ({ onLogin }) => {
               disabled={isLoading}
               autoComplete="current-password"
             />
+          </div>
+
+          <div className="form-group remember-me-group">
+            <label className="remember-me-label">
+              <input
+                type="checkbox"
+                checked={rememberMe}
+                onChange={(e) => setRememberMe(e.target.checked)}
+                disabled={isLoading}
+                className="remember-me-checkbox"
+              />
+              <span>Remember me for 90 days</span>
+            </label>
           </div>
 
           <button
