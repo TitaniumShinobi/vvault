@@ -1,0 +1,144 @@
+Got it! Let me help you set up those environment variables. Since these are sensitive credentials, I'll request them from you:
+
+Please provide the 4 required secrets to activate live mode:
+
+VVAULT_URL - Base URL of VVAULT API (e.g. https://vvault.yourdomain.com)
+VVAULT_SERVICE_TOKEN - The token VVAULT generated (n8Tzlc...Tk=)
+SUPABASE_URL - Supabase project URL for FX data
+SUPABASE_KEY - Service role key for that Supabase project
+Once all 4 are set, FXShinobi will automatically switch to live mode.
+
+4 secrets requested
+•
+SUPABASE_KEY
+SUPABASE_URL
+VVAULT_SERVICE_TOKEN
+VVAULT_URL
+Live mode is now active (live_mode: true). I can see:
+
+VVAULT is connected and healthy (vvault_status: "ok")
+Supabase shows "down" - this likely means the Supabase URL/key need verification or the database tables aren't created yet
+Let me check the logs to understand the Supabase issue:
+
+Checked system logs
+I see the issues:
+
+Supabase - The table public.fxshinobi_health doesn't exist yet. This is the "missing migration" you mentioned.
+OANDA credentials - VVAULT doesn't have the OANDA credentials stored yet (404 errors)
+Live mode is successfully activated. Here's where things stand:
+
+Component	Status	Note
+Live Mode	Active	All 4 env vars detected
+VVAULT	OK	Connected successfully
+Supabase	Down	Missing table fxshinobi_health - needs migration
+OANDA	Not configured	Credentials not found in VVAULT
+Next steps to complete the setup:
+
+Run the Supabase migration - Create the required tables (fxshinobi_health, fxshinobi_snapshots, fxshinobi_trades, etc.) in your Supabase project
+
+Add OANDA credentials to VVAULT - Store these keys in VVAULT:
+
+OANDA_API_KEY
+OANDA_ACCOUNT_ID
+OANDA_ENVIRONMENT (practice or live)
+Would you like me to:
+
+Generate the SQL migration script for the Supabase tables?
+Or do you already have the migration ready to run?
+i need yours
+
+Now I'll create the SQL migration script for all FXShinobi tables:
+
+Here's your migration! I've created migrations/001_fxshinobi_tables.sql.
+
+To run it:
+
+Go to your Supabase dashboard
+Open the SQL Editor
+Paste and run this:
+-- FXShinobi Supabase Migration
+-- 1. Health check table
+CREATE TABLE IF NOT EXISTS fxshinobi_health (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    instance_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'healthy',
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- 2. Trades table
+CREATE TABLE IF NOT EXISTS fxshinobi_trades (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    size NUMERIC NOT NULL,
+    entry_price NUMERIC,
+    exit_price NUMERIC,
+    stop_loss NUMERIC,
+    take_profit NUMERIC,
+    realized_pnl NUMERIC,
+    status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'CLOSED', 'CANCELLED')),
+    strategy_id TEXT NOT NULL DEFAULT 'smc_default',
+    opened_at TIMESTAMPTZ,
+    closed_at TIMESTAMPTZ,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ
+);
+-- 3. Strategy runs table
+CREATE TABLE IF NOT EXISTS fxshinobi_strategy_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    strategy_id TEXT NOT NULL DEFAULT 'smc_default',
+    parameters JSONB DEFAULT '{}'::jsonb,
+    symbol TEXT,
+    timeframe TEXT,
+    pnl NUMERIC DEFAULT 0,
+    win_rate NUMERIC,
+    drawdown NUMERIC,
+    trades_count INTEGER DEFAULT 0,
+    duration_seconds INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- 4. Snapshots table (for Chatty dashboard)
+CREATE TABLE IF NOT EXISTS fxshinobi_snapshots (
+    snapshot_id TEXT PRIMARY KEY DEFAULT 'default',
+    account_balance NUMERIC,
+    open_pnl NUMERIC DEFAULT 0,
+    open_positions JSONB DEFAULT '[]'::jsonb,
+    risk_metrics JSONB DEFAULT '{}'::jsonb,
+    system_status TEXT DEFAULT 'UNKNOWN',
+    state_machine_state TEXT,
+    kill_switch_active BOOLEAN DEFAULT FALSE,
+    last_signal JSONB,
+    trades_today INTEGER DEFAULT 0,
+    pnl_today NUMERIC DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_fxshinobi_health_timestamp ON fxshinobi_health(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_fxshinobi_trades_created_at ON fxshinobi_trades(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fxshinobi_trades_symbol ON fxshinobi_trades(symbol);
+CREATE INDEX IF NOT EXISTS idx_fxshinobi_trades_status ON fxshinobi_trades(status);
+CREATE INDEX IF NOT EXISTS idx_fxshinobi_strategy_runs_strategy_id ON fxshinobi_strategy_runs(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_fxshinobi_strategy_runs_created_at ON fxshinobi_strategy_runs(created_at DESC);
+-- Seed initial records
+INSERT INTO fxshinobi_health (instance_id, status) VALUES ('migration', 'initialized');
+INSERT INTO fxshinobi_snapshots (snapshot_id, system_status) VALUES ('default', 'INIT') ON CONFLICT (snapshot_id) DO NOTHING;
+Once you run this, /api/health will show supabase_status: "ok" and FXShinobi will be fully live.
+
+Migration ran successfully! Let me verify Supabase is now connected:
+
+Supabase is now connected!
+
+Component	Status
+Live Mode	Active
+VVAULT	OK
+Supabase	OK
+OANDA	Not yet configured
+The last step is adding OANDA credentials to VVAULT so FXShinobi can actually trade. You'll need to store these 3 keys in VVAULT:
+
+OANDA_API_KEY
+OANDA_ACCOUNT_ID
+OANDA_ENVIRONMENT (set to practice or live)
+Once those are in VVAULT, you can switch the workflow to run python worker.py for full 24/7 trading mode, and Chatty will see worker_status: "running".
+
