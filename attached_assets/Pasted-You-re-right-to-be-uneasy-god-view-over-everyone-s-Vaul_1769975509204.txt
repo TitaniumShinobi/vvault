@@ -1,0 +1,186 @@
+You’re right to be uneasy: “god view” over everyone’s Vault is fine for dev, but not acceptable for production security. Here’s how to clean this up and still keep your own full-access seat.
+
+***
+
+## Target Model
+
+- **Multi-tenant by default**: each user only sees their own `vault_files` (and any explicitly shared ones). [tomaszezula](https://www.tomaszezula.com/keep-data-safe-in-multi-tenant-systems-a-case-for-supabase-and-row-level-security/)
+- **Admin/dev override**: your account (or a specific role) can see everything for debugging and migrations. [github](https://github.com/orgs/community/discussions/149922)
+- **Instances live outside user space**: `instances/` is *not* just another user folder; it’s system-owned.  
+
+Think “Google Drive”: user sees only their stuff, Google engineers can see more in tightly controlled contexts, not through the regular UI.
+
+***
+
+## Step 1 – Fix `vault_files` Schema
+
+In Supabase, make sure `vault_files` has:
+
+- `id` (uuid, pk)  
+- `user_id` (`uuid` references `auth.users.id`)  
+- `path` / `filename` / `mime_type` (whatever you already have)  
+- `construct_id` (nullable, if you use it)  
+- `is_system` (boolean, default `false`) for things like `instances/`, global templates, etc.  
+
+If `user_id` is missing, add it: [bauerhausdev](https://bauerhausdev.com/blog/mastering-supabase-database-schema-design)
+
+```sql
+alter table public.vault_files
+  add column if not exists user_id uuid references auth.users (id);
+
+alter table public.vault_files
+  add column if not exists is_system boolean not null default false;
+```
+
+Then backfill:
+
+- Rows that represent your “global VVAULT project stuff” → set `is_system = true`, `user_id = null`.  
+- Rows that are actually your own files → `user_id = '<your-auth-user-id>'`, `is_system = false`.  
+
+You can do a quick, blunt first pass (you can refine later):
+
+```sql
+update public.vault_files
+set user_id = '<YOUR_USER_ID>'
+where user_id is null
+  and path not like 'instances/%';
+```
+
+Then manually flip `instances/` and any other framework folders:
+
+```sql
+update public.vault_files
+set is_system = true,
+    user_id = null
+where path like 'instances/%';
+```
+
+***
+
+## Step 2 – Turn On Row Level Security
+
+Enable RLS and start from “deny all; allow specific”: [supabase](https://supabase.com/docs/guides/database/postgres/row-level-security)
+
+```sql
+alter table public.vault_files enable row level security;
+```
+
+Policies:
+
+1. **Normal users see only their files + explicitly shared system files (if you ever share):**
+
+```sql
+create policy "Users see their own files"
+on public.vault_files
+for select
+to authenticated
+using (
+  user_id = auth.uid()
+);
+```
+
+2. **Allow you (dev/admin) to see everything via a role or a special flag.**  
+Simplest: add a claim like `is_admin` into your JWT and policy-check it. [leanware](https://www.leanware.co/insights/supabase-best-practices)
+
+Example policy for admins:
+
+```sql
+create policy "Admin full vault_files access"
+on public.vault_files
+for all
+to authenticated
+using ( auth.jwt() ->> 'is_admin' = 'true' )
+with check ( auth.jwt() ->> 'is_admin' = 'true' );
+```
+
+If you don’t have custom claims wired yet, interim hack is a policy that checks a specific `user_id`:
+
+```sql
+create policy "Dev full access"
+on public.vault_files
+for all
+to authenticated
+using ( auth.uid() = '<YOUR_USER_ID>' )
+with check ( auth.uid() = '<YOUR_USER_ID>' );
+```
+
+Now:  
+- Normal users → only their rows.  
+- You → everything, but via RLS, not by accident. [tomaszezula](https://www.tomaszezula.com/keep-data-safe-in-multi-tenant-systems-a-case-for-supabase-and-row-level-security/)
+
+***
+
+## Step 3 – Fix the VVAULT UI Queries
+
+Right now the Vault view is probably doing something like:  
+
+```ts
+// BAD: no user scoping
+supabase.from('vault_files').select('*');
+```
+
+Switch it to:
+
+```ts
+// Good: rely on RLS, no need to pass user_id
+const { data, error } = await supabase
+  .from('vault_files')
+  .select('*')
+  .order('created_at', { ascending: false });
+```
+
+Best practice with Supabase: let RLS enforce user scoping; the app code should *not* inject `user_id` into filters except for admin tools. [supabase](https://supabase.com/docs/guides/database/postgres/row-level-security)
+
+For an **admin “god view” panel**, you can:
+
+- Use a separate Supabase service key (backend-only) that bypasses RLS, or  
+- Hit a protected backend route that uses the service role to query `vault_files` in full. [leanware](https://www.leanware.co/insights/supabase-best-practices)
+
+Don’t expose that to the browser.
+
+***
+
+## Step 4 – Treat `instances/` as System-Owned
+
+Decide explicitly:
+
+- `instances/` and the internal VVAULT folders are **system files**, not “Devon’s files”.  
+- They should:  
+  - Have `is_system = true`, `user_id = null`  
+  - Only be visible in:  
+    - Your admin tooling, or  
+    - When you intentionally surface them (e.g., “available constructs catalog”) but never as arbitrary browseable files.
+
+If you want end users to see *constructs* but not the raw `instances/` tree, create a separate table, e.g., `constructs`:
+
+```sql
+create table public.constructs (
+  id uuid primary key default gen_random_uuid(),
+  callsign text not null,
+  display_name text not null,
+  description text,
+  is_public boolean not null default false
+);
+```
+
+Populate it from your existing `instances/` and drive the UI from `constructs`, not from raw file paths.
+
+***
+
+## Step 5 – Cleaning Existing “Everyone-in-Devon’s-Vault” View
+
+To “clean up” without deleting data:
+
+1. **Back up** `vault_files` first (export CSV from Supabase or run `copy` to storage). [leanware](https://www.leanware.co/insights/supabase-best-practices)
+2. Run the `user_id` and `is_system` updates above.  
+3. Enable RLS and policies.  
+4. Verify:
+
+   - In a normal user session (non-admin), open VVAULT → only see that user’s files.  
+   - In your admin context, hit an internal tool or service-key query → see everything.
+
+If you ever invited others into this Replit dev instance, they *did* have access to more than they should—this change corrects that going forward and aligns you more with Google-Drive-like separation. [tomaszezula](https://www.tomaszezula.com/keep-data-safe-in-multi-tenant-systems-a-case-for-supabase-and-row-level-security/)
+
+***
+
+If you want, next step I can do is draft exact SQL and a minimal migration order (1–2 transaction blocks) tailored to the current columns you actually have in `vault_files`.
