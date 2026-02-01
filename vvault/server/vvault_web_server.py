@@ -811,7 +811,14 @@ def get_vault_file(file_id):
             user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
             user_id = user_result.data[0]['id'] if user_result.data else None
             
-            if result.data.get('user_id') != user_id and not result.data.get('is_system'):
+            file_user_id = result.data.get('user_id')
+            is_system = result.data.get('is_system', False)
+            
+            if file_user_id is None and not is_system:
+                log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "unassigned_file")
+                return jsonify({"success": False, "error": "Access denied"}), 403
+            
+            if file_user_id is not None and file_user_id != user_id:
                 log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "not_owner")
                 return jsonify({"success": False, "error": "Access denied"}), 403
         
