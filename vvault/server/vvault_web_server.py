@@ -749,7 +749,7 @@ def health_check():
 @app.route('/api/vault/files')
 @require_auth
 def get_vault_files():
-    """Get all vault files from Supabase"""
+    """Get vault files from Supabase (multi-tenant: users see only their files)"""
     try:
         if not supabase_client:
             return jsonify({
@@ -757,7 +757,26 @@ def get_vault_files():
                 "error": "Supabase not configured"
             }), 500
         
-        result = supabase_client.table('vault_files').select('*').execute()
+        current_user = request.current_user
+        user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
+        
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        
+        if user_role == 'admin':
+            result = supabase_client.table('vault_files').select('*').execute()
+            logger.debug(f"Admin {user_email} fetching all vault files")
+        else:
+            if not user_id:
+                return jsonify({
+                    "success": True,
+                    "files": [],
+                    "count": 0,
+                    "message": "No files yet - upload your first file to get started"
+                })
+            result = supabase_client.table('vault_files').select('*').eq('user_id', user_id).execute()
+            logger.debug(f"User {user_email} fetching their vault files (user_id={user_id})")
         
         return jsonify({
             "success": True,
@@ -774,17 +793,29 @@ def get_vault_files():
 @app.route('/api/vault/files/<file_id>')
 @require_auth
 def get_vault_file(file_id):
-    """Get a single vault file by ID"""
+    """Get a single vault file by ID (multi-tenant: users can only access their files)"""
     try:
         if not supabase_client:
             return jsonify({"success": False, "error": "Supabase not configured"}), 500
         
+        current_user = request.current_user
+        user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
+        
         result = supabase_client.table('vault_files').select('*').eq('id', file_id).single().execute()
         
-        if result.data:
-            return jsonify({"success": True, "file": result.data})
-        else:
+        if not result.data:
             return jsonify({"success": False, "error": "File not found"}), 404
+        
+        if user_role != 'admin':
+            user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+            user_id = user_result.data[0]['id'] if user_result.data else None
+            
+            if result.data.get('user_id') != user_id and not result.data.get('is_system'):
+                log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "not_owner")
+                return jsonify({"success": False, "error": "Access denied"}), 403
+        
+        return jsonify({"success": True, "file": result.data})
     except Exception as e:
         logger.error(f"Error fetching vault file: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
