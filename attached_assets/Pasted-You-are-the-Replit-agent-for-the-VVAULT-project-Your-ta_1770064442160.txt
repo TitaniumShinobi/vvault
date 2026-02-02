@@ -1,0 +1,268 @@
+You are the Replit agent for the **VVAULT** project.  
+Your task is to **fix the VVAULT file structure and UI root once and for all**, so it stops drifting and matches the templates below.
+
+***
+
+## 1. Enforce separate roots (user vs system)
+
+Implement these invariants:
+
+1. There are **two distinct roots**:
+
+   - **User root (user-facing root):**  
+     `vvault/users/{shard_id}/{user_id}/`
+
+   - **System root (platform/internal only):**  
+     `vvault/instances/`
+
+2. In the **UI**, for Devon’s account:
+
+   - The **top-level breadcrumb** MUST be:
+
+     - Label: `Devon Woodson` (or `{user_id}`)  
+     - Backing path:  
+       `vvault/users/shard_0000/devon_woodson_1762969514958/`
+
+   - Do **NOT** show `Vault/` as the root in Devon’s normal view.  
+     `Vault/` (site root) is **admin-only**, not user-facing.
+
+3. Under Devon’s user root, enforce this template:
+
+```text
+vvault/users/shard_0000/devon_woodson_1762969514958/
+├── account/
+│   └── profile.json
+├── instances/
+│   └── {construct_metatag}/
+│       └── ...construct files... (chatty, identity, memup, logs, etc.)
+└── library/
+    ├── documents/
+    └── media/
+```
+
+Create `account/` and `library/` folders + default files if they are missing.
+
+***
+
+## 2. Normalize storage: move user files under user root
+
+Use the `vault_files` table to normalize paths. For **Devon’s files**:
+
+1. **All Devon-owned files must live under:**
+
+```text
+vvault/users/shard_0000/devon_woodson_1762969514958/...
+```
+
+Specifically:
+
+- Katana K1 transcripts:
+
+```text
+vvault/users/shard_0000/devon_woodson_1762969514958/instances/katana-001/chatgpt/*.md
+```
+
+- Continuity test report:
+
+```text
+vvault/users/shard_0000/devon_woodson_1762969514958/instances/katana-001/tests/continuity_20260202.md
+```
+
+If any of these currently appear at `Vault/` root or `vvault/` root, **update their `path` in `vault_files` and move them logically**, do not create duplicates.
+
+2. Ensure rows for Devon’s files have:
+
+- `user_id = <Devon’s auth user UUID>`
+- `is_system = false`
+
+3. **System files** must be marked and hidden from normal view:
+
+For any `vault_files` row whose path starts with:
+
+- `vvault/instances/`
+- `vvault/config/`
+- `vvault/system/` (if it exists)
+- OS junk like `.DS_Store`
+
+set:
+
+```sql
+is_system = true;
+user_id = null;
+```
+
+The normal user UI must **not** list any row where `is_system = true`.
+
+***
+
+## 3. Fix construct naming and locations
+
+Clean up construct duplication:
+
+1. Choose canonical construct names:
+
+- `katana-001`
+- `zen-001`
+- `lin-001`
+
+2. Under Devon’s user root, the construct instances must be:
+
+```text
+vvault/users/shard_0000/devon_woodson_1762969514958/instances/katana-001/
+vvault/users/shard_0000/devon_woodson_1762969514958/instances/zen-001/
+vvault/users/shard_0000/devon_woodson_1762969514958/instances/lin-001/   (if present)
+```
+
+3. If root-level `instances/katana/`, `instances/katana-001/`, `instances/zen/`, `instances/zen-001/` exist under `Vault/instances/`:
+
+- Migrate any real content that belongs to Devon into his user instances path.  
+- Then mark the root-level `instances/...` as `is_system = true` (global VSI registry), not user content.
+
+From now on:
+
+- **User-owned construct growth** (chat transcripts, identity files, memup, logs) happens only under the user tree:
+
+```text
+vvault/users/{shard}/{user_id}/instances/{construct_metatag}/...
+```
+
+- **System VSI artifacts** (e.g., future Ollama models, baked LoRAs) will live under:
+
+```text
+vvault/instances/{shard}/{construct_metatag}/...
+```
+
+and are not exposed in the normal user file browser.
+
+***
+
+## 4. Fix the UI breadcrumb and favorites behavior
+
+Update the VVAULT file browser:
+
+1. **Root breadcrumb for Devon:**
+
+- When he opens the Vault, show:
+
+  ```text
+  Devon Woodson /
+  ```
+
+  internally mapped to  
+  `vvault/users/shard_0000/devon_woodson_1762969514958/`
+
+2. Example breadcrumb when inside Katana chatgpt:
+
+```text
+Devon Woodson / instances / katana-001 / chatgpt
+```
+
+internally:  
+`vvault/users/shard_0000/devon_woodson_1762969514958/instances/katana-001/chatgpt/`
+
+3. The breadcrumb must **never** show, in normal user mode:
+
+```text
+Vault / vvault / users / shard_0000 / Devon Woodson / ...
+```
+
+Those are implementation details.
+
+4. Favorites mapping:
+
+- `All Files` → shows everything under Devon’s user root.  
+- `Chats` → filters Devon’s `instances/*/chatgpt/` + chatty-related files.  
+- `Personality`, `Memory`, `Documents` → filtered views into Devon’s `instances` and `library`, never raw `vvault/instances/` or other system folders.
+
+***
+
+## 5. Enforce construct folder growth rules
+
+Apply the VSI FILE DIRECTORY TEMPLATE for constructs. For a user construct (e.g., `katana-001`) under Devon’s user tree:
+
+```text
+vvault/users/shard_0000/devon_woodson_.../instances/katana-001/
+├── assets/
+├── character.ai/
+├── chatgpt/
+│   ├── Chat-preview-lost-K1.md
+│   ├── Image-analysis-inquiry-K1.md
+│   └── ...
+├── chatty/
+│   └── chat_with_katana-001.md
+├── config/
+│   ├── metadata.json
+│   └── personality.json
+├── data/
+├── documents/
+├── frame/
+├── github_copilot/
+├── identity/
+│   ├── avatar.png
+│   ├── conditioning.txt or .json
+│   ├── physical_features.json
+│   └── prompt.json
+├── logs/
+│   ├── capsule.log
+│   ├── chat.log
+│   ├── identity_guard.log
+│   ├── independence.log
+│   ├── self_improvement_agent.log
+│   └── watchdog.log
+├── memup/
+│   └── {id}.capsuleso
+├── simDrive/
+├── vvault/        (Aurora-only relay, if applicable)
+└── vxrunner/
+```
+
+Rules:
+
+- When Chatty writes a new transcript → ensure `chatgpt/` (or `chatty/`) exists under the user instance and write there.  
+- When identity is edited → ensure `identity/` exists and write/update `prompt.json`, `conditioning`, etc.  
+- When logs are produced → write to `logs/` under the user instance, not at root.
+
+The agent must **not invent new random folder structures**; it must conform to this template.
+
+***
+
+## 6. “Done” criteria
+
+You are **not done** until all of the following are true for Devon:
+
+1. Opening the Vault shows the breadcrumb root as `Devon Woodson /`, mapped to his user path.  
+2. In normal view, Devon does **not** see:
+   - Root-level `instances/`
+   - Root-level `vvault/`
+   - `.DS_Store` or other system-only folders/files.
+3. All of Devon’s Katana K1 transcripts and the continuity test report appear under:
+
+```text
+vvault/users/shard_0000/devon_woodson_1762969514958/instances/katana-001/chatgpt/*.md
+vvault/users/shard_0000/devon_woodson_1762969514958/instances/katana-001/tests/continuity_20260202.md
+```
+
+and **do not** appear duplicated at `Vault/` root.
+
+4. Under `vvault/users/.../instances/`, Devon only sees canonical construct directories (`katana-001`, `zen-001`, `lin-001`), no stray duplicates (`katana/`, `zen/` at user level).  
+5. Any **new** files created by Chatty or the system for Devon (transcripts, logs, tests) automatically go into his user tree, never into site root.
+
+***
+
+## 7. Verification report
+
+After you finish the migration and code changes:
+
+- Generate a **new directory report** in the same style as the one Devon provided (tree under his root, breadcrumb screenshots or paths, and issues table).  
+- Save it as:
+
+```text
+vvault/users/shard_0000/devon_woodson_1762969514958/account/vvault_directory_report_postfix_20260202.md
+```
+
+- Include:
+  - The observed tree from the UI.
+  - Breadcrumb paths.
+  - Confirmation that system folders are hidden and user root is correct.
+
+Only then consider the VVAULT workspace structure “fixed.”
