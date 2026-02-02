@@ -1,0 +1,113 @@
+Here’s exactly what to tell the Replit agent for VVAULT.
+
+***
+
+You are the Replit agent for **VVAULT**.  
+Two `continuity_20260202.md` files now appear in my UI under my user root, both empty.  
+Fix this in two phases: cleanup, then regenerate a proper report.
+
+***
+
+## Phase 1 – Cleanup the bad continuity files
+
+1. **Identify the bad rows**
+
+   - Query `vault_files` in the database for my continuity files:
+
+     ```sql
+     select id, path, user_id, is_system, content, sha256
+     from vault_files
+     where path like '%continuity_20260202.md';
+     ```
+
+2. **Confirm they are empty artifacts**
+
+   - For each row returned:
+     - Check `content` column (if used); if it’s `NULL` or empty, treat as bad.  
+     - Check the backing storage object (Supabase or Replit storage) and confirm the file has **zero or near-zero bytes**.
+
+3. **Delete these failed artifacts**
+
+   - Remove the corresponding objects from storage.  
+   - Delete or soft‑delete the rows from `vault_files`:
+
+     ```sql
+     delete from vault_files
+     where path like '%continuity_20260202.md';
+     ```
+
+   - Result: after this step, there should be **no** `continuity_20260202.md` files in the DB or storage.
+
+4. **Verify in the UI**
+
+   - Reload the VVAULT UI as Devon.  
+   - Under `All Files`, confirm that **no continuity file** appears.  
+   - This ensures we’re starting clean.
+
+***
+
+## Phase 2 – Regenerate a single, correct continuity report
+
+1. **Re‑run the Katana continuity regression suite**
+
+   - Use the existing test harness you already wired (the four continuity tests against Katana‑001).  
+   - After the tests:
+
+     - Build a markdown report containing:
+       - A summary section with PASS/FAIL for each of the 4 tests.  
+       - Raw prompts and raw Katana responses for each test.  
+       - Timestamp of the run.
+
+2. **Write the report to the canonical path**
+
+   - Use this exact path for the new file:
+
+     ```text
+     vvault/users/shard_0000/devon_woodson_1762969514958/instances/katana-001/tests/continuity_20260202.md
+     ```
+
+   - Ensure you:
+
+     - Write the **full markdown content** to storage.  
+     - Insert or upsert a matching row into `vault_files` with:
+       - `path` set to the above.  
+       - `user_id = <Devon’s UUID>`.  
+       - `is_system = false`.  
+       - `sha256` computed from the actual file contents (if you’re using that).  
+       - `content` filled with the markdown text *only if* you’re intentionally duplicating it in DB; otherwise leave `content` null and rely on storage.
+
+3. **Do not create duplicates**
+
+   - Before inserting, check if a row already exists for that exact path:
+
+     ```sql
+     select id from vault_files
+     where path = 'vvault/users/shard_0000/devon_woodson_1762969514958/instances/katana-001/tests/continuity_20260202.md';
+     ```
+
+   - If it exists, **update that row** instead of inserting a new one.  
+   - There must be **only one** continuity report row for this path.
+
+4. **Verify from the UI**
+
+   - Refresh VVAULT as Devon.  
+   - Under `All Files` and/or navigating via:
+
+     `Devon Woodson / instances / katana-001 / tests`
+
+     confirm:
+
+     - Exactly **one** `continuity_20260202.md` is listed.  
+     - Opening it in the UI shows the full markdown report (summary + raw transcripts), not an empty file.
+
+***
+
+## Final confirmation
+
+After you complete these steps, generate a short log entry in `replit.md` stating:
+
+- The two empty continuity files were removed (DB + storage).  
+- A new continuity report was generated from a fresh test run.  
+- The report is stored at the canonical user‑scoped path and confirmed visible with valid content in the VVAULT UI.
+
+Only then consider the continuity report situation resolved.

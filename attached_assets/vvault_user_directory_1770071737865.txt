@@ -1,0 +1,14 @@
+#VVAULT USER WORKSPACE FILE DIRECTORY TEMPLATE
+
+`vvault/users/`
+shard_0000/
+- {userid}/
+-- account/
+--- profile.json
+-- instances/
+--- ...construct files...
+-- library/*
+--- chatty/ (not manually organized)
+--- ...finder...
+
+* = Manually organized
