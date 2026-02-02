@@ -42,6 +42,34 @@ A 5-layer security system for sovereign construct identity preservation with a s
 - **Web Frontend**: React application with a Flask backend.
 - **Login System**: Email/password authentication with Cloudflare Turnstile.
 
+### Multi-Tenant File Organization
+VVAULT uses a two-root architecture for file separation:
+
+**User Root (user-facing):** `vvault/users/shard_0000/{user_id}/`
+```
+{user_id}/
+├── account/
+│   └── profile.json
+├── instances/
+│   └── {construct_metatag}/
+│       ├── chatgpt/          # ChatGPT transcripts
+│       ├── chatty/           # Chatty transcripts
+│       ├── identity/         # prompt.json, conditioning.txt
+│       ├── config/           # metadata.json, personality.json
+│       ├── memup/            # .capsule files
+│       └── logs/             # chat.log, identity_guard.log
+└── library/
+    ├── documents/
+    └── media/
+```
+
+**System Root (internal only):** `vvault/instances/`
+- Global VSI artifacts, not user content
+- Marked as `is_system=true` in database
+- Hidden from normal user UI
+
+**UI Breadcrumb:** Shows user's display name (e.g., "Devon Woodson /") instead of internal path structure.
+
 ### Cross-Platform Continuity
 - **Continuity Bridge**: Links ChatGPT custom GPTs to local VVAULT constructs.
 - **Provider Memory Router**: Routes memories by provider context while maintaining construct identity.

@@ -14,6 +14,7 @@ Version: 1.0.0
 import os
 import sys
 import json
+import re
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -746,8 +747,6 @@ def health_check():
         "version": "1.0.0"
     })
 
-import re
-
 USER_PATH_PATTERN = re.compile(r'^vvault/users/shard_\d+/[^/]+/')
 
 def _strip_user_prefix(path: str) -> str:
@@ -862,12 +861,10 @@ def get_vault_files():
         user_id = user_result.data[0]['id'] if user_result.data else None
         user_name = user_result.data[0].get('name', user_email.split('@')[0]) if user_result.data else user_email.split('@')[0]
         
-        user_id_str = f"{user_name.lower().replace(' ', '_')}_{user_id}" if user_id else None
-        
         if is_admin:
             result = supabase_client.table('vault_files').select('*').execute()
             logger.debug(f"Admin {user_email} fetching all vault files")
-            files = _transform_files_for_display(result.data or [], user_id_str, is_admin=True)
+            files = _transform_files_for_display(result.data or [], is_admin=True)
         else:
             if not user_id:
                 return jsonify({
@@ -879,7 +876,7 @@ def get_vault_files():
                 })
             result = supabase_client.table('vault_files').select('*').eq('user_id', user_id).eq('is_system', False).execute()
             logger.debug(f"User {user_email} fetching their vault files (user_id={user_id})")
-            files = _transform_files_for_display(result.data or [], user_id_str, is_admin=False)
+            files = _transform_files_for_display(result.data or [], is_admin=False)
         
         return jsonify({
             "success": True,
