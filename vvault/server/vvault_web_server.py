@@ -749,6 +749,117 @@ def health_check():
 
 USER_PATH_PATTERN = re.compile(r'^vvault/users/shard_\d+/[^/]+/')
 
+def _get_user_base_path(user_id: int, user_email: str) -> str:
+    """Get the canonical base path for a user's vault files.
+    
+    Returns: vvault/users/shard_0000/{user_slug}/
+    
+    The user_slug is derived from email: devon_woodson_{user_id} pattern
+    For now, we use a simple pattern; future: store slug in users table.
+    """
+    email_prefix = user_email.split('@')[0].replace('.', '_').replace('-', '_')
+    user_slug = f"{email_prefix}_{user_id}"
+    return f"vvault/users/shard_0000/{user_slug}/"
+
+def _create_default_user_folders(user_id: int, user_email: str) -> bool:
+    """Create default folder structure for a new user.
+    
+    Creates:
+      - account/profile.json
+      - instances/ (empty marker)
+      - library/documents/ (empty marker)
+      - library/media/ (empty marker)
+    
+    Returns True if successful, False otherwise.
+    """
+    if not supabase_client:
+        logger.warning("Cannot create default folders: Supabase not configured")
+        return False
+    
+    try:
+        base_path = _get_user_base_path(user_id, user_email)
+        
+        # Get user's name for profile
+        user_result = supabase_client.table('users').select('name').eq('id', user_id).execute()
+        user_name = user_result.data[0].get('name', 'User') if user_result.data else 'User'
+        
+        # Default profile content
+        profile_content = json.dumps({
+            "name": user_name,
+            "email": user_email,
+            "created_at": datetime.now().isoformat(),
+            "preferences": {
+                "theme": "dark",
+                "timezone": "EST"
+            }
+        }, indent=2)
+        
+        default_folders = [
+            {
+                'filename': f"{base_path}account/profile.json",
+                'file_type': 'application/json',
+                'content': profile_content,
+                'user_id': user_id,
+                'is_system': False,
+                'metadata': json.dumps({'type': 'user_profile'})
+            },
+            {
+                'filename': f"{base_path}instances/.keep",
+                'file_type': 'text/plain',
+                'content': '',
+                'user_id': user_id,
+                'is_system': False,
+                'metadata': json.dumps({'type': 'folder_marker'})
+            },
+            {
+                'filename': f"{base_path}library/documents/.keep",
+                'file_type': 'text/plain',
+                'content': '',
+                'user_id': user_id,
+                'is_system': False,
+                'metadata': json.dumps({'type': 'folder_marker'})
+            },
+            {
+                'filename': f"{base_path}library/media/.keep",
+                'file_type': 'text/plain',
+                'content': '',
+                'user_id': user_id,
+                'is_system': False,
+                'metadata': json.dumps({'type': 'folder_marker'})
+            }
+        ]
+        
+        for folder in default_folders:
+            try:
+                supabase_client.table('vault_files').insert(folder).execute()
+            except Exception as e:
+                if 'duplicate key' not in str(e).lower():
+                    logger.warning(f"Error creating folder {folder['filename']}: {e}")
+        
+        logger.info(f"Created default folders for user {user_id} at {base_path}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error creating default folders for user {user_id}: {e}")
+        return False
+
+def _get_user_construct_path(user_id: int, user_email: str, construct_id: str, subfolder: str = '') -> str:
+    """Get the path for a construct's files under a user's vault.
+    
+    Args:
+        user_id: The user's database ID
+        user_email: The user's email address
+        construct_id: The construct ID (e.g., 'katana-001')
+        subfolder: Optional subfolder within the construct (e.g., 'chatgpt', 'tests')
+    
+    Returns: Full path like vvault/users/shard_0000/devon_woodson_1/instances/katana-001/chatgpt/
+    """
+    base = _get_user_base_path(user_id, user_email)
+    path = f"{base}instances/{construct_id}/"
+    if subfolder:
+        path += f"{subfolder}/"
+    return path
+
 def _strip_user_prefix(path: str) -> str:
     """Strip any internal user path prefix (vvault/users/shard_XXXX/user_slug/) for display.
     
@@ -1319,6 +1430,15 @@ def append_chatty_message(construct_id):
         if not supabase_client:
             return jsonify({"success": False, "error": "Supabase not configured"}), 500
         
+        # Get current user for scoped queries
+        current_user = request.current_user
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+        
         data = request.get_json()
         role = data.get('role', 'user')
         content = data.get('content', '')
@@ -1330,13 +1450,14 @@ def append_chatty_message(construct_id):
         if role not in ['user', 'assistant', 'system']:
             return jsonify({"success": False, "error": "Role must be 'user', 'assistant', or 'system'"}), 400
         
+        # Query only the user's files
         search_filename = f"chat_with_{construct_id}.md"
-        existing = supabase_client.table('vault_files').select('id, content').ilike('filename', f'%{search_filename}%').execute()
+        existing = supabase_client.table('vault_files').select('id, content').eq('user_id', user_id).ilike('filename', f'%{search_filename}%').execute()
         
         if not existing.data or len(existing.data) == 0:
             return jsonify({
                 "success": False,
-                "error": f"Transcript not found for {construct_id}"
+                "error": f"Transcript not found for {construct_id}. Send a message first to create it."
             }), 404
         
         file_id = existing.data[0]['id']
@@ -1373,12 +1494,22 @@ def append_chatty_message(construct_id):
 @app.route('/api/chatty/constructs')
 @require_auth
 def get_chatty_constructs():
-    """Get all available constructs with chat transcripts"""
+    """Get all available constructs with chat transcripts (user-scoped)"""
     try:
         if not supabase_client:
             return jsonify({"success": False, "error": "Supabase not configured"}), 500
         
-        result = supabase_client.table('vault_files').select('filename, construct_id, created_at').ilike('filename', '%chat_with_%').execute()
+        # Get current user for scoped query
+        current_user = request.current_user
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        
+        if not user_id:
+            return jsonify({"success": True, "constructs": [], "count": 0})
+        
+        # Query only user's chat files
+        result = supabase_client.table('vault_files').select('filename, metadata, created_at').eq('user_id', user_id).ilike('filename', '%chat_with_%').execute()
         
         constructs = []
         # Special construct roles - Lin has dual-mode: conversational + undertone stabilizer
@@ -1388,11 +1519,13 @@ def get_chatty_constructs():
         
         for file in (result.data or []):
             filename = file.get('filename', '')
-            if filename.startswith('chat_with_') and filename.endswith('.md'):
-                construct_id = filename.replace('chat_with_', '').replace('.md', '')
+            # Extract construct_id from filename (chat_with_katana-001.md)
+            basename = filename.split('/')[-1] if '/' in filename else filename
+            if basename.startswith('chat_with_') and basename.endswith('.md'):
+                construct_id = basename.replace('chat_with_', '').replace('.md', '')
                 construct_data = {
                     "construct_id": construct_id,
-                    "filename": filename,
+                    "filename": basename,
                     "created_at": file.get('created_at')
                 }
                 # Add special role metadata if applicable
@@ -1447,6 +1580,15 @@ def chatty_message():
         if not user_message:
             return jsonify({"success": False, "error": "message is required"}), 400
         
+        # Get current user info for path construction
+        current_user = request.current_user
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+        
         # Get construct name from ID (e.g., zen-001 -> Zen)
         construct_name = construct_id.split('-')[0].title()
         
@@ -1500,31 +1642,40 @@ def chatty_message():
         human_time = now_est.strftime('%I:%M:%S %p').lstrip('0')
         date_header = now_est.strftime('%B %d, %Y')
         
-        # Get current transcript - check local first, then Supabase
+        # Get current transcript - query user's files only
         search_filename = f"chat_with_{construct_id}.md"
-        local_transcript_path = os.path.join(PROJECT_DIR, 'instances', construct_id, 'chatty', search_filename)
-        use_local = os.path.exists(local_transcript_path)
+        user_chatty_path = _get_user_construct_path(user_id, user_email, construct_id, 'chatty')
+        expected_filepath = f"{user_chatty_path}{search_filename}"
+        
         file_id = None
         current_content = ''
         
-        if use_local:
-            with open(local_transcript_path, 'r') as f:
-                current_content = f.read()
-        elif supabase_client:
-            existing = supabase_client.table('vault_files').select('id, content').ilike('filename', f'%{search_filename}%').execute()
-            if existing.data and len(existing.data) > 0:
-                file_id = existing.data[0]['id']
-                current_content = existing.data[0].get('content', '')
+        # Query for user's transcript file (must belong to this user)
+        existing = supabase_client.table('vault_files').select('id, content, filename').eq('user_id', user_id).ilike('filename', f'%{search_filename}%').execute()
+        
+        if existing.data and len(existing.data) > 0:
+            file_id = existing.data[0]['id']
+            current_content = existing.data[0].get('content', '')
+        else:
+            # Create new transcript file for user's construct
+            new_file_data = {
+                'filename': expected_filepath,
+                'file_type': 'text/markdown',
+                'content': f"# Chat with {construct_name}\n\nTranscript started {datetime.now().isoformat()}\n",
+                'user_id': user_id,
+                'is_system': False,
+                'metadata': json.dumps({'construct_id': construct_id, 'provider': 'chatty'})
+            }
+            insert_result = supabase_client.table('vault_files').insert(new_file_data).execute()
+            if insert_result.data:
+                file_id = insert_result.data[0]['id']
+                current_content = new_file_data['content']
+                logger.info(f"Created new transcript at {expected_filepath} for user {user_id}")
             else:
                 return jsonify({
                     "success": False,
-                    "error": f"Transcript not found for {construct_id}. Create it via migration first."
-                }), 404
-        else:
-            return jsonify({
-                "success": False,
-                "error": f"Transcript not found for {construct_id}. No local file or Supabase connection."
-            }), 404
+                    "error": f"Failed to create transcript for {construct_id}"
+                }), 500
         
         # Check if we need a new date header
         new_content = current_content
@@ -1544,16 +1695,13 @@ def chatty_message():
         assistant_formatted = f"\n**{human_time_response} {timezone} - {construct_name}** [{iso_timestamp_response}]: {assistant_response}\n"
         new_content += assistant_formatted
         
-        # Update transcript - local file or Supabase
-        if use_local:
-            with open(local_transcript_path, 'w') as f:
-                f.write(new_content)
-        else:
-            sha256 = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
-            supabase_client.table('vault_files').update({
-                'content': new_content,
-                'sha256': sha256
-            }).eq('id', file_id).execute()
+        # Update transcript in Supabase
+        sha256 = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
+        supabase_client.table('vault_files').update({
+            'content': new_content,
+            'sha256': sha256,
+            'updated_at': datetime.now().isoformat()
+        }).eq('id', file_id).execute()
         
         logger.info(f"Message exchange with {construct_id}: user sent {len(user_message)} chars, got {len(assistant_response)} chars")
         
@@ -1770,15 +1918,18 @@ def register():
         password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         
         user_stored = False
+        new_user_id = None
         if supabase_client:
             try:
-                supabase_client.table('users').insert({
+                insert_result = supabase_client.table('users').insert({
                     'email': email,
                     'password_hash': password_hash,
                     'name': name,
                     'role': 'user',
                     'created_at': datetime.now().isoformat()
                 }).execute()
+                if insert_result.data:
+                    new_user_id = insert_result.data[0].get('id')
                 logger.info(f"User registered in Supabase: {email}")
                 user_stored = True
             except Exception as e:
@@ -1813,6 +1964,10 @@ def register():
         token = secrets.token_urlsafe(32)
         expires_at = datetime.now() + timedelta(days=30)
         db_create_session(email, 'user', token, expires_at)
+        
+        # Create default folder structure for the new user
+        if new_user_id:
+            _create_default_user_folders(new_user_id, email)
         
         user_data = {'email': email, 'name': name, 'role': 'user'}
         log_auth_decision('registration_success', email, '/api/auth/register', 'allowed', 'user_created', ip)
