@@ -23,6 +23,7 @@ const VaultBrowser = ({ user }) => {
   const [fileContent, setFileContent] = useState(null);
   const [viewMode, setViewMode] = useState('list');
   const [constructs, setConstructs] = useState([]);
+  const [userInfo, setUserInfo] = useState({ root_label: 'Vault', is_admin: false });
 
   const getAuthHeaders = useCallback(() => {
     const token = user?.token || localStorage.getItem('vvault_token');
@@ -49,6 +50,24 @@ const VaultBrowser = ({ user }) => {
     }
   }, [getAuthHeaders]);
 
+  const fetchUserInfo = useCallback(async () => {
+    try {
+      const response = await fetch('/api/vault/user-info', {
+        headers: getAuthHeaders()
+      });
+      const data = await response.json();
+      if (data.success) {
+        setUserInfo({
+          root_label: data.root_label || 'Vault',
+          display_name: data.display_name,
+          is_admin: data.is_admin || false
+        });
+      }
+    } catch (err) {
+      console.error('Failed to fetch user info:', err);
+    }
+  }, [getAuthHeaders]);
+
   const fetchFiles = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -59,6 +78,9 @@ const VaultBrowser = ({ user }) => {
       const data = await response.json();
       if (data.success) {
         setFiles(data.files || []);
+        if (data.user_root) {
+          setUserInfo(prev => ({ ...prev, root_label: data.user_root }));
+        }
       } else {
         setError(data.error || 'Failed to load files');
       }
@@ -70,9 +92,10 @@ const VaultBrowser = ({ user }) => {
   }, [getAuthHeaders]);
 
   useEffect(() => {
+    fetchUserInfo();
     fetchFiles();
     fetchConstructs();
-  }, [fetchFiles, fetchConstructs]);
+  }, [fetchUserInfo, fetchFiles, fetchConstructs]);
 
   const buildHierarchy = (files) => {
     const hierarchy = { folders: {}, files: [] };
@@ -82,8 +105,8 @@ const VaultBrowser = ({ user }) => {
         ? JSON.parse(file.metadata) 
         : file.metadata || {};
       
-      const originalPath = metadata.original_path || file.filename;
-      const parts = originalPath.split('/').filter(p => p);
+      const displayPath = file.display_path || metadata.original_path || file.filename;
+      const parts = displayPath.split('/').filter(p => p);
       
       if (parts.length === 1) {
         hierarchy.files.push({ ...file, displayName: parts[0] });
@@ -276,12 +299,12 @@ const VaultBrowser = ({ user }) => {
           </div>
           
           <div className="breadcrumb">
-            <span className="breadcrumb-icon">🔒</span>
+            <span className="breadcrumb-icon">{userInfo.is_admin ? '🔐' : '🔒'}</span>
             <span 
               className="breadcrumb-item clickable"
               onClick={navigateHome}
             >
-              Vault
+              {userInfo.root_label}
             </span>
             {currentPath.map((folder, idx) => (
               <React.Fragment key={idx}>

@@ -746,6 +746,102 @@ def health_check():
         "version": "1.0.0"
     })
 
+import re
+
+USER_PATH_PATTERN = re.compile(r'^vvault/users/shard_\d+/[^/]+/')
+
+def _strip_user_prefix(path: str) -> str:
+    """Strip any internal user path prefix (vvault/users/shard_XXXX/user_slug/) for display.
+    
+    This uses a regex pattern to match any user path prefix, regardless of the exact slug format.
+    Examples:
+      - vvault/users/shard_0000/devon_woodson_123/instances/... -> instances/...
+      - vvault/users/shard_0000/abc-def-uuid/library/... -> library/...
+      - instances/katana-001/chatgpt/... -> instances/katana-001/chatgpt/... (unchanged)
+    """
+    match = USER_PATH_PATTERN.match(path)
+    if match:
+        return path[match.end():]
+    
+    if path.startswith('vvault/'):
+        parts = path.split('/')
+        if len(parts) >= 4 and parts[1] == 'users':
+            return '/'.join(parts[4:]) if len(parts) > 4 else ''
+    
+    return path
+
+def _transform_files_for_display(files: list, is_admin: bool = False) -> list:
+    """Transform file paths for user-friendly display, filtering out system files.
+    
+    For regular users: Strip internal path prefixes, hide system files
+    For admins: Show all files with full paths
+    """
+    transformed = []
+    for f in files:
+        if f.get('is_system') and not is_admin:
+            continue
+        
+        file_copy = dict(f)
+        original_path = f.get('filename', '')
+        
+        if not is_admin:
+            display_path = _strip_user_prefix(original_path)
+            file_copy['display_path'] = display_path
+            file_copy['internal_path'] = original_path
+            
+            metadata = file_copy.get('metadata', {})
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except:
+                    metadata = {}
+            metadata['original_path'] = display_path
+            file_copy['metadata'] = metadata
+        else:
+            file_copy['display_path'] = original_path
+            file_copy['internal_path'] = original_path
+        
+        transformed.append(file_copy)
+    return transformed
+
+@app.route('/api/vault/user-info')
+@require_auth
+def get_vault_user_info():
+    """Get current user's vault info (display name, root path, etc.)"""
+    try:
+        current_user = request.current_user
+        user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
+        
+        if not supabase_client:
+            display_name = user_email.split('@')[0].replace('.', ' ').title()
+            return jsonify({
+                "success": True,
+                "display_name": display_name,
+                "is_admin": user_role == 'admin',
+                "root_label": display_name if user_role != 'admin' else "Vault (Admin)"
+            })
+        
+        user_result = supabase_client.table('users').select('id, name, email').eq('email', user_email).execute()
+        if user_result.data:
+            user_data = user_result.data[0]
+            display_name = user_data.get('name') or user_email.split('@')[0].replace('.', ' ').title()
+            user_id = user_data.get('id')
+        else:
+            display_name = user_email.split('@')[0].replace('.', ' ').title()
+            user_id = None
+        
+        return jsonify({
+            "success": True,
+            "display_name": display_name,
+            "user_id": user_id,
+            "is_admin": user_role == 'admin',
+            "root_label": display_name if user_role != 'admin' else "Vault (Admin)"
+        })
+    except Exception as e:
+        logger.error(f"Error getting user info: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route('/api/vault/files')
 @require_auth
 def get_vault_files():
@@ -760,28 +856,36 @@ def get_vault_files():
         current_user = request.current_user
         user_email = current_user.get('email')
         user_role = current_user.get('role', 'user')
+        is_admin = user_role == 'admin'
         
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_result = supabase_client.table('users').select('id, name').eq('email', user_email).execute()
         user_id = user_result.data[0]['id'] if user_result.data else None
+        user_name = user_result.data[0].get('name', user_email.split('@')[0]) if user_result.data else user_email.split('@')[0]
         
-        if user_role == 'admin':
+        user_id_str = f"{user_name.lower().replace(' ', '_')}_{user_id}" if user_id else None
+        
+        if is_admin:
             result = supabase_client.table('vault_files').select('*').execute()
             logger.debug(f"Admin {user_email} fetching all vault files")
+            files = _transform_files_for_display(result.data or [], user_id_str, is_admin=True)
         else:
             if not user_id:
                 return jsonify({
                     "success": True,
                     "files": [],
                     "count": 0,
+                    "user_root": user_name,
                     "message": "No files yet - upload your first file to get started"
                 })
-            result = supabase_client.table('vault_files').select('*').eq('user_id', user_id).execute()
+            result = supabase_client.table('vault_files').select('*').eq('user_id', user_id).eq('is_system', False).execute()
             logger.debug(f"User {user_email} fetching their vault files (user_id={user_id})")
+            files = _transform_files_for_display(result.data or [], user_id_str, is_admin=False)
         
         return jsonify({
             "success": True,
-            "files": result.data or [],
-            "count": len(result.data) if result.data else 0
+            "files": files,
+            "count": len(files),
+            "user_root": user_name if not is_admin else "Vault (Admin)"
         })
     except Exception as e:
         logger.error(f"Error fetching vault files: {e}")
