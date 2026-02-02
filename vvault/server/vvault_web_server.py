@@ -831,10 +831,12 @@ def _create_default_user_folders(user_id: int, user_email: str) -> bool:
         
         for folder in default_folders:
             try:
-                supabase_client.table('vault_files').insert(folder).execute()
+                supabase_client.table('vault_files').upsert(
+                    folder, 
+                    on_conflict='filename'
+                ).execute()
             except Exception as e:
-                if 'duplicate key' not in str(e).lower():
-                    logger.warning(f"Error creating folder {folder['filename']}: {e}")
+                logger.warning(f"Error creating folder {folder['filename']}: {e}")
         
         logger.info(f"Created default folders for user {user_id} at {base_path}")
         return True

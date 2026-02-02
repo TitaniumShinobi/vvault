@@ -70,6 +70,15 @@ VVAULT uses a two-root architecture for file separation:
 
 **UI Breadcrumb:** Shows user's display name (e.g., "Devon Woodson /") instead of internal path structure.
 
+**Construct Growth Rules:**
+- New chat transcripts: `instances/{construct_id}/chatty/chat_with_{construct_id}.md`
+- ChatGPT transcripts: `instances/{construct_id}/chatgpt/*.md`
+- Tests: `instances/{construct_id}/tests/continuity_YYYYMMDD.md`
+- Identity files: `instances/{construct_id}/identity/prompt.json`
+
+**Default Folder Creation:**
+- On registration, users get: `account/profile.json`, `instances/.keep`, `library/documents/.keep`, `library/media/.keep`
+
 ### Cross-Platform Continuity
 - **Continuity Bridge**: Links ChatGPT custom GPTs to local VVAULT constructs.
 - **Provider Memory Router**: Routes memories by provider context while maintaining construct identity.
