@@ -882,24 +882,36 @@ def _strip_user_prefix(path: str) -> str:
     
     return path
 
-def _transform_files_for_display(files: list, is_admin: bool = False) -> list:
+def _transform_files_for_display(files: list, is_admin: bool = False, user_id: str = None) -> list:
     """Transform file paths for user-friendly display, filtering out system files.
     
-    For regular users: Strip internal path prefixes, hide system files
-    For admins: Show all files with full paths
+    For regular users: Use storage_path, strip bucket prefix and user folder for display
+    Storage path format: {user_id}/{user_slug}/...
+    Display path format: capsules/..., instances/..., etc.
     """
+    import re
+    UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/')
+    USER_SLUG_PATTERN = re.compile(r'^[a-z_]+_\d+/')
+    
     transformed = []
     for f in files:
         if f.get('is_system') and not is_admin:
             continue
         
         file_copy = dict(f)
-        original_path = f.get('filename', '')
+        storage_path = f.get('storage_path') or f.get('filename') or ''
         
-        if not is_admin:
-            display_path = _strip_user_prefix(original_path)
+        if not is_admin and user_id:
+            display_path = storage_path
+            display_path = UUID_PATTERN.sub('', display_path)
+            display_path = USER_SLUG_PATTERN.sub('', display_path)
+            
+            if not display_path:
+                display_path = f.get('filename', 'unknown')
+            
             file_copy['display_path'] = display_path
-            file_copy['internal_path'] = original_path
+            file_copy['storage_path'] = storage_path
+            file_copy['internal_path'] = storage_path
             
             metadata = file_copy.get('metadata', {})
             if isinstance(metadata, str):
@@ -910,8 +922,9 @@ def _transform_files_for_display(files: list, is_admin: bool = False) -> list:
             metadata['original_path'] = display_path
             file_copy['metadata'] = metadata
         else:
-            file_copy['display_path'] = original_path
-            file_copy['internal_path'] = original_path
+            file_copy['display_path'] = storage_path
+            file_copy['storage_path'] = storage_path
+            file_copy['internal_path'] = storage_path
         
         transformed.append(file_copy)
     return transformed
@@ -975,9 +988,9 @@ def get_vault_files():
         user_name = user_result.data[0].get('name', user_email.split('@')[0]) if user_result.data else user_email.split('@')[0]
         
         if is_admin:
-            result = supabase_client.table('vault_files').select('*').execute()
+            result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, content, file_type, metadata, created_at').execute()
             logger.debug(f"Admin {user_email} fetching all vault files")
-            files = _transform_files_for_display(result.data or [], is_admin=True)
+            files = _transform_files_for_display(result.data or [], is_admin=True, user_id=None)
         else:
             if not user_id:
                 return jsonify({
@@ -987,9 +1000,9 @@ def get_vault_files():
                     "user_root": user_name,
                     "message": "No files yet - upload your first file to get started"
                 })
-            result = supabase_client.table('vault_files').select('*').eq('user_id', user_id).eq('is_system', False).execute()
+            result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, content, file_type, metadata, created_at').eq('user_id', user_id).eq('is_system', False).execute()
             logger.debug(f"User {user_email} fetching their vault files (user_id={user_id})")
-            files = _transform_files_for_display(result.data or [], is_admin=False)
+            files = _transform_files_for_display(result.data or [], is_admin=False, user_id=user_id)
         
         return jsonify({
             "success": True,

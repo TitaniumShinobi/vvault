@@ -14,6 +14,16 @@ const getConstructColor = (constructId) => {
   return CONSTRUCT_COLORS[name] || CONSTRUCT_COLORS.default;
 };
 
+const getLogicalPath = (file) => {
+  let path = file.display_path || file.storage_path || file.filename || '';
+  
+  path = path.replace(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\//, '');
+  
+  path = path.replace(/^[a-z_]+_\d+\//, '');
+  
+  return path || file.filename || 'unknown';
+};
+
 const VaultBrowser = ({ user }) => {
   const [files, setFiles] = useState([]);
   const [currentPath, setCurrentPath] = useState([]);
@@ -101,14 +111,12 @@ const VaultBrowser = ({ user }) => {
     const hierarchy = { folders: {}, files: [] };
     
     files.forEach(file => {
-      const metadata = typeof file.metadata === 'string' 
-        ? JSON.parse(file.metadata) 
-        : file.metadata || {};
+      const logicalPath = getLogicalPath(file);
+      const parts = logicalPath.split('/').filter(p => p);
       
-      const displayPath = file.display_path || metadata.original_path || file.filename;
-      const parts = displayPath.split('/').filter(p => p);
-      
-      if (parts.length === 1) {
+      if (parts.length === 0) {
+        hierarchy.files.push({ ...file, displayName: file.filename });
+      } else if (parts.length === 1) {
         hierarchy.files.push({ ...file, displayName: parts[0] });
       } else {
         let current = hierarchy;
