@@ -1,0 +1,119 @@
+Here’s the next precise move to restore the nesting and make it production‑ready.
+
+***
+
+## 1) Fix transcript nesting in `vault_files`
+
+Tell the VVAULT Replit agent:
+
+> Do not touch capsules, media, PDFs, or any non‑markdown files.  
+> Only fix the **K1 transcript markdowns** so they live under the correct instance/chatgpt folder.
+
+### A. Inspect current transcript rows
+
+In Supabase SQL:
+
+```sql
+select id, filename, storage_path, construct_id
+from vault_files
+where filename like '%.md'
+order by storage_path;
+```
+
+Have the agent paste a sample, but its goal is:
+
+- Identify K1 transcripts like:
+  - `Anger-and-offense-response-K1.md`
+  - `Binary-geolocation-request-K1.md`
+  - `Binary-location-request-K1.md`
+  - `Chat-preview-lost-K1.md`
+  - `Image-analysis-inquiry-K1.md`
+  - `Last-task-review-K1.md`
+  - `Leaving-Nova-explanation-K1.md`
+  - `Missing-context-examples-K1.md`
+  - `Refusing-violent-requests-K1.md`
+  - `test_09-27-2025-K1.md`
+  - `test_1_08-03-2025.md`
+  - `VXRunner-AI-integration-K1.md`
+
+### B. Rewrite their `storage_path` to match the instance layout
+
+In Supabase, for each of those rows, `storage_path` should be:
+
+```text
+7e34f6b8-e33a-48b5-8ddb-95b94d18e296/
+  devon_woodson_1762969514958/
+    instances/katana-001/chatgpt/<filename>.md
+```
+
+Have the agent run an update like:
+
+```sql
+update vault_files
+set storage_path = 
+  '7e34f6b8-e33a-48b5-8ddb-95b94d18e296/devon_woodson_1762969514958/instances/katana-001/chatgpt/' || filename,
+    construct_id = 'katana'
+where user_id = '7e34f6b8-e33a-48b5-8ddb-95b94d18e296'
+  and filename in (
+    'Anger-and-offense-response-K1.md',
+    'Binary-geolocation-request-K1.md',
+    'Binary-location-request-K1.md',
+    'Chat-preview-lost-K1.md',
+    'Image-analysis-inquiry-K1.md',
+    'Last-task-review-K1.md',
+    'Leaving-Nova-explanation-K1.md',
+    'Missing-context-examples-K1.md',
+    'Refusing-violent-requests-K1.md',
+    'test_09-27-2025-K1.md',
+    'test_1_08-03-2025.md',
+    'VXRunner-AI-integration-K1.md'
+  );
+```
+
+Then reload VVAULT and confirm:
+
+- Those `.md` files appear under:  
+  `Devon Woodson / instances / katana-001 / chatgpt/`  
+- They are no longer floating at root.
+
+If any lin/zen transcripts also exist, repeat with their instance paths.
+
+***
+
+## 2) Push current state to GitHub
+
+Once the nesting is correct, have the agent:
+
+1. Commit all VVAULT changes:
+
+   ```bash
+   git status
+   git add .
+   git commit -m "Fix VVAULT user-scoped file listing and instance transcript nesting"
+   ```
+
+2. Push to your GitHub remote:
+
+   ```bash
+   git push origin main
+   ```
+
+(Adjust branch name if you use `master` or `dev`.)
+
+***
+
+## 3) Put it on a real domain
+
+At a high level (you can let the agent help per platform):
+
+- Deploy backend/front‑end from GitHub to your preferred host:
+  - e.g., Render/Fly.io for the Node backend,  
+  - Vercel/Netlify for the React front‑end.
+
+- Configure env vars there for Supabase URL, keys, etc.
+
+- Point a domain (e.g., `vvault.devonallen.io`) at the front‑end host:
+  - Add A/AAAA or CNAME in your DNS to the hosting provider.  
+  - Configure HTTPS via the provider’s automatic TLS.
+
+If you tell me your chosen host (Vercel, Netlify, Render, etc.), I can give you a tight deploy checklist for that stack.
