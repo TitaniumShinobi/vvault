@@ -112,3 +112,99 @@ IPFS, various Blockchain Networks (Ethereum, Bitcoin, Polygon, Arbitrum, Optimis
 
 ### Storage
 Local JSON-based capsule storage, JSON indexes, ChromaDB (vector database), SQLite (audit logs).
+
+## Critical User Data
+
+### Primary User Account
+- **User ID**: `7e34f6b8-e33a-48b5-8ddb-95b94d18e296`
+- **Email**: `dwoodson92@gmail.com`
+- **Display Name**: Devon Woodson
+- **User Slug**: `devon_woodson_1762969514958`
+
+### Supabase Configuration
+- **Project URL**: `https://xkxckpbexjuhmfdjsopd.supabase.co`
+- **Key Tables**:
+  - `users` - User accounts (id, email, name)
+  - `vault_files` - All user files with storage_path for folder hierarchy
+  - `strategy_configs` - Service configurations
+  - `service_credentials` - Encrypted API credentials
+
+### Storage Path Format
+All vault files use this path structure in the `storage_path` column:
+```
+{user_id}/{user_slug}/{folder_structure}/{filename}
+```
+Example: `7e34f6b8-e33a-48b5-8ddb-95b94d18e296/devon_woodson_1762969514958/instances/katana-001/chatgpt/test.md`
+
+The frontend strips the UUID and user slug prefixes to display clean folder paths like `instances/katana-001/chatgpt/`.
+
+## Troubleshooting Guide
+
+### "This folder is empty" in Vault UI
+
+**Symptom**: User logs in but sees empty vault with "This folder is empty" message.
+
+**Common Causes**:
+
+1. **Email mismatch in users table**
+   - OAuth returns the exact email from Google (e.g., `dwoodson92@gmail.com`)
+   - If the `users` table has a typo or different email, a new empty user is created
+   - **Fix**: Update the email in Supabase `users` table to match exactly:
+     ```python
+     supabase.table('users').update({'email': 'correct@email.com'}).eq('id', 'user-uuid').execute()
+     ```
+
+2. **NULL storage_path values**
+   - Files exist but have NULL `storage_path`, breaking folder hierarchy
+   - **Fix**: Run storage_path inference based on construct_id and filename patterns
+   - See `scripts/migrate_to_supabase.py` for inference logic
+
+3. **Wrong user_id in vault_files**
+   - Files associated with different user ID than currently logged in user
+   - **Diagnosis**: Query vault_files for expected user_id
+   - **Fix**: Update user_id if records were created under wrong account
+
+### OAuth Creates New User Instead of Finding Existing
+
+**Root Cause**: Email in `users` table doesn't match OAuth provider's email exactly.
+
+**Prevention**:
+- Always verify email matches exactly (case-sensitive in some providers)
+- Log the email lookup at OAuth callback for debugging
+- Never manually edit user emails without verifying against OAuth provider
+
+### Files Not Appearing in Correct Folders
+
+**Root Cause**: `storage_path` column is NULL or incorrectly formatted.
+
+**Storage Path Patterns**:
+- ChatGPT transcripts: `instances/{construct_id}/chatgpt/{filename}`
+- Chatty transcripts: `instances/{construct_id}/chatty/chat_with_{construct_id}.md`
+- Identity files: `instances/{construct_id}/identity/{filename}`
+- Account files: `account/{filename}`
+- Documents: `library/documents/{filename}`
+- Media: `library/media/{filename}`
+
+**Fix Script**:
+```python
+# Infer storage_path based on construct_id and filename patterns
+if construct_id in ['katana', 'katana-001']:
+    if filename.endswith('-K1.md'):
+        storage_path = f'{base_path}instances/katana-001/chatgpt/{filename}'
+    elif filename in ['conditioning.txt', 'prompt.txt']:
+        storage_path = f'{base_path}instances/katana-001/identity/{filename}'
+```
+
+## Agent Instructions
+
+### DO NOT:
+- Modify vault_files data without user approval (except NULL storage_path fixes)
+- Run destructive SQL (DROP, DELETE, UPDATE on production data)
+- Change the primary user's email without verifying against OAuth provider
+- Create duplicate user records
+
+### ALWAYS:
+- Query Supabase directly to verify data issues (not just check code)
+- Check logs for "Created new OAuth user" which indicates email mismatch
+- Preserve existing user_id associations when fixing storage_path
+- Update replit.md with any new troubleshooting discoveries
