@@ -1,0 +1,65 @@
+Here’s a concise state-of-the-world summary you can paste to the Replit agent working in the `vvault` repo.
+
+***
+
+We’ve just brought up a fresh production deployment of the `vvault` Web API on a DigitalOcean Ubuntu 24.04 Droplet with Gunicorn and Nginx in front of it, plus OAuth dependencies and DNS wiring. [stackoverflow](https://stackoverflow.com/questions/39460892/gunicorn-no-module-named-myproject)
+
+Key points for the agent:
+
+- Backend environment:
+  - Code lives at `/opt/vvault`.
+  - A Python 3.12 virtualenv is at `/opt/vvault/venv`.
+  - The app is installed editable: `pip install -e .` was run inside that venv.
+  - Gunicorn is started manually from `/opt/vvault` with:
+    ```bash
+    gunicorn --bind 127.0.0.1:8000 vvault.server.vvault_web_server:app
+    ```
+  - At startup, the app logs:
+    `✅ VVAULT Web API initialized with 0 capsules`.
+
+- Dependencies fixed:
+  - Gunicorn originally failed with `ModuleNotFoundError: No module named 'oauthlib'`.
+  - We resolved this by installing:
+    ```bash
+    pip install oauthlib requests-oauthlib
+    ```
+  - After that, Gunicorn boots cleanly.
+
+- Behavior of the root endpoint:
+  - Both direct Gunicorn (`curl http://127.0.0.1:8000/`) and via Nginx proxy return:
+    ```json
+    {"error":"Endpoint not found","success":false}
+    ```
+  - This is expected; `/` is not a defined API route, so the app responds with a JSON 404, not an infra error. [stackoverflow](https://stackoverflow.com/questions/9930695/rest-api-404-bad-uri-or-missing-resource)
+
+- Nginx reverse proxy:
+  - Nginx is installed and enabled on the Droplet.
+  - We created `/etc/nginx/sites-available/vvault` with:
+    ```nginx
+    server {
+        listen 80;
+        server_name vvault.thewreck.org;
+
+        location / {
+            proxy_pass http://127.0.0.1:8000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+    ```
+  - It is symlinked into `/etc/nginx/sites-enabled/vvault`.
+  - `nginx -t` passes and `systemctl reload nginx` succeeds.
+  - `curl -H "Host: vvault.thewreck.org" http://127.0.0.1/` returns the same JSON 404 as hitting Gunicorn directly, so Nginx → Gunicorn wiring is correct. [stackoverflow](https://stackoverflow.com/questions/71053746/setting-up-reverse-proxy-nginx-gunicorn-django-rest-404-not-found)
+
+- DNS situation (important for external access):
+  - `nslookup vvault.thewreck.org` from the client machine currently resolves to Cloudflare IPs `104.21.23.83` and `172.67.209.216`, not the Droplet’s public IP `165.245.136.194`.
+  - That means external browser requests are still going to Cloudflare, not directly to this server. [cf.sjr](https://cf.sjr.dev/tools/ips)
+  - Plan is to update DNS (likely in Cloudflare) so the `A` record for `vvault.thewreck.org` points to `165.245.136.194`, ideally starting with “DNS only” (grey cloud) so requests reach this Droplet directly. [johnnyvps](https://johnnyvps.com/docs/managing-dns-records-in-cloudflare/)
+
+What the agent should assume going forward:
+
+- Local dev behavior (e.g. how the frontend talks to the API, which endpoints exist) should match production; the only configured public entrypoint in prod is `http://vvault.thewreck.org/`, reverse-proxied to Gunicorn on `127.0.0.1:8000`.
+- The root path `/` returning `{"error":"Endpoint not found"}` is by design; real functionality is under specific API endpoints (e.g., whatever the repo defines for auth, capsules, health, etc.).
+- Any changes that affect startup (imports, module paths, or the WSGI app object `vvault.server.vvault_web_server:app`) must remain compatible with this Gunicorn + Nginx setup.
