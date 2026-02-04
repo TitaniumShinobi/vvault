@@ -1,0 +1,43 @@
+Here’s a focused prompt you can paste to the Replit agent to diagnose and *permanently* fix the “empty vvault folder / hidden files” issue:
+
+***
+
+**Prompt for Replit agent (vvault files disappearing)**
+
+> I’m in the **vvault** Replit project. My local GitHub repo is fine and up to date, but inside Replit the main project folder suddenly shows as empty / hidden. I did **not** pull any new changes into Replit since yesterday; I only pushed from local to GitHub. Now I can’t see the vvault files that were visible yesterday.
+> 
+> I need you to:
+> 
+> 1. **Inspect the workspace and Git status**
+>    - Show me the output of:
+>      - `ls -la` from the project root.
+>      - `ls -la` inside the vvault directory that appears empty in the UI.
+>      - `git status -uall`.
+>    - Tell me whether the files are actually missing on disk, or just hidden from the Replit file tree (e.g., due to `.replit` / `.gitignore` / hidden files configuration). [reddit](https://www.reddit.com/r/replit/comments/1kquhit/a_guide_to_using_git_in_replit/)
+> 
+> 2. **Check Replit file tree / hidden configuration**
+>    - Open `.replit` and any config that controls which paths are hidden in the UI.  
+>    - Verify that the vvault source directories are **not** listed as hidden, and if they are, update the config so the vvault project files are always visible in the file tree. [youtube](https://www.youtube.com/watch?v=xGUWIGVS0MI)
+> 
+> 3. **Verify the Git remote and contents**
+>    - Confirm which GitHub repo this Replit project is connected to and which branch it’s on.  
+>    - Run `git remote -v` and `git log -5 --oneline`.  
+>    - If needed, run a **read‑only** `git diff` vs origin to confirm the tracked files from GitHub are present on disk, not deleted. [docs.replit](https://docs.replit.com/replit-workspace/workspace-features/git-interface)
+> 
+> 4. **Fix the workspace so files stay visible**
+>    - If the files exist on disk but are hidden from the UI:
+>      - Update `.replit` or any Replit “hidden files” setting so that the vvault app directory (all source, config, and env example files) always appears in the file tree.  
+>      - Do **not** move or delete any app files; only adjust visibility.
+>    - If the files are truly missing from disk:
+>      - Explain clearly what deleted them (e.g., previous agent actions, git reset, or workspace cleanup).  
+>      - Then **safely restore** the vvault source from the connected GitHub repo (using `git fetch` + `git reset --hard origin/main` or equivalent), making sure the restored files are visible in the Replit file tree. [reddit](https://www.reddit.com/r/git/comments/3a5iht/problem_with_empty_directory_after_cloning/)
+> 
+> 5. **Make this fix permanent**
+>    - Ensure that:
+>      - The vvault directory is not listed under any hidden patterns or excluded directories in Replit config.  
+>      - Future Git syncs (pull/push) will not hide or remove the vvault files from the UI.  
+>    - Summarize the exact changes you made so I can repeat them if needed in another Replit project.
+> 
+> Do **not** change application code or configs beyond what’s necessary to restore and permanently show the vvault files in the Replit file tree.
+
+---
