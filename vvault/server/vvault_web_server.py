@@ -737,6 +737,14 @@ def ingest_human_capsule():
         logger.error(f"Error in ingest_human_capsule endpoint: {e}")
         return jsonify({"success": False, "error": "Human capsule ingestion failed"}), 500
 
+@app.route('/')
+def root():
+    """Root endpoint - minimal status response"""
+    return jsonify({
+        "status": "ok",
+        "service": "vvault-api"
+    })
+
 @app.route('/api/health')
 def health_check():
     """Health check endpoint"""
