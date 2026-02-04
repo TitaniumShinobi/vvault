@@ -55,7 +55,7 @@ module.exports = {
       }
     ],
     compress: true,
-    port: 5000,
+    port: 7784,
     host: '0.0.0.0',
     hot: true,
     open: false,

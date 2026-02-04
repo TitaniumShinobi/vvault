@@ -11,6 +11,10 @@ Date: 2025-10-28
 Version: 1.0.0
 """
 
+# Load .env file FIRST before any other imports
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import sys
 import json
@@ -36,7 +40,11 @@ from oauthlib.oauth2 import WebApplicationClient
 try:
     from supabase import create_client
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
-    SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
+    SUPABASE_KEY = (
+        os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        or os.environ.get("SUPABASE_SERVICE_KEY")
+        or os.environ.get("SUPABASE_ANON_KEY")
+    )
     supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 except Exception as e:
     supabase_client = None
@@ -49,6 +57,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# MongoDB Atlas (optional)
+mongo_client = None
+mongo_db = None
+mongo_users = None
+MONGODB_URI = os.environ.get("MONGODB_URI")
+if MONGODB_URI:
+    try:
+        from pymongo import MongoClient
+        mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=3000)
+        mongo_client.admin.command("ping")
+        mongo_db = mongo_client.get_default_database()
+        if mongo_db is None:
+            mongo_db = mongo_client["vvault"]
+        mongo_users = mongo_db["users"]
+        logger.info("✅ Connected to MongoDB (Atlas)")
+    except Exception as e:
+        mongo_client = None
+        mongo_db = None
+        mongo_users = None
+        logger.error(f"MongoDB connection failed: {e}")
+else:
+    logger.info("MongoDB not configured: MONGODB_URI missing")
+
 # Flask app configuration
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'vvault-secret-key-change-in-production'
@@ -59,12 +90,26 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
 GOOGLE_DISCOVERY_URL = "https://accounts.google.com/.well-known/openid-configuration"
 
+# Canonical OAuth Redirect URI (single source of truth)
+PUBLIC_CALLBACK_BASE = os.environ.get("PUBLIC_CALLBACK_BASE") or "http://localhost:5173"
+CALLBACK_PATH = os.environ.get("CALLBACK_PATH") or "/api/auth/google/callback"
+REDIRECT_URI = f"{PUBLIC_CALLBACK_BASE.rstrip('/')}{CALLBACK_PATH if CALLBACK_PATH.startswith('/') else '/' + CALLBACK_PATH}"
+VVAULT_FRONTEND_URL = (os.environ.get("VVAULT_FRONTEND_URL") or PUBLIC_CALLBACK_BASE).rstrip('/')
+
+# oauthlib blocks OAuth flows over plain HTTP by default. Google allows localhost
+# redirect URIs over HTTP in dev, so enable it only for localhost callbacks.
+if REDIRECT_URI.startswith("http://localhost") or REDIRECT_URI.startswith("http://127.0.0.1"):
+    os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
+# Log OAuth configuration on startup
+logger.info(f"🔐 OAuth Redirect URI: {REDIRECT_URI}")
+
 # Initialize Google OAuth client
 google_client = None
 if GOOGLE_CLIENT_ID:
     google_client = WebApplicationClient(GOOGLE_CLIENT_ID)
 
-# Get Replit domain for OAuth callbacks
+# Get Replit domain for OAuth callbacks (legacy, prefer REDIRECT_URI)
 REPLIT_DEV_DOMAIN = os.environ.get("REPLIT_DEV_DOMAIN", "localhost:5000")
 
 # Service API Configuration (for FXShinobi/Chatty backend-to-backend calls)
@@ -994,6 +1039,10 @@ def get_vault_files():
         user_result = supabase_client.table('users').select('id, name').eq('email', user_email).execute()
         user_id = user_result.data[0]['id'] if user_result.data else None
         user_name = user_result.data[0].get('name', user_email.split('@')[0]) if user_result.data else user_email.split('@')[0]
+        has_service_role = bool(
+            os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+        )
+        is_dev = os.environ.get("NODE_ENV", "development") != "production"
         
         if is_admin:
             result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, content, file_type, metadata, created_at').execute()
@@ -1001,6 +1050,16 @@ def get_vault_files():
             files = _transform_files_for_display(result.data or [], is_admin=True, user_id=None)
         else:
             if not user_id:
+                if has_service_role and is_dev:
+                    result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, content, file_type, metadata, created_at').execute()
+                    files = _transform_files_for_display(result.data or [], is_admin=True, user_id=None)
+                    return jsonify({
+                        "success": True,
+                        "files": files,
+                        "count": len(files),
+                        "user_root": "Vault (Admin)",
+                        "message": "Service-role fallback (dev): no user mapping found"
+                    })
                 return jsonify({
                     "success": True,
                     "files": [],
@@ -2066,7 +2125,8 @@ def verify_token():
         return jsonify({"success": False, "error": "Token verification failed"}), 500
 
 # Google OAuth Routes
-@app.route('/api/auth/oauth/google')
+@app.route('/api/auth/google')
+@app.route('/api/auth/google/login')
 def google_oauth_login():
     """Initiate Google OAuth login"""
     try:
@@ -2079,28 +2139,22 @@ def google_oauth_login():
         google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
         authorization_endpoint = google_provider_cfg["authorization_endpoint"]
         
-        # Build callback URL - use REPLIT_DEV_DOMAIN for Replit environment
-        if REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
-            host = REPLIT_DEV_DOMAIN
-        else:
-            host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
-        callback_url = f"https://{host}/api/auth/oauth/google/callback"
-        
-        # Prepare the OAuth request
+        # Prepare the OAuth request using canonical redirect URI
         request_uri = google_client.prepare_request_uri(
             authorization_endpoint,
-            redirect_uri=callback_url,
+            redirect_uri=REDIRECT_URI,
             scope=["openid", "email", "profile"],
         )
         
-        logger.info(f"Redirecting to Google OAuth with callback: {callback_url}")
+        logger.info(f"OAuth authorization URL: {request_uri}")
+        logger.info(f"Redirecting to Google OAuth with callback: {REDIRECT_URI}")
         return redirect(request_uri)
         
     except Exception as e:
         logger.error(f"Google OAuth init error: {e}")
         return jsonify({"success": False, "error": "OAuth initialization failed"}), 500
 
-@app.route('/api/auth/oauth/google/callback')
+@app.route('/api/auth/google/callback')
 def google_oauth_callback():
     """Handle Google OAuth callback"""
     try:
@@ -2108,6 +2162,8 @@ def google_oauth_callback():
         
         if not google_client or not GOOGLE_CLIENT_ID:
             return jsonify({"success": False, "error": "Google OAuth not configured"}), 500
+        
+        logger.info(f"OAuth callback params: {request.args.to_dict()}")
         
         # Get the authorization code from Google
         code = request.args.get("code")
@@ -2121,23 +2177,16 @@ def google_oauth_callback():
         google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
         token_endpoint = google_provider_cfg["token_endpoint"]
         
-        # Build callback URL (must match initial request)
-        if REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
-            host = REPLIT_DEV_DOMAIN
-        else:
-            host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
-        callback_url = f"https://{host}/api/auth/oauth/google/callback"
-        authorization_response = f"https://{host}{request.full_path}"
-        
-        logger.info(f"Processing OAuth callback with redirect_url: {callback_url}")
-        
         # Exchange authorization code for tokens
+        # IMPORTANT: redirect_url must match the initial redirect URI
         token_url, headers, body = google_client.prepare_token_request(
             token_endpoint,
-            authorization_response=authorization_response,
-            redirect_url=callback_url,
+            authorization_response=request.url,
+            redirect_url=REDIRECT_URI,
             code=code,
         )
+        
+        logger.info(f"Processing OAuth callback with redirect_uri: {REDIRECT_URI}")
         
         token_response = requests.post(
             token_url,
@@ -2162,40 +2211,74 @@ def google_oauth_callback():
         users_email = userinfo["email"]
         users_name = userinfo.get("given_name", userinfo.get("name", "User"))
         
-        # Create or get user in fallback database
-        if users_email not in USERS_DB_FALLBACK:
-            USERS_DB_FALLBACK[users_email] = {
-                'password': None,
-                'name': users_name,
-                'role': 'user',
-                'oauth_provider': 'google'
-            }
-            logger.info(f"Created new OAuth user: {users_email}")
+        # Create or update user in MongoDB (preferred) or fallback database
+        if mongo_users is not None:
+            try:
+                mongo_users.update_one(
+                    {"email": users_email},
+                    {
+                        "$set": {
+                            "name": users_name,
+                            "email": users_email,
+                            "oauth_provider": "google",
+                            "updated_at": datetime.now().isoformat()
+                        },
+                        "$setOnInsert": {
+                            "role": "user",
+                            "created_at": datetime.now().isoformat()
+                        }
+                    },
+                    upsert=True
+                )
+                logger.info(f"MongoDB user upserted: {users_email}")
+            except Exception as e:
+                logger.error(f"MongoDB user upsert failed: {e}")
+        else:
+            if users_email not in USERS_DB_FALLBACK:
+                USERS_DB_FALLBACK[users_email] = {
+                    'password': None,
+                    'name': users_name,
+                    'role': 'user',
+                    'oauth_provider': 'google'
+                }
+                logger.info(f"Created new OAuth user: {users_email}")
         
         # Create session token (30 days for OAuth logins)
         session_token = secrets.token_urlsafe(32)
         expires_at = datetime.now() + timedelta(days=30)
         
-        ACTIVE_SESSIONS[session_token] = {
-            'email': users_email,
-            'user_id': users_email,
-            'expires_at': expires_at,
-            'created_at': datetime.now()
-        }
+        db_create_session(users_email, 'user', session_token, expires_at, remember_me=True)
         
         logger.info(f"Google OAuth login successful: {users_email}")
         
         # Redirect to frontend with token (URL encode email and name)
         from urllib.parse import quote
-        frontend_url = f"https://{REPLIT_DEV_DOMAIN}"
+        frontend_url = VVAULT_FRONTEND_URL
         encoded_email = quote(users_email, safe='')
         encoded_name = quote(users_name, safe='')
         redirect_url = f"{frontend_url}/?token={session_token}&email={encoded_email}&name={encoded_name}"
         logger.info(f"Redirecting to: {redirect_url}")
-        return redirect(redirect_url)
+        response = redirect(redirect_url)
+        response.set_cookie(
+            "vvault_session",
+            session_token,
+            httponly=True,
+            samesite="Lax",
+            secure=redirect_url.startswith("https://")
+        )
+        return response
         
     except Exception as e:
-        logger.error(f"Google OAuth callback error: {e}")
+        logger.error("❌ OAuth callback failed")
+        logger.error(f"Redirect URI: {REDIRECT_URI}")
+        response = getattr(e, "response", None)
+        if response is not None:
+            try:
+                logger.error(f"Error: {response.json()}")
+            except Exception:
+                logger.error(f"Error: {response.text}")
+        else:
+            logger.error(f"Error: {e}")
         return jsonify({"success": False, "error": "OAuth callback failed"}), 500
 
 # Error handlers
