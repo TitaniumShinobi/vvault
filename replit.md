@@ -113,30 +113,32 @@ IPFS, various Blockchain Networks (Ethereum, Bitcoin, Polygon, Arbitrum, Optimis
 ### Storage
 Local JSON-based capsule storage, JSON indexes, ChromaDB (vector database), SQLite (audit logs).
 
-## Critical User Data
+## Supabase Configuration
 
-### Primary User Account
-- **User ID**: `7e34f6b8-e33a-48b5-8ddb-95b94d18e296`
-- **Email**: `dwoodson92@gmail.com`
-- **Display Name**: Devon Woodson
-- **User Slug**: `devon_woodson_1762969514958`
-
-### Supabase Configuration
-- **Project URL**: `https://xkxckpbexjuhmfdjsopd.supabase.co`
-- **Key Tables**:
-  - `users` - User accounts (id, email, name)
-  - `vault_files` - All user files with storage_path for folder hierarchy
-  - `strategy_configs` - Service configurations
-  - `service_credentials` - Encrypted API credentials
+### Key Tables
+- `users` - User accounts (id, email, name)
+- `vault_files` - All user files with storage_path for folder hierarchy
+- `strategy_configs` - Service configurations
+- `service_credentials` - Encrypted API credentials
 
 ### Storage Path Format
 All vault files use this path structure in the `storage_path` column:
 ```
 {user_id}/{user_slug}/{folder_structure}/{filename}
 ```
-Example: `7e34f6b8-e33a-48b5-8ddb-95b94d18e296/devon_woodson_1762969514958/instances/katana-001/chatgpt/test.md`
+Example: `{user_id}/{user_slug}/instances/katana-001/chatgpt/test.md`
 
 The frontend strips the UUID and user slug prefixes to display clean folder paths like `instances/katana-001/chatgpt/`.
+
+### How to Find User Data
+To find the current user's ID and verify their data, query Supabase directly:
+```python
+# Find user by email
+result = supabase.table('users').select('id, email, name').eq('email', 'user@email.com').execute()
+
+# Count files for a user
+files = supabase.table('vault_files').select('id', count='exact').eq('user_id', user_id).execute()
+```
 
 ## Troubleshooting Guide
 
@@ -199,12 +201,14 @@ if construct_id in ['katana', 'katana-001']:
 
 ### DO NOT:
 - Modify vault_files data without user approval (except NULL storage_path fixes)
-- Run destructive SQL (DROP, DELETE, UPDATE on production data)
-- Change the primary user's email without verifying against OAuth provider
+- Run destructive SQL (DROP, DELETE without explicit user approval and backup verification)
+- Change user emails without first verifying the correct value against OAuth provider
 - Create duplicate user records
 
 ### ALWAYS:
 - Query Supabase directly to verify data issues (not just check code)
 - Check logs for "Created new OAuth user" which indicates email mismatch
 - Preserve existing user_id associations when fixing storage_path
+- Log all database modifications with before/after values
+- Verify data counts before and after any UPDATE operations
 - Update replit.md with any new troubleshooting discoveries
