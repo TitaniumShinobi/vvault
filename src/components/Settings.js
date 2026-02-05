@@ -371,13 +371,25 @@ const Settings = ({ systemInfo, user }) => {
                 <>
                   <div className="info-section">
                     <h4>🌐 Server Configuration</h4>
+                    {config.public_origin && (
+                      <div className="info-item">
+                        <span className="info-label">Public URL:</span>
+                        <span className="info-value">{config.public_origin}</span>
+                      </div>
+                    )}
+                    {config.environment && (
+                      <div className="info-item">
+                        <span className="info-label">Environment:</span>
+                        <span className="info-value">{config.environment}</span>
+                      </div>
+                    )}
                     <div className="info-item">
                       <span className="info-label">Backend Port:</span>
                       <span className="info-value">{config.backend_port}</span>
                     </div>
                     <div className="info-item">
                       <span className="info-label">Frontend Port:</span>
-                      <span className="info-value">{config.frontend_port}</span>
+                      <span className="info-value">{config.public_port || config.frontend_port}</span>
                     </div>
                     <div className="info-item">
                       <span className="info-label">Project Directory:</span>

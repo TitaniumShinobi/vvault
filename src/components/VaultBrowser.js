@@ -82,7 +82,8 @@ const VaultBrowser = ({ user }) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('/api/vault/files', {
+      // List view should be fast: fetch metadata only. Content is fetched on demand.
+      const response = await fetch('/api/vault/files?include_content=0', {
         headers: getAuthHeaders()
       });
       const data = await response.json();
@@ -176,7 +177,24 @@ const VaultBrowser = ({ user }) => {
   const selectFile = async (file) => {
     setSelectedFile(file);
     if (file.file_type === 'text' || !file.file_type) {
-      setFileContent(file.content);
+      if (typeof file.content === 'string') {
+        setFileContent(file.content);
+        return;
+      }
+      try {
+        const response = await fetch(`/api/vault/files/${file.id}`, {
+          headers: getAuthHeaders()
+        });
+        const data = await response.json();
+        if (data.success && data.file) {
+          setSelectedFile(prev => ({ ...prev, ...data.file }));
+          setFileContent(data.file.content || '');
+        } else {
+          setFileContent('');
+        }
+      } catch (err) {
+        setFileContent('');
+      }
     } else {
       setFileContent(null);
     }

@@ -30,6 +30,11 @@ const Dashboard = ({ systemInfo }) => {
     if (!isoString) return 'Never';
     return new Date(isoString).toLocaleString();
   };
+
+  const publicPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+  const envLabel = (systemInfo?.environment || (window.location.hostname === 'localhost' ? 'development' : 'production'))
+    .toString()
+    .replace(/^\w/, c => c.toUpperCase());
   
   return (
     <div className="dashboard">
@@ -66,7 +71,7 @@ const Dashboard = ({ systemInfo }) => {
             <span className="status-dot"></span>
             {stats.backendStatus}
           </div>
-          <div className="stat-label">API server on port 8000</div>
+          <div className="stat-label">API available at /api (internal :{systemInfo?.backend_port || 8000})</div>
         </div>
         
         <div className="card">
@@ -111,19 +116,19 @@ const Dashboard = ({ systemInfo }) => {
             <div className="system-info">
               <div className="info-row">
                 <span className="info-label">Backend Port:</span>
-                <span className="info-value">8000</span>
+                <span className="info-value">{systemInfo?.backend_port || 8000}</span>
               </div>
               <div className="info-row">
                 <span className="info-label">Frontend Port:</span>
-                <span className="info-value">7784</span>
+                <span className="info-value">{publicPort}</span>
               </div>
               <div className="info-row">
                 <span className="info-label">Version:</span>
-                <span className="info-value">1.0.0</span>
+                <span className="info-value">{systemInfo?.version || '1.0.0'}</span>
               </div>
               <div className="info-row">
                 <span className="info-label">Environment:</span>
-                <span className="info-value">Development</span>
+                <span className="info-value">{envLabel}</span>
               </div>
             </div>
           </div>

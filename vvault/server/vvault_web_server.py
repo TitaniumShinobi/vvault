@@ -82,8 +82,15 @@ else:
 
 # Flask app configuration
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'vvault-secret-key-change-in-production'
-CORS(app, origins=["http://localhost:7784"])  # Allow requests from frontend
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'vvault-secret-key-change-in-production')
+
+# CORS: allow prod origin + local dev frontend by default.
+cors_origins = os.environ.get(
+    'CORS_ORIGINS',
+    'https://vvault.thewreck.org,http://localhost:7784'
+).split(',')
+cors_origins = [o.strip() for o in cors_origins if o.strip()]
+CORS(app, origins=cors_origins)
 
 # Google OAuth Configuration
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
@@ -705,7 +712,21 @@ api = VVAULTWebAPI()
 @app.route('/api/status')
 def get_status():
     """Get system status"""
-    return jsonify(api.get_status())
+    status = api.get_status()
+
+    # Best-effort "public" origin for UI display behind nginx.
+    forwarded_proto = request.headers.get("X-Forwarded-Proto")
+    proto = forwarded_proto or request.scheme
+    host = request.headers.get("X-Forwarded-Host") or request.host
+    public_origin = f"{proto}://{host}"
+
+    status.update({
+        "environment": os.environ.get("NODE_ENV", "development"),
+        "public_origin": public_origin,
+        "api_base": f"{public_origin}/api",
+    })
+
+    return jsonify(status)
 
 @app.route('/api/capsules')
 @require_auth
@@ -1043,15 +1064,22 @@ def get_vault_files():
             os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
         )
         is_dev = os.environ.get("NODE_ENV", "development") != "production"
+
+        # Returning `content` for every file can be multiple MB and will make the UI feel hung.
+        # Default to metadata-only; the UI can fetch `/api/vault/files/<id>` on demand.
+        include_content = str(request.args.get("include_content", "0")).lower() in ("1", "true", "yes")
+        select_fields = "id, user_id, is_system, filename, storage_path, construct_id, file_type, metadata, created_at"
+        if include_content:
+            select_fields += ", content"
         
         if is_admin:
-            result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, content, file_type, metadata, created_at').execute()
+            result = supabase_client.table('vault_files').select(select_fields).execute()
             logger.debug(f"Admin {user_email} fetching all vault files")
             files = _transform_files_for_display(result.data or [], is_admin=True, user_id=None)
         else:
             if not user_id:
                 if has_service_role and is_dev:
-                    result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, content, file_type, metadata, created_at').execute()
+                    result = supabase_client.table('vault_files').select(select_fields).execute()
                     files = _transform_files_for_display(result.data or [], is_admin=True, user_id=None)
                     return jsonify({
                         "success": True,
@@ -1067,7 +1095,7 @@ def get_vault_files():
                     "user_root": user_name,
                     "message": "No files yet - upload your first file to get started"
                 })
-            result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, content, file_type, metadata, created_at').eq('user_id', user_id).eq('is_system', False).execute()
+            result = supabase_client.table('vault_files').select(select_fields).eq('user_id', user_id).eq('is_system', False).execute()
             logger.debug(f"User {user_email} fetching their vault files (user_id={user_id})")
             files = _transform_files_for_display(result.data or [], is_admin=False, user_id=user_id)
         
@@ -1888,12 +1916,21 @@ def eeccd_disclosure():
 @app.route('/api/config')
 def get_config():
     """Get configuration info"""
+    forwarded_proto = request.headers.get("X-Forwarded-Proto")
+    proto = forwarded_proto or request.scheme
+    host = request.headers.get("X-Forwarded-Host") or request.host
+    public_origin = f"{proto}://{host}"
+    public_port = host.split(":", 1)[1] if ":" in host else ("443" if proto == "https" else "80")
+
     return jsonify({
-        "backend_port": 8000,
-        "frontend_port": 7784,
+        "backend_port": 8000,  # internal (nginx -> gunicorn)
+        "frontend_port": 7784,  # local dev server
+        "public_port": int(public_port),
+        "environment": os.environ.get("NODE_ENV", "development"),
+        "public_origin": public_origin,
         "project_dir": PROJECT_DIR,
         "capsules_dir": CAPSULES_DIR,
-        "cors_origins": ["http://localhost:7784"]
+        "cors_origins": cors_origins
     })
 
 # Authentication endpoints

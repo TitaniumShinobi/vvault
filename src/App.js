@@ -114,6 +114,9 @@ function App() {
   const [user, setUser] = useState(null);
   const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  const frontendOrigin = window.location.origin;
+  const apiBase = `${frontendOrigin}/api`;
   
   useEffect(() => {
     // Check for OAuth callback params in URL
@@ -212,8 +215,8 @@ function App() {
               <span>© 2025 VVAULT - AI Construct Memory Vault</span>
             </div>
             <div className="footer-section">
-              <span>Backend: localhost:8000</span>
-              <span>Frontend: localhost:7784</span>
+              <span>API: {apiBase}</span>
+              <span>Frontend: {frontendOrigin}</span>
             </div>
             <div className="footer-section">
               <span>Version 1.0.0</span>

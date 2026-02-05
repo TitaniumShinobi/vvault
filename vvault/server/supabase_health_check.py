@@ -14,7 +14,11 @@ except Exception as e:
 load_dotenv()
 
 url = os.getenv("SUPABASE_URL")
-key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+key = (
+    os.getenv("SUPABASE_SERVICE_KEY")
+    or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    or os.getenv("SUPABASE_ANON_KEY")
+)
 
 if not url or not key:
     print(json.dumps({"status": "error", "reason": "Missing env vars"}))
@@ -23,8 +27,10 @@ if not url or not key:
 try:
     start = time.time()
     supa = create_client(url, key)
-    data = supa.table("pg_catalog.pg_tables").select("schemaname").limit(1).execute()
-    _ = data  # ensure request is executed
+    # Query an app table that should exist in VVAULT.
+    # (PostgREST does not expose pg_catalog by default.)
+    resp = supa.table("users").select("id").limit(1).execute()
+    _ = resp  # ensure request is executed
     ms = int((time.time() - start) * 1000)
     project = url.split("//")[-1].split(".")[0]
     print(json.dumps({"status": "ok", "project": project, "latency_ms": ms}))

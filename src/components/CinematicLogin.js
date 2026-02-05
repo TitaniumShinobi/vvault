@@ -207,7 +207,8 @@ const CinematicLogin = ({ onLogin }) => {
     }
   };
 
-  const backgroundImage = isSignInMode ? 'vvault_sunrise.png' : 'vvault_sunset.png';
+  // Background images are set via CSS classes; keep this as a reference for debugging only.
+  const backgroundImage = isSignInMode ? 'vvault_sunrise.jpg' : 'vvault_sunset.jpg';
   const backgroundTheme = isSignInMode ? 'Familiarity. Belonging. Trusted Return.' : 'Ceremony. Recognition of Arrival.';
 
   return (
