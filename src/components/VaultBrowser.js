@@ -176,7 +176,19 @@ const VaultBrowser = ({ user }) => {
 
   const selectFile = async (file) => {
     setSelectedFile(file);
-    if (file.file_type === 'text' || !file.file_type) {
+    const ft = (file.file_type || '').toLowerCase();
+    const isTextLike =
+      !ft ||
+      ft === 'text' ||
+      ft.startsWith('text/') ||
+      ft.includes('markdown') ||
+      ft.includes('json') ||
+      ft.includes('yaml') ||
+      ft.includes('yml') ||
+      ft.includes('xml') ||
+      ft.includes('csv');
+
+    if (isTextLike) {
       if (typeof file.content === 'string') {
         setFileContent(file.content);
         return;
