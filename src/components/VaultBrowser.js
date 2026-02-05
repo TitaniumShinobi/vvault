@@ -180,6 +180,7 @@ const VaultBrowser = ({ user }) => {
     const isTextLike =
       !ft ||
       ft === 'text' ||
+      ft === 'transcript' ||
       ft.startsWith('text/') ||
       ft.includes('markdown') ||
       ft.includes('json') ||
