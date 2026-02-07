@@ -11,7 +11,8 @@
     "backend": "source vvault_env/bin/activate && python3 vvault/server/vvault_web_server.py",
     "supabase:check": "source vvault_env/bin/activate && python3 vvault/server/supabase_health_check.py",
     "build": "webpack --mode production",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "deploy": "bash deploy/deploy.sh"
   },
   "keywords": [
     "vvault",
