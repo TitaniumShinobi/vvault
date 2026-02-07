@@ -21,6 +21,9 @@ command -v npm >/dev/null || die 'npm is required'
 log "Building frontend..."
 npm run build
 
+log "Ensuring remote stage directory exists..."
+ssh "${SSH_TARGET}" "mkdir -p '${REMOTE_STAGE}'"
+
 log "Syncing dist/ to stage: ${SSH_TARGET}:${REMOTE_STAGE}/dist/ ..."
 rsync -az --delete \
   --exclude='.DS_Store' \
