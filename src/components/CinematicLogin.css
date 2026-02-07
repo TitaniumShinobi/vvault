@@ -9,6 +9,8 @@
   overflow: hidden;
 }
 
+/* (Removed) Vertical accent line */
+
 /* Enhanced Background Images with Overlays */
 .cinematic-login-container {
   background-size: cover;
@@ -59,6 +61,8 @@
   .vvault-sunrise-bg {
     background-attachment: scroll;
   }
+
+  /* no accent line */
 }
 
 /* Remove fallback gradients - let PNG images show through */
@@ -71,6 +75,58 @@
   position: relative;
   z-index: 2;
   backdrop-filter: blur(0.5px);
+}
+
+/* Bottom link to thewreck.org */
+.wreck-site-link {
+  position: fixed;
+  /* Center the logo on the vertical accent line (25% across the viewport). */
+  left: 25%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(10px);
+  text-decoration: none;
+  color: rgba(255, 255, 255, 0.85);
+  transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.wreck-site-link:hover {
+  transform: translateX(-50%) translateY(-2px);
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.wreck-site-icon {
+  width: 28px;
+  height: 28px;
+  display: block;
+  opacity: 0.92;
+}
+
+@media (max-width: 480px) {
+  .wreck-site-link {
+    bottom: 12px;
+    padding: 7px;
+  }
+
+  .wreck-site-icon {
+    width: 26px;
+    height: 26px;
+  }
+}
+
+/* On mobile we hide the vertical line; keep the link centered on the screen instead. */
+@media (max-width: 768px) {
+  .wreck-site-link {
+    left: 50%;
+  }
 }
 
 /* Cinematic Effects */

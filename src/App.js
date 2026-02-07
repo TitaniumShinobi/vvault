@@ -33,13 +33,10 @@ const Navigation = ({ user, onLogout }) => {
     <nav className="navbar">
       <div className="nav-brand">
         <img 
-          src="/assets/vvault_glyph.png" 
+          src="/assets/vvault_inverted.png" 
           alt="VVAULT" 
           className="nav-logo"
-          style={{ width: '32px', height: '32px' }}
         />
-        <span className="nav-title">VVAULT</span>
-        <span className="nav-subtitle">AI Construct Memory Vault</span>
       </div>
       
       <div className="nav-links">

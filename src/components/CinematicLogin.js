@@ -478,6 +478,20 @@ const CinematicLogin = ({ onLogin }) => {
           </div>
         </div>
       </div>
+      <a
+        className="wreck-site-link"
+        href="https://thewreck.org"
+        target="_blank"
+        rel="noreferrer"
+        aria-label="thewreck.org"
+      >
+        <img
+          className="wreck-site-icon"
+          src="/assets/WRECKSymbolInverted.png"
+          alt="WRECK"
+          loading="lazy"
+        />
+      </a>
     </div>
   );
 };
