@@ -51,6 +51,9 @@ sudo mkdir -p "${REMOTE_ROOT}" "${REMOTE_ROOT}/assets"
 sudo rsync -a --delete "${REMOTE_STAGE}/dist/" "${REMOTE_ROOT}/"
 if [ -d "${REMOTE_STAGE}/assets" ]; then
   sudo rsync -a --delete "${REMOTE_STAGE}/assets/" "${REMOTE_ROOT}/assets/"
+  # Nginx runs as www-data; make sure assets stay world-readable even if local perms are restrictive.
+  sudo find "${REMOTE_ROOT}/assets" -type d -exec chmod 755 {} +
+  sudo find "${REMOTE_ROOT}/assets" -type f -exec chmod 644 {} +
 fi
 
 rm -rf "${REMOTE_STAGE}"

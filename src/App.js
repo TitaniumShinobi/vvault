@@ -33,7 +33,7 @@ const Navigation = ({ user, onLogout }) => {
     <nav className="navbar">
       <div className="nav-brand">
         <img 
-          src="/assets/vvault_inverted.png" 
+          src="/assets/vvault_inverted.png?v=20260207" 
           alt="VVAULT" 
           className="nav-logo"
         />
