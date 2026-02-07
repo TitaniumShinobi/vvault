@@ -41,13 +41,19 @@ else
 fi
 
 log "Promoting staged files to ${REMOTE_ROOT} (sudo)..."
-ssh "${SSH_TARGET}" bash -lc "set -euo pipefail
-  sudo mkdir -p '${REMOTE_ROOT}' '${REMOTE_ROOT}/assets'
-  sudo rsync -a --delete '${REMOTE_STAGE}/dist/' '${REMOTE_ROOT}/'
-  if [ -d '${REMOTE_STAGE}/assets' ]; then
-    sudo rsync -a --delete '${REMOTE_STAGE}/assets/' '${REMOTE_ROOT}/assets/'
-  fi
-  rm -rf '${REMOTE_STAGE}'
-"
+ssh "${SSH_TARGET}" bash -s -- "${REMOTE_ROOT}" "${REMOTE_STAGE}" <<'REMOTE'
+set -euo pipefail
+
+REMOTE_ROOT="$1"
+REMOTE_STAGE="$2"
+
+sudo mkdir -p "${REMOTE_ROOT}" "${REMOTE_ROOT}/assets"
+sudo rsync -a --delete "${REMOTE_STAGE}/dist/" "${REMOTE_ROOT}/"
+if [ -d "${REMOTE_STAGE}/assets" ]; then
+  sudo rsync -a --delete "${REMOTE_STAGE}/assets/" "${REMOTE_ROOT}/assets/"
+fi
+
+rm -rf "${REMOTE_STAGE}"
+REMOTE
 
 log "Done. Verify: https://vvault.thewreck.org"
