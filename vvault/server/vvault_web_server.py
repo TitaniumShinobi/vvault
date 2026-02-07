@@ -191,6 +191,8 @@ ACTIVE_SESSIONS = {}
 
 # Flag to track if session table exists (auto-detected on first use)
 _SESSION_TABLE_AVAILABLE = None
+# Flag to avoid repeated failures when users.role column is missing
+_USERS_ROLE_COLUMN_AVAILABLE = None
 
 def _check_session_table_available() -> bool:
     """Check if user_sessions table exists in Supabase (cached)"""
@@ -263,6 +265,7 @@ def db_delete_session(token: str) -> bool:
 
 def db_get_session(token: str) -> Optional[Dict]:
     """Get session from cache (primary) or database (fallback)"""
+    global _USERS_ROLE_COLUMN_AVAILABLE
     if token in ACTIVE_SESSIONS:
         session = ACTIVE_SESSIONS[token]
         if datetime.now() > session['expires_at']:
@@ -285,9 +288,19 @@ def db_get_session(token: str) -> Optional[Dict]:
             db_delete_session(token)
             return None
         
-        user_result = supabase_client.table('users').select('role').eq('email', session_data['email']).execute()
-        role = user_result.data[0]['role'] if user_result.data else 'user'
-        
+        role = 'user'
+        if _USERS_ROLE_COLUMN_AVAILABLE is not False:
+            try:
+                user_result = supabase_client.table('users').select('role').eq('email', session_data['email']).execute()
+                role = user_result.data[0].get('role', 'user') if user_result.data else 'user'
+                _USERS_ROLE_COLUMN_AVAILABLE = True
+            except Exception as e:
+                msg = str(e)
+                if 'users.role' in msg or 'column' in msg and 'role' in msg:
+                    _USERS_ROLE_COLUMN_AVAILABLE = False
+                # Fall back to default role without invalidating the session
+                role = 'user'
+
         session = {
             'email': session_data['email'],
             'role': role,
