@@ -15,6 +15,20 @@ The `CONTINUITYGPT_Scoring.py` script processes transcripts to generate a contin
 - Python 3.6 or higher.
 - Required directories for transcript files (e.g., `./chatgpt/2026/January`).
 
+## Tools
+### `needle.py` (Fast Transcript Search)
+Searches common transcript roots (`chatgpt/`, `github_copilot/`, `character.ai/`, etc.) for a phrase and prints matching lines.
+
+Examples:
+```bash
+python3 scripts/master/needle.py "Casa Madrigal"
+python3 scripts/master/needle.py "LIN ORCHESTRATION:" --around 3
+python3 scripts/master/needle.py "FEAD-06 (Sera)" --paths chatgpt github_copilot character.ai --all-files
+python3 scripts/master/needle.py "zen-001_chat_with_zen-001" --max 50
+```
+
+Tip: install `rg` (ripgrep) for speed; otherwise `needle.py` falls back to a slower pure-Python search.
+
 ### Running the Script
 ```bash
 python3 CONTINUITYGPT_Scoring.py
