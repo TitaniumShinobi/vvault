@@ -71,6 +71,126 @@ REPLIT_DEV_DOMAIN = os.environ.get("REPLIT_DEV_DOMAIN", "localhost:5000")
 VVAULT_SERVICE_TOKEN = os.environ.get("VVAULT_SERVICE_TOKEN")
 VVAULT_ENCRYPTION_KEY = os.environ.get("VVAULT_ENCRYPTION_KEY", os.environ.get("SECRET_KEY", "default-encryption-key"))
 
+BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'backups', 'vault_files')
+BACKUP_MAX_AGE_DAYS = 30
+
+def _backup_before_write(file_id: str, filename: str, content: str) -> bool:
+    """Save a local JSON backup of vault_files content before modification.
+    
+    Creates backups/vault_files/ directory if needed.
+    Saves as {file_id}_{timestamp}.json with old content, file_id, filename, and timestamp.
+    Cleans up backups older than 30 days periodically.
+    Never blocks the main operation - logs errors but returns gracefully.
+    """
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        safe_file_id = str(file_id).replace('/', '_').replace('\\', '_')
+        backup_filename = f"{safe_file_id}_{timestamp}.json"
+        backup_path = os.path.join(BACKUP_DIR, backup_filename)
+        
+        backup_data = {
+            "file_id": str(file_id),
+            "filename": filename,
+            "content": content,
+            "backed_up_at": datetime.now().isoformat()
+        }
+        
+        with open(backup_path, 'w', encoding='utf-8') as f:
+            json.dump(backup_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"BACKUP: Saved backup for file_id={file_id} filename={filename} content_length={len(content or '')} to {backup_filename}")
+        
+        _cleanup_old_backups()
+        
+        return True
+    except Exception as e:
+        logger.error(f"BACKUP ERROR: Failed to backup file_id={file_id} filename={filename}: {e}")
+        return False
+
+def _cleanup_old_backups():
+    """Remove backups older than BACKUP_MAX_AGE_DAYS. Runs silently."""
+    try:
+        if not os.path.exists(BACKUP_DIR):
+            return
+        
+        cutoff = datetime.now().timestamp() - (BACKUP_MAX_AGE_DAYS * 86400)
+        removed = 0
+        
+        for fname in os.listdir(BACKUP_DIR):
+            fpath = os.path.join(BACKUP_DIR, fname)
+            if os.path.isfile(fpath) and fname.endswith('.json'):
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+                    removed += 1
+        
+        if removed > 0:
+            logger.info(f"BACKUP CLEANUP: Removed {removed} backups older than {BACKUP_MAX_AGE_DAYS} days")
+    except Exception as e:
+        logger.error(f"BACKUP CLEANUP ERROR: {e}")
+
+def _protected_vault_update(supabase_client, file_id: str, new_content: str, force: bool = False, context: str = "unknown") -> dict:
+    """Wrap vault_files update operations with delete protection.
+    
+    Before performing a full content replacement:
+    1. Reads existing content from Supabase
+    2. If existing content is longer than new content by more than 50%, rejects the update
+    3. Accepts force parameter to bypass the check
+    4. Logs all content updates with before/after lengths
+    
+    Returns: {"allowed": True/False, "error": str or None, "existing_content": str, "existing_length": int}
+    """
+    result = {"allowed": True, "error": None, "existing_content": "", "existing_length": 0}
+    
+    try:
+        existing = supabase_client.table('vault_files').select('content, filename').eq('id', file_id).execute()
+        
+        if not existing.data or len(existing.data) == 0:
+            logger.warning(f"PROTECTED_UPDATE [{context}]: file_id={file_id} not found in Supabase")
+            result["allowed"] = True
+            return result
+        
+        existing_content = existing.data[0].get('content', '') or ''
+        existing_filename = existing.data[0].get('filename', '')
+        existing_length = len(existing_content)
+        new_length = len(new_content)
+        
+        result["existing_content"] = existing_content
+        result["existing_length"] = existing_length
+        
+        logger.info(f"PROTECTED_UPDATE [{context}]: file_id={file_id} existing_length={existing_length} new_length={new_length} force={force}")
+        
+        if existing_length > 0 and new_length < existing_length * 0.5:
+            if not force:
+                reduction_pct = round((1 - new_length / existing_length) * 100, 1)
+                logger.warning(
+                    f"PROTECTED_UPDATE REJECTED [{context}]: file_id={file_id} "
+                    f"existing_length={existing_length} new_length={new_length} "
+                    f"reduction={reduction_pct}% - looks like data loss"
+                )
+                result["allowed"] = False
+                result["error"] = (
+                    "Content replacement rejected: new content is significantly smaller "
+                    "than existing content. This looks like data loss. Use force=true to override."
+                )
+                return result
+            else:
+                logger.warning(
+                    f"PROTECTED_UPDATE FORCED [{context}]: file_id={file_id} "
+                    f"existing_length={existing_length} new_length={new_length} - force=true bypassed protection"
+                )
+        
+        _backup_before_write(file_id, existing_filename, existing_content)
+        
+        result["allowed"] = True
+        return result
+        
+    except Exception as e:
+        logger.error(f"PROTECTED_UPDATE ERROR [{context}]: file_id={file_id} error={e}")
+        result["allowed"] = True
+        return result
+
 # Encryption helpers for service credentials
 from cryptography.fernet import Fernet
 import base64
@@ -1407,6 +1527,7 @@ def update_chatty_transcript(construct_id):
         
         data = request.get_json()
         content = data.get('content', '')
+        force = data.get('force', False)
         
         if not content:
             return jsonify({"success": False, "error": "Content is required"}), 400
@@ -1419,10 +1540,26 @@ def update_chatty_transcript(construct_id):
         
         if existing.data and len(existing.data) > 0:
             file_id = existing.data[0]['id']
+            
+            protection = _protected_vault_update(
+                supabase_client, file_id, content,
+                force=force, context=f"update_chatty_transcript:{construct_id}"
+            )
+            
+            if not protection["allowed"]:
+                return jsonify({
+                    "success": False,
+                    "error": protection["error"],
+                    "existing_length": protection["existing_length"],
+                    "new_length": len(content)
+                }), 409
+            
             supabase_client.table('vault_files').update({
                 'content': content,
                 'sha256': sha256
             }).eq('id', file_id).execute()
+            
+            logger.info(f"CONTENT_UPDATE [update_chatty_transcript]: construct={construct_id} file_id={file_id} before={protection['existing_length']} after={len(content)}")
             
             return jsonify({
                 "success": True,
@@ -1475,7 +1612,7 @@ def append_chatty_message(construct_id):
         
         # Query only the user's files
         search_filename = f"chat_with_{construct_id}.md"
-        existing = supabase_client.table('vault_files').select('id, content').eq('user_id', user_id).ilike('filename', f'%{search_filename}%').execute()
+        existing = supabase_client.table('vault_files').select('id, content, filename').eq('user_id', user_id).ilike('filename', f'%{search_filename}%').execute()
         
         if not existing.data or len(existing.data) == 0:
             return jsonify({
@@ -1485,6 +1622,9 @@ def append_chatty_message(construct_id):
         
         file_id = existing.data[0]['id']
         current_content = existing.data[0].get('content', '')
+        actual_filename = existing.data[0].get('filename', f"chat_with_{construct_id}.md")
+        
+        _backup_before_write(file_id, actual_filename, current_content)
         
         role_label = "**User**" if role == "user" else f"**{construct_id.split('-')[0].title()}**" if role == "assistant" else "**System**"
         formatted_message = f"\n\n---\n\n{role_label} ({timestamp}):\n\n{content}"
@@ -1499,7 +1639,7 @@ def append_chatty_message(construct_id):
             'sha256': sha256
         }).eq('id', file_id).execute()
         
-        logger.info(f"Appended {role} message to {construct_id} transcript")
+        logger.info(f"Appended {role} message to {construct_id} transcript (before={len(current_content)} after={len(updated_content)})")
         
         return jsonify({
             "success": True,
@@ -1679,7 +1819,9 @@ def chatty_message():
         if existing.data and len(existing.data) > 0:
             file_id = existing.data[0]['id']
             current_content = existing.data[0].get('content', '')
+            actual_transcript_filename = existing.data[0].get('filename', search_filename)
         else:
+            actual_transcript_filename = search_filename
             # Create new transcript file for user's construct
             new_file_data = {
                 'filename': expected_filepath,
@@ -1718,6 +1860,9 @@ def chatty_message():
         assistant_formatted = f"\n**{human_time_response} {timezone} - {construct_name}** [{iso_timestamp_response}]: {assistant_response}\n"
         new_content += assistant_formatted
         
+        # Backup before updating transcript in Supabase
+        _backup_before_write(file_id, actual_transcript_filename, current_content)
+        
         # Update transcript in Supabase
         sha256 = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
         supabase_client.table('vault_files').update({
@@ -1726,7 +1871,7 @@ def chatty_message():
             'updated_at': datetime.now().isoformat()
         }).eq('id', file_id).execute()
         
-        logger.info(f"Message exchange with {construct_id}: user sent {len(user_message)} chars, got {len(assistant_response)} chars")
+        logger.info(f"Message exchange with {construct_id}: user sent {len(user_message)} chars, got {len(assistant_response)} chars (before={len(current_content)} after={len(new_content)})")
         
         return jsonify({
             "success": True,
@@ -1764,6 +1909,92 @@ def _load_construct_identity(construct_id: str, construct_name: str) -> str:
     except Exception as e:
         logger.warning(f"Could not load identity for {construct_id}: {e}")
         return f"You are {construct_name}, an AI assistant. Be helpful, concise, and friendly."
+
+
+# Vault Backup API
+@app.route('/api/vault/backups')
+@require_role('admin')
+def list_vault_backups():
+    """List available local vault_files backups - admin only"""
+    try:
+        if not os.path.exists(BACKUP_DIR):
+            return jsonify({"success": True, "backups": [], "count": 0})
+        
+        backups = []
+        for fname in sorted(os.listdir(BACKUP_DIR), reverse=True):
+            if not fname.endswith('.json'):
+                continue
+            fpath = os.path.join(BACKUP_DIR, fname)
+            try:
+                stat = os.stat(fpath)
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                backups.append({
+                    "backup_file": fname,
+                    "file_id": data.get("file_id"),
+                    "filename": data.get("filename"),
+                    "content_length": len(data.get("content", "")),
+                    "backed_up_at": data.get("backed_up_at"),
+                    "size_bytes": stat.st_size
+                })
+            except Exception as e:
+                logger.warning(f"Could not read backup {fname}: {e}")
+                continue
+        
+        return jsonify({
+            "success": True,
+            "backups": backups,
+            "count": len(backups)
+        })
+    except Exception as e:
+        logger.error(f"Error listing vault backups: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/vault/backups/<file_id>')
+@require_role('admin')
+def get_vault_backups_for_file(file_id):
+    """Retrieve backup content for a specific file_id - admin only"""
+    try:
+        if not os.path.exists(BACKUP_DIR):
+            return jsonify({"success": True, "backups": [], "count": 0})
+        
+        backups = []
+        for fname in sorted(os.listdir(BACKUP_DIR), reverse=True):
+            if not fname.endswith('.json'):
+                continue
+            if not fname.startswith(file_id.replace('/', '_').replace('\\', '_')):
+                continue
+            fpath = os.path.join(BACKUP_DIR, fname)
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                backups.append({
+                    "backup_file": fname,
+                    "file_id": data.get("file_id"),
+                    "filename": data.get("filename"),
+                    "content": data.get("content"),
+                    "content_length": len(data.get("content", "")),
+                    "backed_up_at": data.get("backed_up_at")
+                })
+            except Exception as e:
+                logger.warning(f"Could not read backup {fname}: {e}")
+                continue
+        
+        if not backups:
+            return jsonify({
+                "success": False,
+                "error": f"No backups found for file_id: {file_id}"
+            }), 404
+        
+        return jsonify({
+            "success": True,
+            "file_id": file_id,
+            "backups": backups,
+            "count": len(backups)
+        })
+    except Exception as e:
+        logger.error(f"Error retrieving vault backups for {file_id}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # Zero Trust Audit API
