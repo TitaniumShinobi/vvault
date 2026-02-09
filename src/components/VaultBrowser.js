@@ -175,8 +175,27 @@ const VaultBrowser = ({ user }) => {
 
   const selectFile = async (file) => {
     setSelectedFile(file);
-    if (file.file_type === 'text' || !file.file_type) {
-      setFileContent(file.content);
+    const textTypes = ['text', 'text/plain', 'text/markdown', 'conversation', 'transcript', 'prompt', 'config', 'identity'];
+    const isTextLike = !file.file_type || textTypes.includes(file.file_type) || file.file_type.startsWith('text/');
+    if (isTextLike) {
+      if (file.content) {
+        setFileContent(file.content);
+      } else {
+        try {
+          const response = await fetch(`/api/vault/files/${file.id}`, {
+            headers: getAuthHeaders()
+          });
+          const data = await response.json();
+          if (data.success && data.file && data.file.content) {
+            setFileContent(data.file.content);
+          } else {
+            setFileContent(null);
+          }
+        } catch (err) {
+          console.error('Failed to fetch file content:', err);
+          setFileContent(null);
+        }
+      }
     } else {
       setFileContent(null);
     }
