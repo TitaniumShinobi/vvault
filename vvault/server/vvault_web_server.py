@@ -2433,6 +2433,7 @@ def verify_token():
         return jsonify({"success": False, "error": "Token verification failed"}), 500
 
 # Google OAuth Routes
+@app.route('/api/auth/google')
 @app.route('/api/auth/oauth/google')
 def google_oauth_login():
     """Initiate Google OAuth login"""
@@ -2451,7 +2452,7 @@ def google_oauth_login():
             host = REPLIT_DEV_DOMAIN
         else:
             host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
-        callback_url = f"https://{host}/api/auth/oauth/google/callback"
+        callback_url = f"https://{host}/api/auth/google/callback"
         
         # Prepare the OAuth request
         request_uri = google_client.prepare_request_uri(
@@ -2467,6 +2468,7 @@ def google_oauth_login():
         logger.error(f"Google OAuth init error: {e}")
         return jsonify({"success": False, "error": "OAuth initialization failed"}), 500
 
+@app.route('/api/auth/google/callback')
 @app.route('/api/auth/oauth/google/callback')
 def google_oauth_callback():
     """Handle Google OAuth callback"""
@@ -2493,7 +2495,7 @@ def google_oauth_callback():
             host = REPLIT_DEV_DOMAIN
         else:
             host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
-        callback_url = f"https://{host}/api/auth/oauth/google/callback"
+        callback_url = f"https://{host}/api/auth/google/callback"
         authorization_response = f"https://{host}{request.full_path}"
         
         logger.info(f"Processing OAuth callback with redirect_url: {callback_url}")

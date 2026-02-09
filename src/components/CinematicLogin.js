@@ -201,7 +201,7 @@ const CinematicLogin = ({ onLogin }) => {
 
   const handleOAuth = (provider) => {
     if (provider === 'Google') {
-      window.location.href = '/api/auth/oauth/google';
+      window.location.href = '/api/auth/google';
     } else {
       console.log(`${provider} OAuth not yet implemented`);
     }
