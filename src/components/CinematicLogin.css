@@ -221,7 +221,7 @@
 .wreck-footer {
   position: absolute;
   bottom: 0px;
-  left: 25%;
+  left: calc(25% - 10px);
   transform: translateX(-50%);
   display: flex;
   justify-content: center;
