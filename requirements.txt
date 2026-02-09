@@ -22,7 +22,7 @@ pycryptodome>=3.19.0
 
 # Smart contract interaction
 eth-brownie>=1.20.0
-solcx>=2.0.0
+py-solc-x>=2.0.0
 
 # Network and API
 requests>=2.31.0
