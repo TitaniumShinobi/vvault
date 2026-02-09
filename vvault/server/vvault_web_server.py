@@ -2558,9 +2558,11 @@ def google_oauth_callback():
         
         logger.info(f"Google OAuth login successful: {users_email}")
         
-        # Redirect to frontend with token (URL encode email and name)
         from urllib.parse import quote
-        frontend_url = f"https://{REPLIT_DEV_DOMAIN}"
+        if OAUTH_BASE_URL:
+            frontend_url = OAUTH_BASE_URL
+        else:
+            frontend_url = f"https://{REPLIT_DEV_DOMAIN}"
         encoded_email = quote(users_email, safe='')
         encoded_name = quote(users_name, safe='')
         redirect_url = f"{frontend_url}/?token={session_token}&email={encoded_email}&name={encoded_name}"
