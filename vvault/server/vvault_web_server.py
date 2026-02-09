@@ -1803,14 +1803,21 @@ def append_chatty_message(construct_id):
     POST body: {
         "role": "user" | "assistant" | "system",
         "content": "message text",
-        "timestamp": "2026-01-20T12:00:00Z" (optional, defaults to now)
+        "timestamp": "2026-01-20T12:00:00Z" (optional, defaults to now),
+        "attachments": [                       (optional)
+            {
+                "filename": "screenshot.png",
+                "mime": "image/png",
+                "sha256": "<hash>",
+                "storagePath": "path/to/file"
+            }
+        ]
     }
     """
     try:
         if not supabase_client:
             return jsonify({"success": False, "error": "Supabase not configured"}), 500
         
-        # Get current user for scoped queries
         current_user = request.current_user
         user_email = current_user.get('email')
         user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
@@ -1823,14 +1830,14 @@ def append_chatty_message(construct_id):
         role = data.get('role', 'user')
         content = data.get('content', '')
         timestamp = data.get('timestamp', datetime.now().isoformat())
+        attachments = data.get('attachments', [])
         
-        if not content:
-            return jsonify({"success": False, "error": "Content is required"}), 400
+        if not content and not attachments:
+            return jsonify({"success": False, "error": "Content or attachments required"}), 400
         
         if role not in ['user', 'assistant', 'system']:
             return jsonify({"success": False, "error": "Role must be 'user', 'assistant', or 'system'"}), 400
         
-        # Query only the user's files
         search_filename = f"chat_with_{construct_id}.md"
         existing = supabase_client.table('vault_files').select('id, content, filename').eq('user_id', user_id).ilike('filename', f'%{search_filename}%').execute()
         
@@ -1847,7 +1854,21 @@ def append_chatty_message(construct_id):
         _backup_before_write(file_id, actual_filename, current_content)
         
         role_label = "**User**" if role == "user" else f"**{construct_id.split('-')[0].title()}**" if role == "assistant" else "**System**"
-        formatted_message = f"\n\n---\n\n{role_label} ({timestamp}):\n\n{content}"
+        
+        attachment_block = ""
+        if attachments:
+            attachment_lines = []
+            for att in attachments:
+                fname = att.get('filename', 'unknown')
+                mime = att.get('mime', 'application/octet-stream')
+                att_sha = att.get('sha256', '')
+                attachment_lines.append(f"- {fname} ({mime})")
+                if att_sha:
+                    attachment_lines.append(f"  - sha256: {att_sha}")
+            attachment_block = "\U0001F4CE attachments:\n" + "\n".join(attachment_lines) + "\n\n"
+        
+        message_body = attachment_block + content
+        formatted_message = f"\n\n---\n\n{role_label} ({timestamp}):\n\n{message_body}"
         
         updated_content = current_content + formatted_message
         
@@ -1859,7 +1880,8 @@ def append_chatty_message(construct_id):
             'sha256': sha256
         }).eq('id', file_id).execute()
         
-        logger.info(f"Appended {role} message to {construct_id} transcript (before={len(current_content)} after={len(updated_content)})")
+        attachment_count = len(attachments)
+        logger.info(f"Appended {role} message to {construct_id} transcript (before={len(current_content)} after={len(updated_content)} attachments={attachment_count})")
         
         return jsonify({
             "success": True,
@@ -1867,6 +1889,7 @@ def append_chatty_message(construct_id):
             "construct_id": construct_id,
             "role": role,
             "message_length": len(content),
+            "attachment_count": attachment_count,
             "total_length": len(updated_content)
         })
         
