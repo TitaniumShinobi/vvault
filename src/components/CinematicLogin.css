@@ -220,7 +220,7 @@
 
 .wreck-footer {
   position: absolute;
-  bottom: 20px;
+  bottom: 0px;
   left: 25%;
   transform: translateX(-50%);
   display: flex;
