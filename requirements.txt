@@ -1,8 +1,8 @@
 # Consolidated VVAULT Requirements
 
 # Core VVAULT dependencies
-vvault-core>=1.0.0
-capsuleforge>=1.0.0
+# vvault-core>=1.0.0
+# capsuleforge>=1.0.0
 
 # Blockchain integration
 web3>=6.11.0
