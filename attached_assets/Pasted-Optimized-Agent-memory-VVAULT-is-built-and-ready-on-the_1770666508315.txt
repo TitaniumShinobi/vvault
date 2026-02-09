@@ -1,0 +1,65 @@
+Optimized Agent memory
+VVAULT is built and ready on the other side. Now we just need to connect the two. Here's what needs to happen on VXRunner's side:
+
+Set the VVAULT_URL environment variable — pointing to your deployed VVAULT URL so the capsule loader knows where to pull from.
+
+Add auto-fetch on startup — Right now brain.py only loads capsules from the local capsules/ folder. We should add an option to automatically pull from VVAULT when it starts, so it always has the freshest capsule data without needing manual CLI commands.
+
+Test the full pipeline — Fetch NOVA-001 from VVAULT, convert to baseline, run a detection scan to make sure the fingerprint data flows through correctly.
+
+Do you have the deployed VVAULT URL ready? Once you share it, I can wire everything up. If you also want to set a VXRUNNER_API_KEY for secure access between the two systems, we can do that too.
+
+Created task list
+Start building
+Let me start building. The key piece right now is adding auto-fetch from VVAULT into the startup flow so when the URL is set, VXRunner pulls capsules automatically. Let me look at the current code first.
+
+Good, I can see exactly what needs to be added. Let me update the tasks and start building.
+
+Now let me add the VVAULT auto-fetch capability to the capsule loader and wire it into brain.py startup. I need to:
+
+Add a discover_vvault_capsules method that lists available capsules from VVAULT
+Add a sync_from_vvault method that fetches all available capsules
+Wire it into brain.py so it auto-syncs when VVAULT_URL is set
+Now I have the full picture. Let me add the discover_vvault_capsules and sync_from_vvault methods to the capsule loader, update the CLI, and wire it into brain.py startup.
+
+Now let me wire the VVAULT auto-sync into brain.py's initialize_components and add a --sync CLI option to capsule_loader.py:
+
+Now let me add the --sync CLI option to capsule_loader.py:
+
+Now add the CLI handler for --sync and --sync-ids:
+
+Good, the code changes are done. Now let me restart the workflow and verify everything works, then update the replit.md:
+
+Working as expected - it correctly shows "VVAULT_URL not set, skipping remote capsule sync". Let me also verify the CLI sync option works:
+
+Graceful failure when unreachable. Now let me mark task 1 as done and update the replit.md. Let me also set up the env var placeholders:
+
+The VVAULT_URL needs to come from you once VVAULT is deployed. Let me set it up as a non-secret env var that's ready to be filled in, and update the replit.md with the complete sync documentation:
+
+Now let me update the replit.md and the capsule CLI docs section:
+
+Now update the startup flow documentation and environment variables section:
+
+Now update the Recent Changes section:
+
+Good. Now let me mark tasks 2 and 3 as done and run the architect review:
+
+Review passed. Let me mark everything complete:
+
+Everything is built and running. Here's what's now live:
+
+VVAULT auto-sync is wired in. When brain.py starts up:
+
+It checks for VVAULT_URL in the environment
+If set, it hits GET /api/capsules on VVAULT to discover what capsules are available
+For each capsule found, it pulls the pre-converted baseline (from /api/capsules/<name>/vxrunner-baseline) or falls back to downloading the raw capsule and converting it locally
+Then it processes any local capsules from the capsules/ folder
+Everything merges into the detection baselines
+It handles failures gracefully - if VVAULT is unreachable or the discovery endpoint doesn't exist yet, it logs a warning and continues with whatever baselines are already local. No crash, no blocking.
+
+CLI sync is also ready:
+
+python capsule_loader.py --sync --vvault-url <url> - auto-discover and pull everything
+python capsule_loader.py --sync-ids nova-001 katana-001 --vvault-url <url> - pull specific constructs
+Next step: Once VVAULT is deployed, share the URL here and I'll set VVAULT_URL. If you also set a VXRUNNER_API_KEY on the VVAULT side, share that too and I'll add it as a secret here. Then VXRunner will automatically pull the NOVA-001 capsule on every startup.
+

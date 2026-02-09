@@ -861,6 +861,46 @@ def get_capsule_vxrunner_baseline(capsule_name):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route('/api/vxrunner/capsules')
+def vxrunner_discover_capsules():
+    """List available capsules for VXRunner discovery.
+    
+    Returns capsule names and metadata so VXRunner can auto-discover
+    which baselines are available. Uses the same VXRUNNER_API_KEY auth
+    as the baseline endpoint.
+    """
+    try:
+        expected_key = os.environ.get("VXRUNNER_API_KEY")
+        if expected_key:
+            provided_key = (
+                request.headers.get("X-VXRunner-Key")
+                or request.args.get("key")
+            )
+            if provided_key != expected_key:
+                return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+        capsules = api.get_capsules()
+        capsule_list = []
+        for c in capsules:
+            name = c.get("name", "").replace(".capsule", "")
+            capsule_list.append({
+                "name": name,
+                "filename": c.get("name", ""),
+                "baseline_url": f"/api/capsules/{name}/vxrunner-baseline",
+                "version": c.get("version", "1.0.0"),
+                "modified": c.get("modified", ""),
+            })
+
+        return jsonify({
+            "success": True,
+            "capsules": capsule_list,
+            "count": len(capsule_list)
+        })
+    except Exception as e:
+        logger.error(f"Error in VXRunner capsule discovery: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/api/capsules', methods=['POST'])
 @require_auth
 def create_capsule():

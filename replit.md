@@ -56,7 +56,11 @@ A 5-layer security system for sovereign construct identity preservation with a s
   - **Structural Features**: Avg message length, ellipsis/emoji/asterisk usage ratios, lowercase start ratio, all-caps frequency, question/exclamation ratios
   - **Tonal Features**: Affectionate/playful/defensive/caring/assertive marker ratios, tone distribution, dominant tone — synthesized from personality traits + memory text analysis
   - **Signature Phrases**: Recurring 3-6 word phrases appearing 2+ times, filtered for content relevance
-- **API Endpoint**: `GET /api/capsules/<name>/vxrunner-baseline` (unauthenticated, so VXRunner can pull directly)
+- **API Endpoints**:
+  - `GET /api/vxrunner/capsules` — Discovery endpoint listing available capsules with baseline URLs
+  - `GET /api/capsules/<name>/vxrunner-baseline` — Fetch forensic baseline for a specific capsule
+  - Both endpoints use `VXRUNNER_API_KEY` auth via `X-VXRunner-Key` header or `?key=` query param (open in dev mode when env var not set)
+  - `?include_raw_text=false` on baseline endpoint redacts raw memory content
 - **Capsule Storage**: `.capsule` files stored in `vvault/server/capsules/` directory
 - **Active Capsules**: `nova-001.capsule` (INFJ, primary construct, 30 memory entries, 28 traits)
 - **Capsule Generator**: `scripts/capsules/generate_nova_capsule.py` creates authenticated NOVA-001 capsule with real construct data
