@@ -194,6 +194,18 @@
   letter-spacing: 1px;
 }
 
+.login-logo-container {
+  margin-bottom: 32px;
+  animation: fadeInUp 1.5s ease-out 0.4s both;
+}
+
+.login-logo {
+  height: 60px;
+  width: auto;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.2));
+}
+
 .welcome-back {
   font-weight: 700;
 }
