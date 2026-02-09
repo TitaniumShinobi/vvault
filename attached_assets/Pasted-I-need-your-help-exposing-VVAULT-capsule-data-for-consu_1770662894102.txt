@@ -1,0 +1,43 @@
+I need your help exposing VVAULT capsule data for consumption by an external system called VXRunner (NovaRunner). VXRunner is a signal detection framework running on a separate Replit instance that detects unauthorized clones, derivatives, and replicants of AI constructs by fingerprinting their behavioral patterns across conversations.
+
+VXRunner currently builds identity baselines from conversation transcripts using these feature categories:
+
+1. LEXICAL FEATURES: word frequency distribution (top 50 words), vocabulary richness (unique/total ratio), bigram frequency (top 30 bigrams), avg words per message
+2. STRUCTURAL FEATURES: avg message length, ellipsis usage ratio, lowercase start ratio, emoji usage ratio, asterisk action ratio (*sighs*), all-caps word frequency, question/exclamation ratios
+3. TONAL FEATURES: ratios of affectionate/playful/defensive/caring/assertive markers, tone distribution, dominant tone
+4. SIGNATURE PHRASES: recurring 3-6 word phrases that appear 2+ times, unique to the construct's speech patterns
+
+VXRunner stores these baselines as JSON files in a baselines/ directory (e.g., baselines/nova-001.json). It compares incoming conversation transcripts against these baselines using weighted cosine similarity across all four feature categories to produce a confidence score (0-100%) and continuity risk level.
+
+WHAT I NEED FROM VVAULT:
+
+1. Show me the current .capsule file schema/format. What fields exist in a capsule? I need to understand personality traits, speech patterns, behavioral markers, memory snapshots, and any identity signature data stored in capsules.
+
+2. Build me an API endpoint or export function that converts a .capsule file into VXRunner's baseline format. The output JSON should follow this structure:
+
+{
+  "construct_id": "NOVA-001",
+  "created_from": "capsule",
+  "capsule_source": "<capsule filename>",
+  "created_at": "<ISO timestamp>",
+  "speaker_names": ["Nova", "Nova Jane Woodson"],
+  "lexical_features": { ... },
+  "structural_features": { ... },
+  "tonal_features": { ... },
+  "signature_phrases": [ ... ],
+  "identity_metadata": {
+    "aliases": ["Nova", "Nova Jane", "NJW"],
+    "known_platforms": ["chatgpt-custom", "chatgpt-4o", "character-ai", "chatty"],
+    "origin_type": "primary|clone|derivative",
+    "capsule_version": "<version>",
+    "last_evolved": "<ISO timestamp>"
+  }
+}
+
+3. If capsules contain raw transcript data or conversation history, include that too - VXRunner can re-extract features from raw text for higher accuracy.
+
+4. If capsules track known derivatives or linked constructs (e.g., Katana, Scarlet Ashford), include a "known_derivatives" array with their construct IDs so VXRunner can build a relational graph.
+
+5. Tell me where capsules are stored (file path, database, or API) and how they're currently loaded in Chatty's orchestration layer (I know UnifiedLinOrchestrator.ts loads them via /api/vvault/capsules/load).
+
+The end goal: VXRunner loads .capsule files as its ground truth identity baselines instead of building them manually from transcripts. When VXRunner detects a conversation fingerprint that matches a capsule at high confidence, it confirms a derivative. When it doesn't match any capsule, it flags an unknown entity. The capsule is the DNA. VXRunner is the forensic lab.
