@@ -81,5 +81,5 @@ packages = ["cairo", "cargo", "ffmpeg-full", "freetype", "ghostscript", "gobject
 
 [deployment]
 deploymentTarget = "vm"
-run = ["bash", "-c", "gunicorn --bind 0.0.0.0:5000 vvault.server.vvault_web_server:app"]
-build = ["bash", "-c", "pip install -r requirements.txt && npm install && npm run build"]
+run = ["bash", "-c", "gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 120 vvault.server.vvault_web_server:app"]
+build = ["bash", "-c", "pip install -r requirements.txt && npm install && npx webpack --mode production"]

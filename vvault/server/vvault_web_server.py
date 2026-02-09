@@ -49,10 +49,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask app configuration
-app = Flask(__name__)
+DIST_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'dist')
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'assets')
+PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'public')
+
+app = Flask(__name__, static_folder=DIST_DIR, static_url_path='')
 app.config['SECRET_KEY'] = 'vvault-secret-key-change-in-production'
-CORS(app, origins=["http://localhost:7784"])  # Allow requests from frontend
+CORS(app, origins=["http://localhost:7784", "https://vvault.thewreck.org"])
 
 # Google OAuth Configuration
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
@@ -859,7 +862,10 @@ def ingest_human_capsule():
 
 @app.route('/')
 def root():
-    """Root endpoint - minimal status response"""
+    """Serve React frontend if dist/index.html exists, otherwise API status"""
+    index_path = os.path.join(DIST_DIR, 'index.html')
+    if os.path.exists(index_path):
+        return send_from_directory(DIST_DIR, 'index.html')
     return jsonify({
         "status": "ok",
         "service": "vvault-api"
@@ -2567,6 +2573,23 @@ def not_found(error):
 @app.errorhandler(500)
 def internal_error(error):
     return jsonify({"success": False, "error": "Internal server error"}), 500
+
+@app.route('/assets/<path:filename>')
+def serve_assets(filename):
+    """Serve asset files (images, etc.)"""
+    if os.path.exists(os.path.join(ASSETS_DIR, filename)):
+        return send_from_directory(ASSETS_DIR, filename)
+    if os.path.exists(os.path.join(PUBLIC_DIR, 'assets', filename)):
+        return send_from_directory(os.path.join(PUBLIC_DIR, 'assets'), filename)
+    return jsonify({"error": "Asset not found"}), 404
+
+@app.errorhandler(404)
+def catch_all(e):
+    """Serve React app for client-side routing (SPA fallback)"""
+    index_path = os.path.join(DIST_DIR, 'index.html')
+    if os.path.exists(index_path):
+        return send_from_directory(DIST_DIR, 'index.html')
+    return jsonify({"error": "Not found"}), 404
 
 def main():
     """Main entry point for VVAULT Web Server"""
