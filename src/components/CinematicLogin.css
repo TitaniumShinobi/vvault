@@ -219,11 +219,14 @@
 }
 
 .wreck-footer {
-  margin-top: 20px;
+  position: absolute;
+  bottom: 40px;
+  left: calc(25% - 20px);
   display: flex;
-  justify-content: flex-start;
-  width: 100%;
+  justify-content: center;
+  align-items: center;
   animation: fadeInUp 1.5s ease-out 1.2s both;
+  z-index: 10;
 }
 
 .wreck-symbol {
