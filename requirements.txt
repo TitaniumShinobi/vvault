@@ -22,7 +22,7 @@ pycryptodome>=3.19.0
 
 # Smart contract interaction
 eth-brownie>=1.20.0
-# py-solc-x is required by eth-brownie (v1.1.1), so we'll let it be handled as a dependency
+py-solc-x==1.1.1
 # py-solc-x>=2.0.0
 
 # Network and API
