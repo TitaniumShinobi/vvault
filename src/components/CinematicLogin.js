@@ -262,6 +262,11 @@ const CinematicLogin = ({ onLogin }) => {
                 </svg>
               </div>
             </div>
+            <div className="wreck-footer">
+              <a href="https://thewreck.org" target="_blank" rel="noopener noreferrer">
+                <img src="/assets/WRECKSymbolInverted.png" alt="thewreck.org" className="wreck-symbol" />
+              </a>
+            </div>
           </div>
         </div>
 

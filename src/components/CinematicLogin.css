@@ -215,6 +215,29 @@
   display: flex;
   gap: 16px;
   margin-top: auto;
+  margin-bottom: 20px;
+}
+
+.wreck-footer {
+  margin-top: 20px;
+  display: flex;
+  justify-content: flex-start;
+  width: 100%;
+  animation: fadeInUp 1.5s ease-out 1.2s both;
+}
+
+.wreck-symbol {
+  height: 40px;
+  width: auto;
+  opacity: 0.6;
+  transition: all 0.3s ease;
+  filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.1));
+}
+
+.wreck-symbol:hover {
+  opacity: 1;
+  transform: scale(1.1);
+  filter: drop-shadow(0 0 15px rgba(255, 255, 255, 0.4));
 }
 
 .social-icon {
