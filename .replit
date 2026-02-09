@@ -78,3 +78,8 @@ integrations = ["github:1.0.0"]
 [nix]
 channel = "stable-25_05"
 packages = ["cairo", "cargo", "ffmpeg-full", "freetype", "ghostscript", "gobject-introspection", "gtk3", "kubo", "libiconv", "libxcrypt", "libyaml", "ollama", "openssl", "pkg-config", "qhull", "rustc", "tcl", "tk"]
+
+[deployment]
+deploymentTarget = "vm"
+run = ["bash", "-c", "gunicorn --bind 0.0.0.0:5000 vvault.server.vvault_web_server:app"]
+build = ["bash", "-c", "npm install && npm run build"]
