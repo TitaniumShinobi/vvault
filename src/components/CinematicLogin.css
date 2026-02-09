@@ -220,7 +220,7 @@
 
 .wreck-footer {
   position: absolute;
-  bottom: 0px;
+  bottom: 20px;
   left: calc(25% - 10px);
   transform: translateX(-50%);
   display: flex;
@@ -230,18 +230,37 @@
   z-index: 10;
 }
 
-.wreck-symbol {
-  height: 40px;
-  width: auto;
-  opacity: 0.6;
-  transition: all 0.3s ease;
-  filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.1));
+.wreck-symbol-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 44px;
+  height: 44px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 50%;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
 }
 
-.wreck-symbol:hover {
+.wreck-symbol-container:hover {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: translateY(-5px) scale(1.1);
+  box-shadow: 0 8px 20px rgba(255, 255, 255, 0.15);
+}
+
+.wreck-symbol {
+  height: 24px;
+  width: auto;
+  opacity: 0.8;
+  transition: all 0.3s ease;
+}
+
+.wreck-symbol-container:hover .wreck-symbol {
   opacity: 1;
-  transform: scale(1.1);
-  filter: drop-shadow(0 0 15px rgba(255, 255, 255, 0.4));
+  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.4));
 }
 
 .social-icon {

@@ -265,7 +265,7 @@ const CinematicLogin = ({ onLogin }) => {
           </div>
         </div>
         <div className="wreck-footer">
-          <a href="https://thewreck.org" target="_blank" rel="noopener noreferrer">
+          <a href="https://thewreck.org" target="_blank" rel="noopener noreferrer" className="wreck-symbol-container">
             <img src="/assets/WRECKSymbolInverted.png" alt="thewreck.org" className="wreck-symbol" />
           </a>
         </div>
