@@ -42,6 +42,11 @@ except Exception as e:
     supabase_client = None
     print(f"Supabase not configured: {e}")
 
+_server_dir = os.path.dirname(os.path.abspath(__file__))
+if _server_dir not in sys.path:
+    sys.path.insert(0, _server_dir)
+from vxrunner_baseline import convert_capsule_to_baseline
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -827,8 +832,6 @@ def get_capsule_vxrunner_baseline(capsule_name):
     environment, the endpoint is open (development mode).
     """
     try:
-        from vxrunner_baseline import convert_capsule_to_baseline
-
         expected_key = os.environ.get("VXRUNNER_API_KEY")
         if expected_key:
             provided_key = (
