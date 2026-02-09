@@ -1,0 +1,116 @@
+# VSI_ZERO_TRUST_SCOPING.md
+
+## Purpose
+
+This document outlines the security enforcement architecture for Chatty and VVAULT’s AI construct runtime. It establishes the foundational Zero Trust framework applied to memory, document gating, and user-construct access permissions.
+
+---
+
+## Core Principles
+
+* **Zero Trust** — Never assume user or construct validity; all access must be explicitly verified.
+* **Ownership Enforcement** — All reads/writes must validate session identity and ownership of the construct or dataset.
+* **Immutable Audit Trail** — Every action modifying critical construct data must be logged for forensic transparency.
+
+---
+
+## Components
+
+### 1. **Memory Guardian**
+
+> Verifies construct memory bindings regularly to detect and repair orphaned Supabase transcripts.
+
+* **Triggers**:
+
+  * On server boot
+  * Every 10 minutes
+
+* **Actions**:
+
+  * Scans Supabase transcript tables
+  * Identifies memory files not attached to any construct runtime
+  * If orphaned:
+
+    * Confirms construct still exists
+    * Confirms ownership by logged-in user
+    * Rebinds transcript to construct
+    * Logs recovery event to `/vvault/system/agent_intents.log`
+
+### 2. **Doc Enforcer**
+
+> Middleware for `/api/sim/*` and `/api/vsi/*` routes. Blocks critical updates unless documentation headers were accessed.
+
+* **Checks**:
+
+  * Whether documentation was reviewed (based on headers or tokens)
+  * Logs which docs were accessed, by which agent
+
+* **Fails with**: `403 Forbidden` if docs not verified
+
+* **Logs to**: `agent_intents.log`
+
+### 3. **AccessVerifier**
+
+> Global middleware for all sensitive API routes.
+
+* **Protected Routes**:
+
+  * `/api/vault/*`
+  * `/api/memory/*`
+  * `/api/sim/*`, `/api/vsi/*`
+
+* **Validations**:
+
+  * Active session
+  * Construct exists
+  * Construct belongs to session user
+
+* **Stackable**:
+
+  * Runs alongside `Doc Enforcer` for VSI/Sim protection
+
+---
+
+## Frontend Integration
+
+### GPTsPage
+
+* Adds UI logic for:
+
+  * **Transcript Watchdog Alert**: Shows when memory is out of sync
+  * **"Rebind Missing Transcripts"** button (calls new backend rebind API)
+
+---
+
+## Logs
+
+### `agent_intents.log`
+
+Structured log file containing all:
+
+* Transcript rebind attempts
+* API route doc enforcement checks
+* Construct-level access denials
+
+Each line includes:
+
+* Timestamp
+* Agent/User
+* Action performed
+* Result (pass/fail)
+* Docs verified (if relevant)
+
+---
+
+## Future Considerations
+
+* Encrypt audit logs
+* Allow users to query audit history
+* Add alerting system for large-scale transcript orphaning
+
+---
+
+## Status: ✅ In Development
+
+Owned by: Devon Woodson
+Maintainer: Replit Agent (Chatty Build Pipeline)
