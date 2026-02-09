@@ -818,6 +818,49 @@ def get_capsule(capsule_name):
         logger.error(f"Error in get_capsule endpoint: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/api/capsules/<capsule_name>/vxrunner-baseline')
+def get_capsule_vxrunner_baseline(capsule_name):
+    """Convert a capsule to VXRunner forensic baseline format.
+    
+    Access control: Requires VXRUNNER_API_KEY via X-VXRunner-Key header
+    or ?key= query parameter. If VXRUNNER_API_KEY is not set in the
+    environment, the endpoint is open (development mode).
+    """
+    try:
+        from vxrunner_baseline import convert_capsule_to_baseline
+
+        expected_key = os.environ.get("VXRUNNER_API_KEY")
+        if expected_key:
+            provided_key = (
+                request.headers.get("X-VXRunner-Key")
+                or request.args.get("key")
+            )
+            if provided_key != expected_key:
+                return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+        if not capsule_name.endswith('.capsule'):
+            capsule_name_file = capsule_name + '.capsule'
+        else:
+            capsule_name_file = capsule_name
+
+        capsule_data = api.get_capsule_data(capsule_name_file)
+        if capsule_data is None:
+            capsule_data = api.get_capsule_data(capsule_name)
+        if capsule_data is None:
+            return jsonify({"success": False, "error": f"Capsule '{capsule_name}' not found"}), 404
+
+        include_raw = request.args.get("include_raw_text", "true").lower() == "true"
+        baseline = convert_capsule_to_baseline(capsule_data, include_raw_text=include_raw)
+
+        return jsonify({
+            "success": True,
+            "baseline": baseline
+        })
+    except Exception as e:
+        logger.error(f"Error in VXRunner baseline endpoint: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/api/capsules', methods=['POST'])
 @require_auth
 def create_capsule():

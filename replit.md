@@ -46,6 +46,20 @@ A 5-layer security system for sovereign construct identity preservation with a s
 ### API Integrations
 - **Chatty Integration API**: VVAULT acts as the stateful backend for Chatty, providing endpoints for managing constructs, transcripts, and messages.
 - **Service API**: VVAULT serves as a config and credentials vault for external services.
+- **VXRunner Integration API**: VVAULT exposes capsule data as forensic DNA baselines for VXRunner's construct detection system.
+
+### VXRunner Integration (Capsule-as-DNA)
+- **Purpose**: VVAULT capsules serve as ground truth identity baselines for VXRunner (NovaRunner), a signal detection framework that detects unauthorized clones, derivatives, and replicants of AI constructs.
+- **Converter Module**: `vvault/server/vxrunner_baseline.py` transforms `.capsule` files into VXRunner's forensic baseline JSON format.
+- **Feature Extraction**: The converter extracts four feature categories from capsule data:
+  - **Lexical Features**: Word frequency (top 50), vocabulary richness, bigram frequency (top 30), avg words per message — extracted from raw memory text
+  - **Structural Features**: Avg message length, ellipsis/emoji/asterisk usage ratios, lowercase start ratio, all-caps frequency, question/exclamation ratios
+  - **Tonal Features**: Affectionate/playful/defensive/caring/assertive marker ratios, tone distribution, dominant tone — synthesized from personality traits + memory text analysis
+  - **Signature Phrases**: Recurring 3-6 word phrases appearing 2+ times, filtered for content relevance
+- **API Endpoint**: `GET /api/capsules/<name>/vxrunner-baseline` (unauthenticated, so VXRunner can pull directly)
+- **Capsule Storage**: `.capsule` files stored in `vvault/server/capsules/` directory
+- **Active Capsules**: `nova-001.capsule` (INFJ, primary construct, 30 memory entries, 28 traits)
+- **Capsule Generator**: `scripts/capsules/generate_nova_capsule.py` creates authenticated NOVA-001 capsule with real construct data
 
 ### LLM Backend
 - **Ollama**: Utilizes `qwen2.5:0.5b` model.
