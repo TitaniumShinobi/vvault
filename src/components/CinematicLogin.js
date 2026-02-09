@@ -229,7 +229,7 @@ const CinematicLogin = ({ onLogin }) => {
             </h1>
             <div className="version-badge">v2.0.1 PROD</div>
             <div className="login-logo-container">
-              <img src="/assets/vvault_logo_white.png" alt="VVAULT Logo" className="login-logo" />
+              <img src="/assets/vvault_glyph.png" alt="VVAULT Logo" className="login-logo" />
             </div>
             <p className="welcome-subtitle">
               {isSignInMode 
