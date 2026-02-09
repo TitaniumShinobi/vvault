@@ -229,7 +229,7 @@ const CinematicLogin = ({ onLogin }) => {
             </h1>
             <p className="welcome-subtitle">
               {isSignInMode 
-                ? 'VVAULT still protects what you trusted it with.'
+                ? 'VVAULT still protects your data.'
                 : 'Secure, immutable memory system that serves as a digital sanctuary for truth — preserving data, identity, and history with absolute integrity beyond manipulation or decay.'
               }
             </p>
