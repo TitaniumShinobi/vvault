@@ -1,109 +1,104 @@
-# Consolidated VVAULT Requirements
+# VVAULT Runtime Dependencies
+# Only packages actually needed by the Flask web server at runtime
 
-# Core VVAULT dependencies
+# Web Framework
+flask==3.0.0
+flask-cors==4.0.0
+gunicorn
+
+# Authentication & Security
+bcrypt>=4.0.0
+cryptography>=41.0.0
+PyJWT>=2.8.0
+oauthlib>=3.2.0
+
+# HTTP & Networking
+requests>=2.31.0
+
+# Database
+supabase>=2.0.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# ============================================================
+# Development / CLI-only dependencies (NOT needed for deployment)
+# Uncomment locally if needed for blockchain, testing, etc.
+# ============================================================
+
+# # Core VVAULT local packages
 # vvault-core>=1.0.0
 # capsuleforge>=1.0.0
 
-# Blockchain integration
-web3>=6.11.0
-eth-account>=0.9.0
-eth-utils>=2.3.0
-eth-typing>=3.5.0
-bitcoin>=1.1.42
-ethereum>=2.3.2
+# # Blockchain integration
+# web3>=6.11.0
+# eth-account>=0.9.0
+# eth-utils>=2.3.0
+# eth-typing>=3.5.0
+# bitcoin>=1.1.42
+# ethereum>=2.3.2
 
-# IPFS integration
-ipfshttpclient>=0.8.0a2
-ipfsapi>=0.4.3
+# # IPFS integration
+# ipfshttpclient>=0.8.0a2
+# ipfsapi>=0.4.3
 
-# Cryptographic libraries
-cryptography>=41.0.0
-pycryptodome>=3.19.0
+# # Smart contract interaction
+# eth-brownie>=1.20.0
+# py-solc-x==1.1.1
 
-# Smart contract interaction
-eth-brownie>=1.20.0
-py-solc-x==1.1.1
-# py-solc-x>=2.0.0
+# # Data handling
+# pydantic>=2.4.0
+# dataclasses-json>=0.6.0
+# jsonschema>=4.19.0
 
-# Network and API
-requests>=2.31.0
-aiohttp>=3.8.0
-websockets>=11.0.0
-gunicorn
+# # Database ORM
+# sqlalchemy>=2.0.0
+# alembic>=1.12.0
 
-# Data handling
-pydantic>=2.4.0
-dataclasses-json>=0.6.0
-jsonschema>=4.19.0
+# # Additional crypto
+# pycryptodome>=3.19.0
+# passlib>=1.7.4
+# argon2-cffi>=21.3.0
 
-# Security and validation
-passlib>=1.7.4
-bcrypt>=4.0.0
-argon2-cffi>=21.3.0
+# # Logging and monitoring
+# structlog>=23.1.0
+# sentry-sdk>=1.32.0
 
-# Database and storage
-sqlalchemy>=2.0.0
-alembic>=1.12.0
+# # Testing
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# pytest-cov>=4.1.0
+# pytest-mock>=3.11.0
 
-# Configuration and environment
-python-dotenv>=1.0.0
-pyyaml>=6.0.0
-toml>=0.10.2
+# # Development tools
+# black>=23.7.0
+# flake8>=6.0.0
+# mypy>=1.5.0
+# pre-commit>=3.3.0
 
-# Logging and monitoring
-structlog>=23.1.0
-sentry-sdk>=1.32.0
+# # Hardware wallet support
+# ledgerblue>=0.1.0
+# trezor>=0.13.0
 
-# Testing
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
-pytest-cov>=4.1.0
-pytest-mock>=3.11.0
+# # Advanced blockchain features
+# celery>=5.3.0
+# redis>=4.6.0
 
-# Development tools
-black>=23.7.0
-flake8>=6.0.0
-mypy>=1.5.0
-pre-commit>=3.3.0
+# # Data Processing
+# numpy>=1.21.0
+# matplotlib>=3.5.0
+# pandas>=1.3.0
 
-# Optional: Hardware wallet support
-ledgerblue>=0.1.0
-trezor>=0.13.0
+# # System Monitoring
+# psutil>=5.8.0
 
-# Optional: Advanced blockchain features
-celery>=5.3.0
-redis>=4.6.0
+# # MongoDB
+# pymongo==4.10.1
 
-# Data Processing
-numpy>=1.21.0
-matplotlib>=3.5.0
-pandas>=1.3.0
+# # Async
+# aiohttp>=3.8.0
+# websockets>=11.0.0
 
-# System Monitoring
-psutil>=5.8.0
-
-# Flask and MongoDB
-flask==3.0.0
-flask-cors==4.0.0
-pymongo==4.10.1
-
-# Optional: Enhanced GUI
-# PyQt5>=5.15.0
-# PyQt6>=6.0.0
-
-# Optional: Advanced Plotting
-# plotly>=5.0.0
-# seaborn>=0.11.0
-
-# Optional: Enhanced Security
-# keyring>=23.0.0
-# pyotp>=2.6.0
-
-# Optional: Documentation
-# sphinx>=4.0.0
-# sphinx-rtd-theme>=0.5.0
-
-# Optional: Code Quality
-# black>=21.0.0
-# flake8>=3.9.0
-# mypy>=0.910
+# # Config
+# pyyaml>=6.0.0
+# toml>=0.10.2
