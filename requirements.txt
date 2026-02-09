@@ -21,7 +21,7 @@ cryptography>=41.0.0
 pycryptodome>=3.19.0
 
 # Smart contract interaction
-brownie-eth>=1.20.0
+eth-brownie>=1.20.0
 solcx>=2.0.0
 
 # Network and API
