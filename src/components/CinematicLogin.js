@@ -227,6 +227,7 @@ const CinematicLogin = ({ onLogin }) => {
                 'Intelligent Memory. Guarded Sovereignty.'
               )}
             </h1>
+            <div className="version-badge">v2.0.1 PROD</div>
             <p className="welcome-subtitle">
               {isSignInMode 
                 ? 'VVAULT still protects what you trusted it with.'
