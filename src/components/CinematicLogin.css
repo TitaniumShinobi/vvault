@@ -176,34 +176,8 @@
   font-size: 3.5rem;
   font-weight: 700;
   color: white;
-  margin-bottom: 8px;
-  line-height: 1.1;
-}
-
-.version-badge {
-  display: inline-block;
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.6);
-  padding: 4px 12px;
-  border-radius: 20px;
-  font-size: 0.75rem;
-  font-weight: 600;
   margin-bottom: 24px;
-  backdrop-filter: blur(5px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  letter-spacing: 1px;
-}
-
-.login-logo-container {
-  margin-bottom: 32px;
-  animation: fadeInUp 1.5s ease-out 0.4s both;
-}
-
-.login-logo {
-  height: 80px;
-  width: auto;
-  opacity: 0.9;
-  filter: drop-shadow(0 0 15px rgba(255, 255, 255, 0.3));
+  line-height: 1.1;
 }
 
 .welcome-back {
