@@ -69,6 +69,7 @@ if GOOGLE_CLIENT_ID:
 
 # Get Replit domain for OAuth callbacks
 REPLIT_DEV_DOMAIN = os.environ.get("REPLIT_DEV_DOMAIN", "localhost:5000")
+OAUTH_BASE_URL = os.environ.get("OAUTH_BASE_URL", "")
 
 # Service API Configuration (for FXShinobi/Chatty backend-to-backend calls)
 VVAULT_SERVICE_TOKEN = os.environ.get("VVAULT_SERVICE_TOKEN")
@@ -2447,12 +2448,13 @@ def google_oauth_login():
         google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
         authorization_endpoint = google_provider_cfg["authorization_endpoint"]
         
-        # Build callback URL - use REPLIT_DEV_DOMAIN for Replit environment
-        if REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
-            host = REPLIT_DEV_DOMAIN
+        if OAUTH_BASE_URL:
+            callback_url = f"{OAUTH_BASE_URL}/api/auth/google/callback"
+        elif REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
+            callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/google/callback"
         else:
             host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
-        callback_url = f"https://{host}/api/auth/google/callback"
+            callback_url = f"https://{host}/api/auth/google/callback"
         
         # Prepare the OAuth request
         request_uri = google_client.prepare_request_uri(
@@ -2490,13 +2492,15 @@ def google_oauth_callback():
         google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
         token_endpoint = google_provider_cfg["token_endpoint"]
         
-        # Build callback URL (must match initial request)
-        if REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
-            host = REPLIT_DEV_DOMAIN
+        if OAUTH_BASE_URL:
+            base = OAUTH_BASE_URL
+        elif REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
+            base = f"https://{REPLIT_DEV_DOMAIN}"
         else:
             host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
-        callback_url = f"https://{host}/api/auth/google/callback"
-        authorization_response = f"https://{host}{request.full_path}"
+            base = f"https://{host}"
+        callback_url = f"{base}/api/auth/google/callback"
+        authorization_response = f"{base}{request.full_path}"
         
         logger.info(f"Processing OAuth callback with redirect_url: {callback_url}")
         
