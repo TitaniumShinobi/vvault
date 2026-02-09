@@ -1475,6 +1475,136 @@ def store_service_config(service):
             "error": "Failed to store config"
         }), 500
 
+
+@app.route('/api/vault/system-files', methods=['GET'])
+@require_service_token
+def get_system_file():
+    """
+    Retrieve a system file by storage_path (service-to-service).
+
+    Query params:
+      - storage_path (required)
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 503
+
+        storage_path = (request.args.get("storage_path") or "").strip()
+        if not storage_path:
+            return jsonify({"success": False, "error": "storage_path is required"}), 400
+
+        result = (
+            supabase_client.table("vault_files")
+            .select("*")
+            .eq("is_system", True)
+            .eq("storage_path", storage_path)
+            .limit(1)
+            .execute()
+        )
+
+        if not result.data:
+            return jsonify({"success": False, "error": "File not found"}), 404
+
+        return jsonify({"success": True, "file": result.data[0]})
+    except Exception as e:
+        logger.error(f"SERVICE_API: Error fetching system file: {e}")
+        return jsonify({"success": False, "error": "Failed to fetch system file"}), 500
+
+
+@app.route('/api/vault/system-files', methods=['POST'])
+@require_service_token
+def upsert_system_file():
+    """
+    Store or update a system vault file (service-to-service).
+
+    Request body: { storage_path, filename?, content, file_type?, metadata? }
+      - storage_path is the canonical key (required)
+      - filename defaults to storage_path
+      - metadata may be a dict or JSON string; stored as JSON string
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 503
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "Request body required"}), 400
+
+        storage_path = (data.get("storage_path") or "").strip()
+        if not storage_path:
+            return jsonify({"success": False, "error": "storage_path is required"}), 400
+
+        filename = (data.get("filename") or storage_path).strip()
+        content = data.get("content", "")
+        file_type = (data.get("file_type") or "text/markdown").strip()
+        metadata = data.get("metadata", {})
+
+        # Normalize metadata to a JSON string for storage.
+        if metadata is None:
+            metadata_obj = {}
+        elif isinstance(metadata, str):
+            try:
+                metadata_obj = json.loads(metadata)
+            except Exception:
+                metadata_obj = {"raw": metadata}
+        elif isinstance(metadata, dict):
+            metadata_obj = metadata
+        else:
+            metadata_obj = {"value": metadata}
+
+        now = datetime.now().isoformat()
+        sha256 = hashlib.sha256(str(content).encode("utf-8")).hexdigest()
+
+        existing = (
+            supabase_client.table("vault_files")
+            .select("id, created_at")
+            .eq("is_system", True)
+            .eq("storage_path", storage_path)
+            .limit(1)
+            .execute()
+        )
+
+        record = {
+            "filename": filename,
+            "storage_path": storage_path,
+            "file_type": file_type,
+            "content": content,
+            "metadata": json.dumps(metadata_obj),
+            "sha256": sha256,
+            "is_system": True,
+            "user_id": None,
+            "updated_at": now,
+        }
+
+        action = "created"
+        if existing.data:
+            file_id = existing.data[0]["id"]
+            created_at = existing.data[0].get("created_at") or now
+            update_record = dict(record)
+            update_record["created_at"] = created_at
+            result = supabase_client.table("vault_files").update(update_record).eq("id", file_id).execute()
+            action = "updated"
+        else:
+            insert_record = dict(record)
+            insert_record["created_at"] = now
+            result = supabase_client.table("vault_files").insert(insert_record).execute()
+
+        logger.info(f"SERVICE_API: System file upserted: {storage_path}")
+        return jsonify(
+            {
+                "success": True,
+                "storage_path": storage_path,
+                "filename": filename,
+                "sha256": sha256,
+                "action": action,
+                "message": "System file upserted",
+                "file": (result.data[0] if result.data else None),
+            }
+        )
+    except Exception as e:
+        logger.error(f"SERVICE_API: Error upserting system file: {e}")
+        return jsonify({"success": False, "error": "Failed to upsert system file"}), 500
+
 # ============================================================================
 # END SERVICE API ENDPOINTS
 # ============================================================================

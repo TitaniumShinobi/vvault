@@ -250,3 +250,7 @@ nova-001.zip
 **/Backups/**
 **/Initial Data Export/**
 **/Initial Data Export.zip
+node_modules
+
+# Ignore system files
+.DS_Store
