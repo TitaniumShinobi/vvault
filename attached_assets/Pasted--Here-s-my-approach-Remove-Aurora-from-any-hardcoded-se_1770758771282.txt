@@ -1,0 +1,35 @@
+
+Here's my approach:
+
+Remove Aurora from any hardcoded seed data — she shouldn't exist unless added through the GUI
+Integrate the new VVAULT files endpoint — call GET /api/chatty/construct/<construct_id>/files to load real identity data (prompt.json for name/description/instructions, avatar) and real knowledge file listings (assets/ + documents/)
+Update the GPT Configure tab so it reads from this real data instead of fabricated defaults
+Ensure empty states — if a construct has no data in Supabase, show empty fields, not made-up content
+Let me first check what exactly needs to change before writing the task list.
+
+Now I can see the full scope. Let me also check how identity data should be loaded from VVAULT:
+
+Now I have a clear picture. Here's my plan:
+
+The core problem: The seedDefaultConstructs() method in gptManager.js hardcodes fabricated names, descriptions, and instructions for Zen, Katana, Lin, and Aurora — and inserts them into the local SQLite database as seed data. The GPT Configure tab then reads from that local DB, showing made-up content instead of the real identity data living in Supabase.
+
+The fix:
+
+Remove Aurora from the seed constructs — only Zen, Lin, and Katana should be seeded (Zen and Lin as system nav items, Katana as a custom GPT). Aurora gets added only through the GUI.
+
+Strip fabricated identity from seeds — the seed data should only contain the minimum needed to register a construct (callsign, ID, model defaults, orchestration mode). Name, description, and instructions should be left empty so they get loaded from Supabase.
+
+Add VVAULT identity hydration — after seeding, call the new GET /api/chatty/construct/<construct_id>/files endpoint to fetch real identity data (prompt.json) from VVAULT/Supabase, and populate name/description/instructions from that.
+
+Wire up knowledge files — the GPT Configure tab's knowledge section should pull file listings from the VVAULT files endpoint (assets/ + documents/ folders) instead of local data.
+
+Remove Aurora from ConstructRegistry — clean up all Aurora references from the registry and related services.
+
+
+Scroll to latest
+Remove Aurora from code files
+Keep only core details for constructs
+Add real identity information for constructs
+Connect configuration files to real data
+Remove old references, check app loads
+Agent has identified a task list to work on. If everything looks good, start building to make these updates to your app.
