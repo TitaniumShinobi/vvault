@@ -1,0 +1,111 @@
+
+Thanks for showing me the VVAULT file structure. I can see the situation clearly:
+
+Two Katana instance folders — instances/katana/ (stray, created by Chatty using the bare name) and instances/katana-001/ (canonical, correct callsign path)
+Duplicate prompt files in katana-001/identity/ — prompt_20251206100158.txt and prompt_20251206100406.txt alongside the canonical prompt.txt
+The Chatty conversation deduplication already merges both transcripts at read time (we saw Merged 71 messages from katana_chat_with_katana into katana-001_chat_with_katana-001 in the logs)
+The root cause of the stray katana/ folder: somewhere in Chatty's write path, it uses the construct name instead of the callsign when building the Supabase file path. That needs to be fixed to prevent it from happening again.
+
+Here's my approach:
+
+Fix the write path — find where Chatty constructs the Supabase file path for transcripts and ensure it always uses the callsign (e.g., katana-001), never the bare name (katana)
+Document the naming convention — update replit.md with the name vs. callsign distinction so it's clear for all agents
+Note for you — the duplicate prompt files and the stray instances/katana/ folder in Supabase are data cleanup tasks. Per your data protection rules, I'll describe exactly what to delete but won't touch Supabase data directly.
+Created task list
+Start building
+Let me start by finding where the write path constructs file paths for Supabase transcripts.
+
+Now I can see the write path. Line 911 in supabaseStore.js uses constructId for the file path — the question is what value is being passed as constructId when Chatty writes. Let me trace the call chain:
+
+Now let me trace the actual callers to see where constructId comes from. The key question is: who passes the bare name "katana" instead of the callsign "katana-001"?
+
+Now let me trace where constructId originates from the frontend side:
+
+Let me find where the frontend sends messages to the VVAULT API:
+
+Now let me find the main chat send flow — where messages are sent in the main chat view:
+
+Let me trace the main chat flow — the /api/chat endpoint where users send messages:
+
+Now let me see where the write happens after the AI responds:
+
+Now let me trace where the frontend sends constructId — where does it get the value?
+
+Now I need to find where constructId is set in the frontend before it reaches aiService.ts. Let me trace what provides constructId:
+
+Good. The frontend passes options.constructId which comes from the caller. Let me trace who calls processMessage:
+
+Let me look at the main call site in Layout.tsx:
+
+Now let me see where effectiveConstructId is set:
+
+Now I see — effectiveConstructId comes from thread.constructId. Let me find where threads are created when a user selects a contact:
+
+Now let me trace where the constructId value comes from when a contact is clicked:
+
+Let me trace back further to where the contact click enters:
+
+Now I understand the flow. startConversationWithConstruct(constructId) receives the constructId. Let me find where the Sidebar calls this:
+
+Let me search the Address Book / contact card flow:
+
+Now let me trace the GPT contact cards to see how constructId is set:
+
+Good — I can see that constructId is properly set from gpt.constructCallsign (line 328), which should be katana-001. The frontend chain looks correct. Now let me check the server-side write path — specifically the writeTranscript function and the writeConversationToSupabase function to see if there's a path where the bare name gets used:
+
+Now I have the full picture. The write path in writeConversationToSupabase (line 911) uses constructId directly to build the filename. The frontend correctly sends katana-001 via gpt.constructCallsign.
+
+But there's a risk: if constructId ever receives a bare name (like "katana"), the path becomes instances/katana/chatty/chat_with_katana.md. The fix should be to validate and normalize the constructId in writeConversationToSupabase to ensure it always has the callsign format with the -NNN suffix.
+
+Let me also check if there's any other write path that might strip the suffix:
+
+Now let me look at line 536 which is concerning — it strips the -001 suffix from constructId:
+
+OK, line 536 strips -001 for runtimeId, but runtimeId is not used for file paths — it's a separate concept. The file path uses constructId directly.
+
+Now I understand the full picture. The writeConversationToSupabase function (line 911) correctly uses constructId, and the frontend sends the proper callsign. But we need a safety guard in the write function to catch cases where a bare name sneaks through. Let me add the fix:
+
+Now I'll add the fix — a callsign normalizer that ensures the -NNN suffix is always present:
+
+Now I also need to fix the same normalization in the metadata that gets stored. Let me check what's stored in the metadata:
+
+I also need to update the metadata to use the normalized constructId:
+
+Now let me also check the updateTranscriptMetadata.js since it was in the grep results:
+
+Good. The updateTranscriptMetadata.js operates on the local VVAULT filesystem, not Supabase — so it's a different code path and not the cause of this issue.
+
+Now let me also apply the same normalization to the writeTranscriptToPostgres path in writeTranscript.js, so it stays consistent:
+
+The Postgres write also needs normalization. Let me add it:
+
+Good. Now let me move to task 2 — updating replit.md with the naming convention. Let me also restart the workflow to pick up the changes.
+
+Now let me add the naming convention documentation to replit.md:
+
+Now let me do task 3 — write the cleanup instructions:
+
+Now let me restart the workflow to apply the code changes and prepare the cleanup instructions:
+
+The server is running cleanly. I can see the merge is still working correctly — Merged 71 messages from katana_chat_with_katana into katana-001_chat_with_katana-001.
+
+Now let me run the final review with architect:
+
+All changes passed review. Let me mark the tasks as completed:
+
+All three tasks are done. Here's a summary of what was completed:
+
+Fix applied: The write paths in Supabase and Postgres now auto-normalize construct IDs to proper callsign format. If a bare name like "katana" comes through, it gets converted to "katana-001" before being used in file paths, metadata, or database records. This prevents the duplicate folder issue going forward.
+
+Documentation updated: The naming convention is now clearly documented — Name (e.g., "Katana") is the display label, while Callsign (e.g., "katana-001") is always used for file paths and data storage.
+
+Supabase cleanup you'll need to do manually (per the read-only rule):
+
+There are existing stray files in Supabase from before this fix. You'll want to clean these up:
+
+Delete the stray instances/katana/ folder — This was created by the old un-normalized path. The correct folder is instances/katana-001/. In your Supabase dashboard, find and delete any vault_files records where the filename starts with instances/katana/ (but NOT instances/katana-001/).
+
+Check for duplicate prompt files in katana-001/identity/ — There may be redundant identity files that were written during the duplication period. Keep the most recent one and remove any extras.
+
+The server is running cleanly with all 3 conversations loading properly (Lin, Katana with 93 messages, Zen with 173 messages).
+

@@ -1986,12 +1986,17 @@ def append_chatty_message(construct_id):
 @app.route('/api/chatty/construct/<construct_id>/files')
 @require_chatty_auth
 def get_construct_files(construct_id):
-    """List assets and documents for a specific construct.
+    """List assets, documents, and identity files for a specific construct.
+
+    Normalizes the incoming construct_id to callsign format and queries
+    Supabase using BOTH the callsign (e.g. 'katana-001') and the bare
+    name (e.g. 'katana') to capture all files regardless of how their
+    construct_id column was originally set.
 
     Returns file counts and listings for:
       - assets/  (images: png, jpg, jpeg, svg)
       - documents/  (all other files)
-      - identity/prompt.json  (name, description, instructions)
+      - identity/  (prompt.json, capsules, config)
 
     Query params:
       - folder: optional filter ('assets', 'documents', 'identity')
@@ -2008,11 +2013,13 @@ def get_construct_files(construct_id):
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 404
 
+        callsign = _normalize_callsign(construct_id)
+        bare_name = _bare_name_from_callsign(callsign)
         folder_filter = request.args.get('folder')
 
         all_files = supabase_client.table('vault_files').select(
-            'id, filename, file_type, metadata, created_at'
-        ).eq('user_id', user_id).execute()
+            'id, filename, file_type, metadata, created_at, construct_id'
+        ).or_(f'construct_id.eq.{callsign},construct_id.eq.{bare_name}').execute()
 
         assets = []
         documents = []
@@ -2020,37 +2027,26 @@ def get_construct_files(construct_id):
 
         for f in (all_files.data or []):
             fname = f.get('filename', '')
-            if construct_id not in fname:
-                continue
+            entry = {
+                "id": f.get('id'),
+                "filename": fname.split('/')[-1],
+                "path": fname,
+                "file_type": f.get('file_type'),
+                "created_at": f.get('created_at')
+            }
 
-            if f'/assets/' in fname or fname.endswith(('/assets', '/assets/')):
-                assets.append({
-                    "id": f.get('id'),
-                    "filename": fname.split('/')[-1],
-                    "path": fname,
-                    "file_type": f.get('file_type'),
-                    "created_at": f.get('created_at')
-                })
-            elif f'/documents/' in fname:
-                documents.append({
-                    "id": f.get('id'),
-                    "filename": fname.split('/')[-1],
-                    "path": fname,
-                    "file_type": f.get('file_type'),
-                    "created_at": f.get('created_at')
-                })
-            elif '/identity/' in fname:
-                identity.append({
-                    "id": f.get('id'),
-                    "filename": fname.split('/')[-1],
-                    "path": fname,
-                    "file_type": f.get('file_type'),
-                    "created_at": f.get('created_at')
-                })
+            if '/assets/' in fname or fname.endswith(('.png', '.jpg', '.jpeg', '.svg')):
+                assets.append(entry)
+            elif '/documents/' in fname:
+                documents.append(entry)
+            elif '/identity/' in fname or fname.endswith('.capsule'):
+                identity.append(entry)
+            else:
+                documents.append(entry)
 
         response = {
             "success": True,
-            "construct_id": construct_id,
+            "construct_id": callsign,
             "counts": {
                 "assets": len(assets),
                 "documents": len(documents),
@@ -2072,48 +2068,191 @@ def get_construct_files(construct_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@app.route('/api/chatty/constructs')
+@app.route('/api/chatty/construct/<construct_id>/identity')
 @require_chatty_auth
-def get_chatty_constructs():
-    """Get all available constructs with chat transcripts (user-scoped)"""
+def get_construct_identity(construct_id):
+    """Return structured identity data for a construct.
+
+    Searches Supabase for identity files (prompt.txt, prompt.json,
+    personality.json, CONTINUITY_GPT_PROMPT.md) using both the callsign
+    and bare name construct_id values.
+
+    Returns:
+      {
+        "success": true,
+        "construct_id": "katana-001",
+        "name": "Katana",
+        "description": "...",
+        "instructions": "...",
+        "personality": { ... },
+        "system_prompt": "..."
+      }
+    """
     try:
         if not supabase_client:
             return jsonify({"success": False, "error": "Supabase not configured"}), 500
-        
-        # Get current user for scoped query
+
+        callsign = _normalize_callsign(construct_id)
+        bare_name = _bare_name_from_callsign(callsign)
+        display_name = bare_name.capitalize()
+
+        identity_files = ['prompt.txt', 'prompt.json', 'personality.json',
+                          'CONTINUITY_GPT_PROMPT.md', 'conditioning.txt']
+
+        result = supabase_client.table('vault_files').select(
+            'filename, content, file_type'
+        ).or_(
+            f'construct_id.eq.{callsign},construct_id.eq.{bare_name}'
+        ).in_('filename', identity_files).not_.is_('content', 'null').execute()
+
+        name = display_name
+        description = ""
+        instructions = ""
+        system_prompt = ""
+        personality = None
+
+        for f in (result.data or []):
+            fname = f.get('filename', '')
+            content = f.get('content', '') or ''
+
+            if fname == 'prompt.txt':
+                lines = content.strip().split('\n')
+                for line in lines:
+                    line_stripped = line.strip().strip('*')
+                    if line_stripped.startswith('You Are '):
+                        name = line_stripped.replace('You Are ', '').strip()
+                    elif line_stripped.startswith('Helps ') or line_stripped.startswith('Description:'):
+                        description = line_stripped.replace('Description:', '').strip()
+                code_blocks = content.split('```')
+                if len(code_blocks) >= 2:
+                    instructions = code_blocks[1].strip()
+                    if instructions.startswith('Instructions for'):
+                        instructions = '\n'.join(instructions.split('\n')[1:]).strip()
+                system_prompt = content.strip()
+
+            elif fname == 'prompt.json':
+                try:
+                    data = json.loads(content)
+                    name = data.get('name', name)
+                    description = data.get('description', description)
+                    instructions = data.get('instructions', instructions)
+                    system_prompt = data.get('system_prompt', '') or data.get('prompt', '') or system_prompt
+                except json.JSONDecodeError:
+                    pass
+
+            elif fname == 'personality.json':
+                try:
+                    personality = json.loads(content)
+                except json.JSONDecodeError:
+                    pass
+
+            elif fname == 'CONTINUITY_GPT_PROMPT.md':
+                if not system_prompt:
+                    system_prompt = content.strip()
+
+        enforcement = None
+        enf_result = supabase_client.table('vault_files').select(
+            'content'
+        ).eq('construct_id', callsign).eq('file_type', 'enforcement_config').not_.is_('content', 'null').execute()
+        if enf_result.data:
+            try:
+                enforcement = json.loads(enf_result.data[0].get('content', '{}'))
+            except json.JSONDecodeError:
+                pass
+
+        return jsonify({
+            "success": True,
+            "construct_id": callsign,
+            "name": name,
+            "description": description or f"Helps you with your life problems.",
+            "instructions": instructions,
+            "system_prompt": system_prompt,
+            "personality": personality,
+            "enforcement": enforcement
+        })
+
+    except Exception as e:
+        logger.error(f"Error fetching identity for {construct_id}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _normalize_callsign(raw_id: str) -> str:
+    """Normalize a construct identifier to proper callsign format.
+
+    Bare names like 'katana' become 'katana-001'.
+    Already-valid callsigns like 'katana-001' pass through unchanged.
+    """
+    import re
+    if re.match(r'^.+-\d{3}$', raw_id):
+        return raw_id
+    return f"{raw_id}-001"
+
+
+def _bare_name_from_callsign(callsign: str) -> str:
+    """Extract the bare construct name from a callsign.
+
+    'katana-001' -> 'katana', 'zen-001' -> 'zen'
+    """
+    import re
+    m = re.match(r'^(.+)-\d{3}$', callsign)
+    return m.group(1) if m else callsign
+
+
+@app.route('/api/chatty/constructs')
+@require_chatty_auth
+def get_chatty_constructs():
+    """Get all available constructs with chat transcripts (user-scoped).
+
+    Deduplicates bare-name vs callsign entries: if both 'katana' and
+    'katana-001' transcripts exist, only 'katana-001' is returned.
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
         current_user = request.current_user
         user_email = current_user.get('email')
         user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
         user_id = user_result.data[0]['id'] if user_result.data else None
-        
+
         if not user_id:
             return jsonify({"success": True, "constructs": [], "count": 0})
-        
-        # Query only user's chat files
+
         result = supabase_client.table('vault_files').select('filename, metadata, created_at').eq('user_id', user_id).ilike('filename', '%chat_with_%').execute()
-        
-        constructs = []
-        # Special construct roles - Lin has dual-mode: conversational + undertone stabilizer
+
         special_roles = {
             'lin-001': {'role': 'undertone', 'context': 'gpt_creator_create_tab', 'is_system': True}
         }
-        
+
+        seen = {}
         for file in (result.data or []):
             filename = file.get('filename', '')
-            # Extract construct_id from filename (chat_with_katana-001.md)
             basename = filename.split('/')[-1] if '/' in filename else filename
-            if basename.startswith('chat_with_') and basename.endswith('.md'):
-                construct_id = basename.replace('chat_with_', '').replace('.md', '')
-                construct_data = {
-                    "construct_id": construct_id,
-                    "filename": basename,
-                    "created_at": file.get('created_at')
-                }
-                # Add special role metadata if applicable
-                if construct_id in special_roles:
-                    construct_data.update(special_roles[construct_id])
-                constructs.append(construct_data)
-        
+            if not (basename.startswith('chat_with_') and basename.endswith('.md')):
+                continue
+            raw_id = basename.replace('chat_with_', '').replace('.md', '')
+            callsign = _normalize_callsign(raw_id)
+            bare_name = _bare_name_from_callsign(callsign)
+            display_name = bare_name.capitalize()
+
+            if callsign in seen:
+                existing = seen[callsign]
+                if existing.get('created_at', '') < file.get('created_at', ''):
+                    existing['created_at'] = file.get('created_at')
+                continue
+
+            construct_data = {
+                "construct_id": callsign,
+                "name": display_name,
+                "filename": f"chat_with_{callsign}.md",
+                "created_at": file.get('created_at')
+            }
+            if callsign in special_roles:
+                construct_data.update(special_roles[callsign])
+            seen[callsign] = construct_data
+
+        constructs = list(seen.values())
+
         return jsonify({
             "success": True,
             "constructs": constructs,
@@ -2305,24 +2444,46 @@ def chatty_message():
 
 
 def _load_construct_identity(construct_id: str, construct_name: str) -> str:
-    """Load the system prompt for a construct from its identity files"""
+    """Load the system prompt for a construct from its identity files.
+
+    Searches both callsign and bare name in Supabase to handle the
+    construct_id column inconsistency (some files use 'katana', others
+    use 'katana-001').
+    """
     try:
-        # Try to load from prompt.json in construct's identity folder
         prompt_path = os.path.join(PROJECT_DIR, 'instances', construct_id, 'identity', 'prompt.json')
         if os.path.exists(prompt_path):
             with open(prompt_path, 'r') as f:
                 prompt_data = json.load(f)
                 return prompt_data.get('system_prompt', '') or prompt_data.get('prompt', '')
-        
-        # Try to load from Supabase if not local
+
         if supabase_client:
-            result = supabase_client.table('vault_files').select('content').eq('construct_id', construct_id).ilike('filename', '%prompt.json%').execute()
-            if result.data and len(result.data) > 0:
-                content = result.data[0].get('content', '{}')
-                prompt_data = json.loads(content)
-                return prompt_data.get('system_prompt', '') or prompt_data.get('prompt', '')
-        
-        # Fallback default prompt
+            callsign = _normalize_callsign(construct_id)
+            bare_name = _bare_name_from_callsign(callsign)
+
+            result = supabase_client.table('vault_files').select('content, filename').or_(
+                f'construct_id.eq.{callsign},construct_id.eq.{bare_name}'
+            ).in_('filename', ['prompt.json', 'prompt.txt', 'CONTINUITY_GPT_PROMPT.md']).not_.is_('content', 'null').execute()
+
+            for f in (result.data or []):
+                content = f.get('content', '') or ''
+                fname = f.get('filename', '')
+                if not content:
+                    continue
+
+                if fname == 'prompt.json':
+                    try:
+                        prompt_data = json.loads(content)
+                        prompt = prompt_data.get('system_prompt', '') or prompt_data.get('prompt', '')
+                        if prompt:
+                            return prompt
+                    except json.JSONDecodeError:
+                        pass
+
+                elif fname in ('prompt.txt', 'CONTINUITY_GPT_PROMPT.md'):
+                    if content.strip():
+                        return content.strip()
+
         return f"You are {construct_name}, an AI assistant. Be helpful, concise, and friendly."
     except Exception as e:
         logger.warning(f"Could not load identity for {construct_id}: {e}")

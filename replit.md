@@ -51,8 +51,9 @@ A 5-layer security system for sovereign construct identity preservation with a s
 ### API Integrations
 - **Chatty Integration API**: VVAULT acts as the stateful backend for Chatty, providing endpoints for managing constructs, transcripts, and messages.
   - Auth: `VVAULT_SERVICE_TOKEN` (single shared secret, no separate CHATTY_API_KEY)
-  - `GET /api/chatty/constructs` — list user's constructs (from chat transcripts)
-  - `GET /api/chatty/construct/<id>/files` — list assets, documents, identity files for a construct (with counts)
+  - `GET /api/chatty/constructs` — list user's constructs (deduplicated, callsign-normalized)
+  - `GET /api/chatty/construct/<id>/files` — list assets, documents, identity files for a construct (with counts). Queries both callsign and bare name construct_id values.
+  - `GET /api/chatty/construct/<id>/identity` — get structured identity (name, description, instructions, system_prompt, personality, enforcement)
   - `GET /api/chatty/transcript/<id>` — get transcript content
   - `POST /api/chatty/transcript/<id>` — update transcript
   - `POST /api/chatty/transcript/<id>/message` — append message
