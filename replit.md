@@ -11,7 +11,13 @@ Preferred communication style: Simple, everyday language.
 ## System Architecture
 
 ### Core Design Principles
-- **Construct ID Format**: Millisecond timestamps ensure uniqueness, encode creation time, and are sortable.
+- **Construct Naming Convention**:
+  - **Name**: The construct's identity label (e.g., "Katana", "Zen", "Lin", "Aurora"). Used for display only.
+  - **Callsign**: The instance ID, formatted as `{name}-{sequence}` (e.g., `katana-001`, `zen-001`, `lin-001`). This is the canonical identifier used in all file paths, API calls, and database references.
+  - Multiple instances of the same construct use incrementing sequence numbers: `katana-001`, `katana-002`, etc.
+  - **Critical**: All file paths use the callsign, never the bare name. `instances/katana-001/` is correct; `instances/katana/` is wrong.
+  - **Metatag**: The construct_metatag in the directory template refers to the callsign (e.g., `katana-001`).
+- **Construct ID Format (System)**: Millisecond timestamps ensure uniqueness, encode creation time, and are sortable (used for system-level shard IDs like `aurora-1769054400000`).
 - **Living Capsules**: Both AI constructs and users are treated as versioned, evolving entities.
 - **Multi-Tenancy**: A two-root file architecture (`user` and `system`) separates user-facing and internal data.
 
