@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { authFetch } from '../utils/authFetch';
 import './VaultBrowser.css';
 
 const CONSTRUCT_COLORS = {
@@ -35,16 +36,9 @@ const VaultBrowser = ({ user }) => {
   const [constructs, setConstructs] = useState([]);
   const [userInfo, setUserInfo] = useState({ root_label: 'Vault', is_admin: false });
 
-  const getAuthHeaders = useCallback(() => {
-    const token = user?.token || localStorage.getItem('vvault_token');
-    return token ? { 'Authorization': `Bearer ${token}` } : {};
-  }, [user]);
-
   const fetchConstructs = useCallback(async () => {
     try {
-      const response = await fetch('/api/chatty/constructs', {
-        headers: getAuthHeaders()
-      });
+      const response = await authFetch('/api/chatty/constructs');
       const data = await response.json();
       if (data.success && data.constructs) {
         const formatted = data.constructs.map(c => ({
@@ -58,13 +52,11 @@ const VaultBrowser = ({ user }) => {
     } catch (err) {
       console.error('Failed to fetch constructs:', err);
     }
-  }, [getAuthHeaders]);
+  }, []);
 
   const fetchUserInfo = useCallback(async () => {
     try {
-      const response = await fetch('/api/vault/user-info', {
-        headers: getAuthHeaders()
-      });
+      const response = await authFetch('/api/vault/user-info');
       const data = await response.json();
       if (data.success) {
         setUserInfo({
@@ -76,15 +68,13 @@ const VaultBrowser = ({ user }) => {
     } catch (err) {
       console.error('Failed to fetch user info:', err);
     }
-  }, [getAuthHeaders]);
+  }, []);
 
   const fetchFiles = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('/api/vault/files', {
-        headers: getAuthHeaders()
-      });
+      const response = await authFetch('/api/vault/files');
       const data = await response.json();
       if (data.success) {
         setFiles(data.files || []);
@@ -99,7 +89,7 @@ const VaultBrowser = ({ user }) => {
     } finally {
       setLoading(false);
     }
-  }, [getAuthHeaders]);
+  }, []);
 
   useEffect(() => {
     fetchUserInfo();
@@ -182,9 +172,7 @@ const VaultBrowser = ({ user }) => {
         setFileContent(file.content);
       } else {
         try {
-          const response = await fetch(`/api/vault/files/${file.id}`, {
-            headers: getAuthHeaders()
-          });
+          const response = await authFetch(`/api/vault/files/${file.id}`);
           const data = await response.json();
           if (data.success && data.file && data.file.content) {
             setFileContent(data.file.content);

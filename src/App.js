@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
 import Dashboard from './components/Dashboard';
 import Capsules from './components/Capsules';
@@ -6,6 +6,7 @@ import VaultBrowser from './components/VaultBrowser';
 import Blockchain from './components/Blockchain';
 import Settings from './components/Settings';
 import CinematicLogin from './components/CinematicLogin';
+import { validateSession, SESSION_EXPIRED_EVENT } from './utils/authFetch';
 import './App.css';
 
 // Navigation component
@@ -21,11 +22,6 @@ const Navigation = ({ user, onLogout }) => {
   ];
   
   const handleLogout = () => {
-    // Clear user session
-    localStorage.removeItem('vvault_user');
-    localStorage.removeItem('vvault_token');
-    
-    // Call parent logout callback
     onLogout();
   };
   
@@ -137,11 +133,19 @@ function App() {
       window.history.replaceState({}, document.title, window.location.pathname);
       console.log('OAuth login successful:', userData.email);
     } else {
-      // Check for existing user session
       const savedUser = localStorage.getItem('vvault_user');
       if (savedUser) {
         try {
-          setUser(JSON.parse(savedUser));
+          const parsed = JSON.parse(savedUser);
+          setUser(parsed);
+          validateSession().then(valid => {
+            if (!valid) {
+              console.warn('Stored session is no longer valid — clearing');
+              localStorage.removeItem('vvault_user');
+              localStorage.removeItem('vvault_token');
+              setUser(null);
+            }
+          });
         } catch (error) {
           console.error('Failed to parse saved user:', error);
           localStorage.removeItem('vvault_user');
@@ -170,9 +174,20 @@ function App() {
     setUser(userData);
   };
   
-  const handleLogout = () => {
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem('vvault_user');
+    localStorage.removeItem('vvault_token');
     setUser(null);
-  };
+  }, []);
+
+  useEffect(() => {
+    const onSessionExpired = () => {
+      console.warn('Session expired — redirecting to login');
+      setUser(null);
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+  }, []);
   
   if (loading) {
     return (

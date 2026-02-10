@@ -1,15 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { authFetch } from '../utils/authFetch';
 
 const Capsules = ({ user }) => {
   const [capsules, setCapsules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedCapsule, setSelectedCapsule] = useState(null);
   const [error, setError] = useState(null);
-  
-  const getAuthHeaders = useCallback(() => {
-    const token = user?.token || localStorage.getItem('vvault_token');
-    return token ? { 'Authorization': `Bearer ${token}` } : {};
-  }, [user]);
   
   useEffect(() => {
     loadCapsules();
@@ -18,9 +14,7 @@ const Capsules = ({ user }) => {
   const loadCapsules = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/capsules', {
-        headers: getAuthHeaders()
-      });
+      const response = await authFetch('/api/capsules');
       const data = await response.json();
       
       if (data.success) {
@@ -50,9 +44,7 @@ const Capsules = ({ user }) => {
   
   const viewCapsule = async (capsuleName) => {
     try {
-      const response = await fetch(`/api/capsules/${capsuleName}`, {
-        headers: getAuthHeaders()
-      });
+      const response = await authFetch(`/api/capsules/${capsuleName}`);
       const data = await response.json();
       
       if (data.success) {

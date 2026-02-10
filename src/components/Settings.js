@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { authFetch } from '../utils/authFetch';
 import {
   buildDefaultProfile,
   getSchema,
@@ -22,20 +23,13 @@ const Settings = ({ systemInfo, user }) => {
   const [schemaExported, setSchemaExported] = useState(false);
   const [capsuleExported, setCapsuleExported] = useState(false);
   
-  const getAuthHeaders = useCallback(() => {
-    const token = user?.token || localStorage.getItem('vvault_token');
-    return token ? { 'Authorization': `Bearer ${token}` } : {};
-  }, [user]);
-  
   useEffect(() => {
     loadConfig();
   }, []);
   
   const loadConfig = async () => {
     try {
-      const response = await fetch('/api/config', {
-        headers: getAuthHeaders()
-      });
+      const response = await authFetch('/api/config');
       const data = await response.json();
       setConfig(data);
     } catch (error) {
