@@ -514,8 +514,8 @@ def require_chatty_auth(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        expected_key = os.environ.get("CHATTY_API_KEY")
-        provided_key = request.headers.get("X-Chatty-Key")
+        expected_key = os.environ.get("CHATTY_API_KEY") or os.environ.get("VVAULT_SERVICE_TOKEN")
+        provided_key = request.headers.get("X-Chatty-Key") or request.headers.get("X-Service-Token")
 
         if expected_key and provided_key == expected_key:
             chatty_email = request.headers.get("X-Chatty-User")
