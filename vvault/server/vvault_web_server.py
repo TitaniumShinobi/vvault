@@ -504,17 +504,17 @@ def require_chatty_auth(f):
     """Auth decorator for Chatty integration endpoints.
 
     Accepts three auth methods in priority order:
-    1. CHATTY_API_KEY via X-Chatty-Key header (service-to-service).
+    1. VVAULT_SERVICE_TOKEN via X-Chatty-Key or X-Service-Token header (service-to-service).
        User context comes from X-Chatty-User header (email).
     2. Standard Bearer session token (same as require_auth).
-    3. Dev mode: if CHATTY_API_KEY env var is not set, endpoints are
+    3. Dev mode: if VVAULT_SERVICE_TOKEN env var is not set, endpoints are
        open and X-Chatty-User provides user context (optional).
     """
     from functools import wraps
     @wraps(f)
     def decorated_function(*args, **kwargs):
         ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        expected_key = os.environ.get("CHATTY_API_KEY") or os.environ.get("VVAULT_SERVICE_TOKEN")
+        expected_key = os.environ.get("VVAULT_SERVICE_TOKEN")
         provided_key = request.headers.get("X-Chatty-Key") or request.headers.get("X-Service-Token")
 
         if expected_key and provided_key == expected_key:
