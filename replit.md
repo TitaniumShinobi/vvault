@@ -44,8 +44,25 @@ A 5-layer security system for sovereign construct identity preservation with a s
 
 ### API Integrations
 - **Chatty Integration API**: VVAULT acts as the stateful backend for Chatty, providing endpoints for managing constructs, transcripts, and messages.
+  - Auth: `VVAULT_SERVICE_TOKEN` (single shared secret, no separate CHATTY_API_KEY)
+  - `GET /api/chatty/constructs` — list user's constructs (from chat transcripts)
+  - `GET /api/chatty/construct/<id>/files` — list assets, documents, identity files for a construct (with counts)
+  - `GET /api/chatty/transcript/<id>` — get transcript content
+  - `POST /api/chatty/transcript/<id>` — update transcript
+  - `POST /api/chatty/transcript/<id>/message` — append message
+  - `POST /api/chatty/message` — send message to construct (LLM inference)
 - **Service API**: VVAULT serves as a config and credentials vault for external services.
 - **VXRunner Integration API**: VVAULT exposes capsule data as forensic DNA baselines for VXRunner's construct detection system.
+
+### Construct File Structure (per instance)
+- `identity/prompt.json` — name, description, instructions (system prompt)
+- `identity/avatar.png` — construct avatar
+- `assets/` — media files (png, jpg, jpeg, svg)
+- `documents/` — all other files (knowledge base, raw docs)
+- `chatty/chat_with_{id}.md` — chat transcripts
+- `config/metadata.json`, `config/personality.json` — capsule-updated config
+- `memup/{id}.capsule` — memory capsules
+- `logs/` — various operational logs
 
 ### VVAULT Frontend Session Management
 - **authFetch utility**: Handles authenticated API calls, automatically attaching Bearer tokens and intercepting 401 responses for session expiration.

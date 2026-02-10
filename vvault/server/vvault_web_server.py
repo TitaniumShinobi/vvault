@@ -1983,6 +1983,95 @@ def append_chatty_message(construct_id):
         logger.error(f"Error appending message to transcript: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/api/chatty/construct/<construct_id>/files')
+@require_chatty_auth
+def get_construct_files(construct_id):
+    """List assets and documents for a specific construct.
+
+    Returns file counts and listings for:
+      - assets/  (images: png, jpg, jpeg, svg)
+      - documents/  (all other files)
+      - identity/prompt.json  (name, description, instructions)
+
+    Query params:
+      - folder: optional filter ('assets', 'documents', 'identity')
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        current_user = request.current_user
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 404
+
+        folder_filter = request.args.get('folder')
+
+        all_files = supabase_client.table('vault_files').select(
+            'id, filename, file_type, metadata, created_at'
+        ).eq('user_id', user_id).execute()
+
+        assets = []
+        documents = []
+        identity = []
+
+        for f in (all_files.data or []):
+            fname = f.get('filename', '')
+            if construct_id not in fname:
+                continue
+
+            if f'/assets/' in fname or fname.endswith(('/assets', '/assets/')):
+                assets.append({
+                    "id": f.get('id'),
+                    "filename": fname.split('/')[-1],
+                    "path": fname,
+                    "file_type": f.get('file_type'),
+                    "created_at": f.get('created_at')
+                })
+            elif f'/documents/' in fname:
+                documents.append({
+                    "id": f.get('id'),
+                    "filename": fname.split('/')[-1],
+                    "path": fname,
+                    "file_type": f.get('file_type'),
+                    "created_at": f.get('created_at')
+                })
+            elif '/identity/' in fname:
+                identity.append({
+                    "id": f.get('id'),
+                    "filename": fname.split('/')[-1],
+                    "path": fname,
+                    "file_type": f.get('file_type'),
+                    "created_at": f.get('created_at')
+                })
+
+        response = {
+            "success": True,
+            "construct_id": construct_id,
+            "counts": {
+                "assets": len(assets),
+                "documents": len(documents),
+                "identity": len(identity)
+            }
+        }
+
+        if not folder_filter or folder_filter == 'assets':
+            response["assets"] = assets
+        if not folder_filter or folder_filter == 'documents':
+            response["documents"] = documents
+        if not folder_filter or folder_filter == 'identity':
+            response["identity"] = identity
+
+        return jsonify(response)
+
+    except Exception as e:
+        logger.error(f"Error fetching construct files for {construct_id}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/api/chatty/constructs')
 @require_chatty_auth
 def get_chatty_constructs():
