@@ -44,7 +44,10 @@ A 5-layer security system for sovereign construct identity preservation with a s
 - **Style Extractor**: Extracts provider-specific style patterns for LLM style modulation.
 
 ### API Integrations
-- **Chatty Integration API**: VVAULT acts as the stateful backend for Chatty, providing endpoints for managing constructs, transcripts, and messages.
+- **Chatty Integration API**: VVAULT acts as the stateful backend for Chatty, providing endpoints for managing constructs, transcripts, and messages. Uses `require_chatty_auth` decorator with three auth modes:
+  - **API Key mode**: `X-Chatty-Key` header matching `CHATTY_API_KEY` env var + `X-Chatty-User` header (email) for user context
+  - **Session mode**: Standard Bearer session token (same as VVAULT web UI login)
+  - **Dev mode**: When `CHATTY_API_KEY` env var is not set, endpoints are open; `X-Chatty-User` header is optional for user context
 - **Service API**: VVAULT serves as a config and credentials vault for external services.
 - **VXRunner Integration API**: VVAULT exposes capsule data as forensic DNA baselines for VXRunner's construct detection system.
 

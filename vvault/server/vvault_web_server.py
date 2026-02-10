@@ -500,6 +500,89 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def require_chatty_auth(f):
+    """Auth decorator for Chatty integration endpoints.
+
+    Accepts three auth methods in priority order:
+    1. CHATTY_API_KEY via X-Chatty-Key header (service-to-service).
+       User context comes from X-Chatty-User header (email).
+    2. Standard Bearer session token (same as require_auth).
+    3. Dev mode: if CHATTY_API_KEY env var is not set, endpoints are
+       open and X-Chatty-User provides user context (optional).
+    """
+    from functools import wraps
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        expected_key = os.environ.get("CHATTY_API_KEY")
+        provided_key = request.headers.get("X-Chatty-Key")
+
+        if expected_key and provided_key == expected_key:
+            chatty_email = request.headers.get("X-Chatty-User")
+            if not chatty_email:
+                return jsonify({"success": False, "error": "X-Chatty-User header required with API key auth"}), 400
+            log_auth_decision(
+                action="access_granted",
+                user_id=chatty_email,
+                resource=request.path,
+                result="allowed",
+                reason="chatty_api_key",
+                ip=ip
+            )
+            request.current_user = {"email": chatty_email}
+            request.current_token = None
+            return f(*args, **kwargs)
+
+        if expected_key and provided_key and provided_key != expected_key:
+            log_auth_decision(
+                action="access_attempt",
+                user_id="chatty_service",
+                resource=request.path,
+                result="denied",
+                reason="invalid_chatty_api_key",
+                ip=ip
+            )
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+        session, token = get_current_user()
+        if session:
+            log_auth_decision(
+                action="access_granted",
+                user_id=session.get('email', 'unknown'),
+                resource=request.path,
+                result="allowed",
+                reason="valid_session",
+                ip=ip
+            )
+            request.current_user = session
+            request.current_token = token
+            return f(*args, **kwargs)
+
+        if not expected_key:
+            chatty_email = request.headers.get("X-Chatty-User")
+            log_auth_decision(
+                action="access_granted",
+                user_id=chatty_email or "dev_open",
+                resource=request.path,
+                result="allowed",
+                reason="chatty_dev_mode_open",
+                ip=ip
+            )
+            request.current_user = {"email": chatty_email} if chatty_email else {"email": "dev@localhost"}
+            request.current_token = None
+            return f(*args, **kwargs)
+
+        log_auth_decision(
+            action="access_attempt",
+            user_id="anonymous",
+            resource=request.path,
+            result="denied",
+            reason="no_valid_auth",
+            ip=ip
+        )
+        return jsonify({"success": False, "error": "Authentication required"}), 401
+    return decorated_function
+
 def require_role(*roles):
     """Zero Trust: Decorator to require specific role(s) for access"""
     from functools import wraps
@@ -1703,7 +1786,7 @@ def upsert_system_file():
 # ============================================================================
 
 @app.route('/api/chatty/transcript/<construct_id>')
-@require_auth
+@require_chatty_auth
 def get_chatty_transcript(construct_id):
     """Get chat transcript for a construct - used by Chatty integration
     
@@ -1738,7 +1821,7 @@ def get_chatty_transcript(construct_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/chatty/transcript/<construct_id>', methods=['POST'])
-@require_auth
+@require_chatty_auth
 def update_chatty_transcript(construct_id):
     """Update or create chat transcript for a construct - used by Chatty integration
     
@@ -1799,7 +1882,7 @@ def update_chatty_transcript(construct_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/chatty/transcript/<construct_id>/message', methods=['POST'])
-@require_auth
+@require_chatty_auth
 def append_chatty_message(construct_id):
     """Append a single message to a construct's transcript
     
@@ -1901,7 +1984,7 @@ def append_chatty_message(construct_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/chatty/constructs')
-@require_auth
+@require_chatty_auth
 def get_chatty_constructs():
     """Get all available constructs with chat transcripts (user-scoped)"""
     try:
@@ -1953,7 +2036,7 @@ def get_chatty_constructs():
 
 
 @app.route('/api/chatty/message', methods=['POST'])
-@require_auth
+@require_chatty_auth
 def chatty_message():
     """Handle a message to a construct and return LLM response
     
