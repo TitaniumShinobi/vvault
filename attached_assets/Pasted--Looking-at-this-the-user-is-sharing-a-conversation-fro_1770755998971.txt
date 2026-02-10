@@ -1,0 +1,46 @@
+
+Looking at this, the user is sharing a conversation from the VVAULT side (their other project at vvault.thewreck.org) about authentication issues. The key takeaway for Chatty is:
+
+Chatty should use API key auth (X-Chatty-Key header) instead of session tokens when talking to VVAULT, so the connection never expires
+The VVAULT team is implementing a require_chatty_auth decorator on their side
+Let me check what Chatty currently uses to authenticate with VVAULT:
+
+I see what's happening. The VVAULT team is setting up a permanent API key auth system (X-Chatty-Key + X-Chatty-User headers) so Chatty never has to deal with expiring session tokens. Let me implement this on Chatty's side.
+
+Now let me build the centralized auth headers helper and update all VVAULT API call sites:
+
+Now let me check the vvault proxy route at lines 3739 and 4096:
+
+Now I'll implement the Chatty auth headers across all VVAULT API call sites. Let me create a centralized helper and update all locations:
+
+Now let me update all the API call sites in the vvaultApiClient to use the auth headers:
+
+Now let me update all the fetch calls in vvaultApiClient.js to use getChattyAuthHeaders():
+
+Now let me also export getChattyAuthHeaders and update the other files that make VVAULT API calls. Let me check the exports section:
+
+Now let me update the postMessage and appendMessage functions too, and update identityLoader.js and server/routes/vvault.js:
+
+Now update identityLoader.js and the VVAULT proxy routes:
+
+Now update the VVAULT proxy routes in server/routes/vvault.js:
+
+Now let me also check if there are callers of these functions that need to pass the userEmail parameter:
+
+The callers in supabaseStore.js don't pass userEmail, but that's fine — the parameter is optional and getChattyAuthHeaders(undefined) will still include the X-Chatty-Key header if set. The auth works in three modes per the VVAULT spec: API key only, API key + user email, or dev mode (no key).
+
+Let me restart and verify:
+
+Everything still works. Now I need to request the CHATTY_API_KEY secret from the user. Let me first run the architect review:
+
+Good catch. Let me fix the identityLoader to include X-Chatty-User and check for any other VVAULT call sites:
+
+The vault.js route uses Bearer token auth (a different mechanism) — that's not the Chatty endpoint pattern. Let me fix the identityLoader to also include X-Chatty-User when available. The identity endpoint is called during construct loading, not per-user, so user context isn't always available — but let me at least support it:
+
+Now let me restart the workflow, verify, and mark tasks complete:
+
+Everything works. Now let me mark the tasks complete and request the API key:
+
+The auth headers are now consistently applied across all VVAULT API call sites. To enable the authentication in production, I need your CHATTY_API_KEY.
+
+To connect Chatty to VVAULT with persistent API key authentication (so you don't need session-based login), please provide your CHATTY_API_KEY. This is the API key that VVAULT issued for the Chatty app to authenticate its requests.
