@@ -80,9 +80,9 @@ channel = "stable-25_05"
 packages = ["cairo", "cargo", "ffmpeg-full", "freetype", "ghostscript", "gobject-introspection", "gtk3", "kubo", "libiconv", "libxcrypt", "libyaml", "ollama", "openssl", "pkg-config", "qhull", "rustc", "tcl", "tk", "dejavu_fonts"]
 
 [deployment]
-deploymentTarget = "vm"
-run = ["bash", "-c", "gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 120 vvault.server.vvault_web_server:app"]
-build = ["bash", "-c", "pip install -r requirements.txt && npm install && npx webpack --mode production"]
+deploymentTarget = "autoscale"
+run = ["bash", "-c", "OLLAMA_HOST=0.0.0.0:11434 ollama serve & python vvault/server/vvault_web_server.py"]
+build = ["bash", "-c", "npm run build"]
 
 [userenv]
 
