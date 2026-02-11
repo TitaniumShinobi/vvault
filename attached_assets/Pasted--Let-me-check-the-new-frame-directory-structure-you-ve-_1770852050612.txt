@@ -1,0 +1,28 @@
+
+Let me check the new frame/ directory structure you've set up.
+
+Now let me check the new files that weren't in the original uploads — multi_construct_bank.py, memory_check.py, memory_long_import.py, memory_short_import.py:
+
+Now let me also check if the old bodilyfunctions/ and neuralfunctions/ at root level still exist (duplicates) and if the old memup/ at root also still exists:
+
+Good — the old root-level bodilyfunctions/ and neuralfunctions/ are cleaned up. The structure is now properly under frame/. Let me also check the memup/ references in the codebase to see if anything still points to the old paths:
+
+Got it — the frame/ directory is properly structured now. Here's what I see:
+
+frame/
+├── bodilyfunctions/xx/       # Biological simulation layer (CNS, PNS, organs)
+├── neuralfunctions/          # Cognitive/emotional layer (emotions, dreams, sleep, personality islands)
+└── Terminal/
+    └── memup/                # Memory infrastructure (bank, ChromaDB, STM/LTM, multi-construct, importers)
+This matches the original Frame project structure. The key additions beyond what was already in the workspace:
+
+multi_construct_bank.py — This is significant. It extends the memory bank to support multiple VVAULT profiles with per-construct ChromaDB collections (e.g., long_term_memory_zen-001, short_term_memory_katana-001), profile signature validation, and sovereign identity enforcement. Each construct gets isolated memory.
+
+memory_short_import.py — Imports ChatGPT export data into short-term memory collections with content-based deduplication.
+
+memory_check.py — Diagnostic tool to inspect memory collections and count recent vs old memories.
+
+The cns.py in bodilyfunctions/xx/ is still the critical routing piece — it connects to UnifiedMemoryBank, retrieves memories, runs OpenAI synthesis for insights, and stores reflections. It references Terminal.memup.bank which now correctly exists at frame/Terminal/memup/bank.py.
+
+The structure is preserved as you wanted. What would you like me to work on next — should I start wiring these systems into the actual LLM message pipeline so constructs can access their capsule data, memories, and personality during conversations?
+
