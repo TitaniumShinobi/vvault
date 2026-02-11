@@ -92,7 +92,8 @@ A 5-layer security system for sovereign construct identity preservation with a s
 - **CRITICAL**: External agents (Chatty, etc.) must NEVER write files using full internal paths as filenames. Files use flat filenames with the `construct_id` column set to the callsign.
 
 ### Construct File Structure (per instance)
-- `identity/prompt.txt` — name, description, instructions (system prompt), conversation starters
+- `identity/prompt.json` — structured JSON: name, callsign, description, instructions, system_prompt, conversation_starters
+- `identity/prompt.txt` — legacy flat text format (still supported for reads)
 - `identity/avatar.png` — construct avatar
 - `identity/personality.json` — behavioral profile
 - `identity/conditioning.txt` — conditioning directives
@@ -100,7 +101,7 @@ A 5-layer security system for sovereign construct identity preservation with a s
 - `documents/` — all other files (knowledge base, raw docs)
 - `chatty/chat_with_{callsign}.md` — Chatty chat transcripts
 - `chatgpt/` — ChatGPT conversation transcripts
-- `config/metadata.json` — capsule-updated config
+- `config/metadata.json` — capsule-updated config (models, orchestration_mode, status tracking)
 - `memup/{callsign}.capsule` — memory capsules
 - `logs/` — various operational logs
 

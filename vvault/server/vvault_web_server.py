@@ -2114,6 +2114,8 @@ def get_construct_identity(construct_id):
         instructions = ""
         system_prompt = ""
         personality = None
+        conversation_starters = []
+        conditioning = ""
 
         for f in (result.data or []):
             fname = f.get('filename', '')
@@ -2140,7 +2142,8 @@ def get_construct_identity(construct_id):
                     name = data.get('name', name)
                     description = data.get('description', description)
                     instructions = data.get('instructions', instructions)
-                    system_prompt = data.get('system_prompt', '') or data.get('prompt', '') or system_prompt
+                    system_prompt = data.get('system_prompt', '') or data.get('prompt', '') or instructions or system_prompt
+                    conversation_starters = data.get('conversation_starters', [])
                 except json.JSONDecodeError:
                     pass
 
@@ -2149,6 +2152,9 @@ def get_construct_identity(construct_id):
                     personality = json.loads(content)
                 except json.JSONDecodeError:
                     pass
+
+            elif fname == 'conditioning.txt':
+                conditioning = content.strip()
 
             elif fname == 'CONTINUITY_GPT_PROMPT.md':
                 if not system_prompt:
@@ -2171,6 +2177,8 @@ def get_construct_identity(construct_id):
             "description": description or f"Helps you with your life problems.",
             "instructions": instructions,
             "system_prompt": system_prompt,
+            "conversation_starters": conversation_starters,
+            "conditioning": conditioning,
             "personality": personality,
             "enforcement": enforcement
         })
@@ -2229,6 +2237,10 @@ def create_construct():
         conditioning    (optional, text)
         color_hex       (optional, glyph color, default #722F37)
         center_image    (optional, file upload for glyph center)
+        models          (optional, JSON array of model configs)
+        orchestration_mode (optional, e.g. 'standard', 'autonomous')
+        system_prompt   (optional, raw system prompt override)
+        avatar_base64   (optional, base64-encoded avatar image)
 
     Scaffolds the full directory template per VSI spec.
     """
@@ -2255,6 +2267,19 @@ def create_construct():
             color_hex = request.form.get('color_hex', '#722F37')
             center_file = request.files.get('center_image')
             center_image_bytes = center_file.read() if center_file else None
+            models_raw = request.form.get('models', '[]')
+            try:
+                models = json.loads(models_raw) if models_raw else []
+            except:
+                models = []
+            orchestration_mode = request.form.get('orchestration_mode', 'standard')
+            system_prompt_override = request.form.get('system_prompt', '')
+            avatar_b64 = request.form.get('avatar_base64', '')
+            prompt_json_raw = request.form.get('prompt_json', '')
+            try:
+                prompt_json_override = json.loads(prompt_json_raw) if prompt_json_raw else None
+            except:
+                prompt_json_override = None
         else:
             data = request.get_json(silent=True)
             if not data or not isinstance(data, dict):
@@ -2272,6 +2297,11 @@ def create_construct():
             if center_image_b64:
                 import base64 as b64mod
                 center_image_bytes = b64mod.b64decode(center_image_b64)
+            models = data.get('models', [])
+            orchestration_mode = data.get('orchestration_mode', 'standard')
+            system_prompt_override = data.get('system_prompt', '')
+            avatar_b64 = data.get('avatar_base64', '')
+            prompt_json_override = data.get('prompt_json', None)
 
         if not callsign or not name:
             return jsonify({"success": False, "error": "callsign and name are required"}), 400
@@ -2293,14 +2323,26 @@ def create_construct():
 
         now = datetime.now().isoformat()
 
-        prompt_obj = {
-            "name": name,
-            "callsign": callsign,
-            "description": description,
-            "instructions": instructions,
-            "conversation_starters": conversation_starters,
-            "created_at": now
-        }
+        if not isinstance(models, list):
+            models = []
+        if orchestration_mode not in ('standard', 'autonomous', 'hybrid', 'custom'):
+            orchestration_mode = 'standard'
+
+        if prompt_json_override and isinstance(prompt_json_override, dict):
+            prompt_obj = prompt_json_override
+            prompt_obj.setdefault('name', name)
+            prompt_obj.setdefault('callsign', callsign)
+            prompt_obj.setdefault('created_at', now)
+        else:
+            prompt_obj = {
+                "name": name,
+                "callsign": callsign,
+                "description": description,
+                "instructions": instructions,
+                "conversation_starters": conversation_starters,
+                "system_prompt": system_prompt_override or instructions,
+                "created_at": now
+            }
 
         if not personality:
             personality = {
@@ -2325,7 +2367,10 @@ def create_construct():
             "created_at": now,
             "version": "1.0.0",
             "capsule_updated": False,
-            "color_hex": color_hex
+            "color_hex": color_hex,
+            "models": models if models else [{"id": "qwen2.5:0.5b", "provider": "ollama", "isDefault": True}],
+            "orchestration_mode": orchestration_mode or "standard",
+            "status": "active"
         }
 
         transcript_content = f"# Chat with {name}\n\nTranscript started {now}\n"
@@ -2379,6 +2424,47 @@ def create_construct():
                 'content': f"# {log_name.replace('.log', '').replace('_', ' ').title()} Log\n# Construct: {callsign}\n# Created: {now}\n",
                 'folder': 'logs',
             })
+
+        avatar_created = False
+        if avatar_b64:
+            import base64 as b64mod_av
+            try:
+                avatar_bytes = b64mod_av.b64decode(avatar_b64)
+                if len(avatar_bytes) > 5 * 1024 * 1024:
+                    logger.warning(f"Avatar too large for {callsign}, skipping")
+                else:
+                    avatar_sha = hashlib.sha256(avatar_bytes).hexdigest()
+                    avatar_meta = {
+                        'construct_id': callsign,
+                        'provider': 'vvault_scaffold',
+                        'folder': 'identity',
+                    }
+                    existing_avatar = supabase_client.table('vault_files').select('id').eq('construct_id', callsign).eq('filename', 'avatar.png').execute()
+                    if existing_avatar.data:
+                        supabase_client.table('vault_files').update({
+                            'content': avatar_b64,
+                            'sha256': avatar_sha,
+                            'metadata': json.dumps(avatar_meta),
+                            'updated_at': now,
+                        }).eq('id', existing_avatar.data[0]['id']).execute()
+                        avatar_created = True
+                    else:
+                        avatar_record = {
+                            'filename': 'avatar.png',
+                            'file_type': 'binary',
+                            'content': avatar_b64,
+                            'construct_id': callsign,
+                            'user_id': user_id,
+                            'is_system': False,
+                            'sha256': avatar_sha,
+                            'metadata': json.dumps(avatar_meta),
+                            'created_at': now,
+                        }
+                        av_result = supabase_client.table('vault_files').insert(avatar_record).execute()
+                        if av_result.data:
+                            avatar_created = True
+            except Exception as av_err:
+                logger.warning(f"Avatar insert failed for {callsign}: {av_err}")
 
         import sys
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -2468,8 +2554,9 @@ def create_construct():
                 "color_hex": color_hex,
                 "number_rows": glyph_number_rows,
             },
+            "avatar_created": avatar_created,
             "directory_template": {
-                "identity": ["prompt.json", "conditioning.txt", glyph_filename],
+                "identity": ["prompt.json", "conditioning.txt", glyph_filename] + (["avatar.png"] if avatar_created else []),
                 "config": ["metadata.json", "personality.json"],
                 "chatty": [f"chat_with_{callsign}.md"],
                 "logs": log_files,
@@ -2764,7 +2851,7 @@ def _load_construct_identity(construct_id: str, construct_name: str) -> str:
                 if fname == 'prompt.json':
                     try:
                         prompt_data = json.loads(content)
-                        prompt = prompt_data.get('system_prompt', '') or prompt_data.get('prompt', '')
+                        prompt = prompt_data.get('system_prompt', '') or prompt_data.get('instructions', '') or prompt_data.get('prompt', '')
                         if prompt:
                             return prompt
                     except json.JSONDecodeError:
