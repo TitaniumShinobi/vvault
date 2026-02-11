@@ -102,7 +102,7 @@ A 5-layer security system for sovereign construct identity preservation with a s
 - `chatty/chat_with_{callsign}.md` — Chatty chat transcripts
 - `chatgpt/` — ChatGPT conversation transcripts
 - `config/metadata.json` — capsule-updated config (models, orchestration_mode, status tracking)
-- `memup/{callsign}.capsule` — memory capsules
+- `memup/{callsign}.capsule` — memory capsules (in memup/ because capsules directly control construct memory, not identity)
 - `logs/` — various operational logs
 
 ### VVAULT Frontend Session Management
