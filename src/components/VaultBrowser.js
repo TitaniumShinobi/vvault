@@ -16,13 +16,34 @@ const getConstructColor = (constructId) => {
 };
 
 const getLogicalPath = (file) => {
-  let path = file.display_path || file.storage_path || file.filename || '';
+  let path = file.display_path || file.storage_path || '';
   
   path = path.replace(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\//, '');
-  
   path = path.replace(/^[a-z_]+_\d+\//, '');
   
-  return path || file.filename || 'unknown';
+  const filename = file.filename || 'unknown';
+  
+  if (!path || path === filename) {
+    let meta = file.metadata || {};
+    if (typeof meta === 'string') {
+      try { meta = JSON.parse(meta); } catch(e) { meta = {}; }
+    }
+    const folder = meta.folder || '';
+    const constructId = file.construct_id || meta.construct_id || '';
+    const metaType = meta.type || '';
+    
+    if (constructId && folder) {
+      path = `instances/${constructId}/${folder}/${filename}`;
+    } else if (constructId) {
+      path = `instances/${constructId}/${filename}`;
+    } else if (metaType === 'user_glyph') {
+      path = `account/${filename}`;
+    } else {
+      path = filename;
+    }
+  }
+  
+  return path || filename;
 };
 
 const VaultBrowser = ({ user }) => {
