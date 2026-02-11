@@ -36,7 +36,6 @@ const Navigation = ({ user, onLogout }) => {
           className="nav-logo"
           style={{ width: '32px', height: '32px' }}
         />
-        <span className="nav-title">VVAULT</span>
         <span className="nav-subtitle">AI Construct Memory Vault</span>
       </div>
       
