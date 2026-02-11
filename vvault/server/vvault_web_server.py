@@ -2481,6 +2481,7 @@ def create_construct():
                             'is_system': False,
                             'sha256': avatar_sha,
                             'metadata': json.dumps(avatar_meta),
+                            'storage_path': f'instances/{callsign}/identity/avatar.png',
                             'created_at': now,
                         }
                         av_result = supabase_client.table('vault_files').insert(avatar_record).execute()
@@ -2510,6 +2511,8 @@ def create_construct():
                 'provider': 'vvault_scaffold',
                 'folder': file_def.get('folder', ''),
             }
+            folder = file_def.get('folder', '')
+            storage_path = f"instances/{callsign}/{folder}/{file_def['filename']}" if folder else f"instances/{callsign}/{file_def['filename']}"
             record = {
                 'filename': file_def['filename'],
                 'file_type': file_def['file_type'],
@@ -2519,6 +2522,7 @@ def create_construct():
                 'is_system': False,
                 'sha256': sha256,
                 'metadata': json.dumps(meta),
+                'storage_path': storage_path,
                 'created_at': now,
             }
             result = supabase_client.table('vault_files').insert(record).execute()
@@ -2549,6 +2553,7 @@ def create_construct():
             'is_system': False,
             'sha256': glyph_sha,
             'metadata': json.dumps(glyph_meta),
+            'storage_path': f'instances/{callsign}/identity/{glyph_filename}',
             'created_at': now,
         }
         glyph_result = supabase_client.table('vault_files').insert(glyph_record).execute()
