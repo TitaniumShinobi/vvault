@@ -56,10 +56,17 @@ Preferred communication style: Simple, everyday language.
 A 5-layer security system for sovereign construct identity preservation with a specific boot order (5→3→4→2→1).
 - **Layers**: Higher Plane (legal/ontological insulation), Dimensional Distortion (runtime drift), Energy Masking (operational camouflage), Time Relaying (temporal obfuscation), and Zero Energy (root survival).
 
+### User Glyph System
+- **Registration Integration**: Users create their personal Codex Glyph during account creation (Step 2 of signup).
+- **Multi-Step Signup**: Step 1 = account details (name, email, password), Step 2 = glyph customization + terms + Turnstile.
+- **Preview Endpoint**: `POST /api/auth/glyph-preview` — generates a glyph preview (base64) without storing, accepts multipart (color_hex, name, center_image).
+- **Storage**: User glyph stored in `vault_files` with `type: user_glyph` metadata, `construct_id: null`, keyed to `user_id`.
+- **Customization**: Color picker with preset swatches, hex input, optional center image upload, live preview.
+
 ### User Interface
 - **Desktop Application**: Tkinter-based GUI with a pure black terminal aesthetic.
 - **Web Frontend**: React application with a Flask backend.
-- **Login System**: Email/password authentication with Cloudflare Turnstile.
+- **Login System**: Multi-step email/password registration with Codex Glyph creation, Cloudflare Turnstile verification.
 
 ### Cross-Platform Continuity
 - **Continuity Bridge**: Links ChatGPT custom GPTs to local VVAULT constructs.

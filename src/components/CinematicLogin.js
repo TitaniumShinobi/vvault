@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './CinematicLogin.css';
 
 const CinematicLogin = ({ onLogin }) => {
   const [isSignInMode, setIsSignInMode] = useState(true);
+  const [signupStep, setSignupStep] = useState(1);
   const [isTrustedDevice, setIsTrustedDevice] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
@@ -16,49 +17,46 @@ const CinematicLogin = ({ onLogin }) => {
   const [error, setError] = useState('');
   const [cloudflareVerified, setCloudflareVerified] = useState(false);
 
-  // Turnstile state
   const [turnstileToken, setTurnstileToken] = useState('');
   const [turnstileWidgetId, setTurnstileWidgetId] = useState('');
   const [turnstileError, setTurnstileError] = useState('');
-  const turnstileSiteKey = '0x4AAAAAAB9IaDdnFsA9yISn'; // Using same key as Chatty
+  const turnstileSiteKey = '0x4AAAAAAB9IaDdnFsA9yISn';
 
-  // Initialize Cloudflare Turnstile
+  const [glyphColorHex, setGlyphColorHex] = useState('#722F37');
+  const [glyphCenterImage, setGlyphCenterImage] = useState(null);
+  const [glyphPreviewB64, setGlyphPreviewB64] = useState(null);
+  const [glyphLoading, setGlyphLoading] = useState(false);
+  const glyphFileRef = useRef(null);
+  const previewDebounceRef = useRef(null);
+
   useEffect(() => {
     const loadTurnstile = () => {
-      if (window.turnstile) {
-        // Turnstile is already loaded
-        return;
-      }
-
+      if (window.turnstile) return;
       if (!turnstileSiteKey) {
-        console.error('Turnstile site key is not configured.')
-        setTurnstileError('Human verification is temporarily unavailable. Please contact support.')
+        setTurnstileError('Human verification is temporarily unavailable. Please contact support.');
         return;
       }
-      
       const script = document.createElement('script');
       script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
       script.async = true;
       script.defer = true;
       document.head.appendChild(script);
     };
-
     loadTurnstile();
   }, [turnstileSiteKey]);
 
-  // Initialize Turnstile widget when in signup mode
   useEffect(() => {
-    if (!isSignInMode && window.turnstile && !turnstileWidgetId) {
-      if (!turnstileSiteKey) {
-        return;
-      }
+    if (!isSignInMode && signupStep === 2 && window.turnstile && !turnstileWidgetId) {
+      if (!turnstileSiteKey) return;
+      const el = document.getElementById('turnstile-widget');
+      if (!el) return;
       const widgetId = window.turnstile.render('#turnstile-widget', {
         sitekey: turnstileSiteKey,
         callback: (token) => {
           setTurnstileToken(token);
           setTurnstileError('');
         },
-        'error-callback': (error) => {
+        'error-callback': () => {
           setTurnstileError('Human verification failed. Please try again.');
           setTurnstileToken('');
         },
@@ -71,35 +69,64 @@ const CinematicLogin = ({ onLogin }) => {
       });
       setTurnstileWidgetId(widgetId);
     }
-  }, [isSignInMode, turnstileWidgetId, turnstileSiteKey]);
+  }, [isSignInMode, signupStep, turnstileWidgetId, turnstileSiteKey]);
 
-  // Cleanup Turnstile widget when switching modes
   useEffect(() => {
-    if (isSignInMode && turnstileWidgetId && window.turnstile) {
+    if ((isSignInMode || signupStep !== 2) && turnstileWidgetId && window.turnstile) {
       window.turnstile.remove(turnstileWidgetId);
       setTurnstileWidgetId('');
       setTurnstileToken('');
       setTurnstileError('');
     }
-  }, [isSignInMode, turnstileWidgetId]);
-  useEffect(() => {
-    // In a real app, this would check IP, device fingerprint, localStorage, etc.
-    const simulateTrustedDevice = () => {
-      const savedDevice = localStorage.getItem('vvault_trusted_device');
-      if (savedDevice) {
-        setIsTrustedDevice(true);
-      } else {
-        // Randomly assign for demo purposes
-        const isTrusted = Math.random() > 0.5;
-        setIsTrustedDevice(isTrusted);
-        if (isTrusted) {
-          localStorage.setItem('vvault_trusted_device', 'true');
-        }
-      }
-    };
+  }, [isSignInMode, signupStep, turnstileWidgetId]);
 
-    simulateTrustedDevice();
+  useEffect(() => {
+    const savedDevice = localStorage.getItem('vvault_trusted_device');
+    if (savedDevice) {
+      setIsTrustedDevice(true);
+    } else {
+      const isTrusted = Math.random() > 0.5;
+      setIsTrustedDevice(isTrusted);
+      if (isTrusted) localStorage.setItem('vvault_trusted_device', 'true');
+    }
   }, []);
+
+  useEffect(() => {
+    if (!isSignInMode && signupStep === 2 && formData.name) {
+      if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
+      previewDebounceRef.current = setTimeout(() => {
+        fetchGlyphPreview();
+      }, 600);
+    }
+    return () => {
+      if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
+    };
+  }, [glyphColorHex, glyphCenterImage, signupStep, isSignInMode]);
+
+  useEffect(() => {
+    if (!isSignInMode && signupStep === 2 && formData.name && !glyphPreviewB64) {
+      fetchGlyphPreview();
+    }
+  }, [signupStep]);
+
+  const fetchGlyphPreview = async () => {
+    setGlyphLoading(true);
+    try {
+      const fd = new FormData();
+      fd.append('name', formData.name || 'preview');
+      fd.append('color_hex', glyphColorHex);
+      if (glyphCenterImage) fd.append('center_image', glyphCenterImage);
+      const resp = await fetch('/api/auth/glyph-preview', { method: 'POST', body: fd });
+      const result = await resp.json();
+      if (result.success && result.glyph_base64) {
+        setGlyphPreviewB64(result.glyph_base64);
+      }
+    } catch (err) {
+      console.error('Glyph preview failed:', err);
+    } finally {
+      setGlyphLoading(false);
+    }
+  };
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -107,11 +134,35 @@ const CinematicLogin = ({ onLogin }) => {
       ...prev,
       [name]: type === 'checkbox' ? checked : value
     }));
-    setError(''); // Clear error on input change
+    setError('');
   };
 
   const handleCloudflareVerification = () => {
     setCloudflareVerified(true);
+  };
+
+  const validateStep1 = () => {
+    if (!formData.name) {
+      setError('Name is required.');
+      return false;
+    }
+    if (!formData.email) {
+      setError('Email is required.');
+      return false;
+    }
+    if (!formData.password) {
+      setError('Password is required.');
+      return false;
+    }
+    if (formData.password.length < 8) {
+      setError('Password must be at least 8 characters.');
+      return false;
+    }
+    if (formData.password !== formData.confirmPassword) {
+      setError('Passwords do not match.');
+      return false;
+    }
+    return true;
   };
 
   const validateForm = () => {
@@ -119,7 +170,6 @@ const CinematicLogin = ({ onLogin }) => {
       setError('Email and password are required.');
       return false;
     }
-
     if (!isSignInMode) {
       if (!formData.name) {
         setError('Name is required.');
@@ -133,23 +183,27 @@ const CinematicLogin = ({ onLogin }) => {
         setError('You must agree to the Terms of Service and Privacy Notice.');
         return false;
       }
-      if (!cloudflareVerified) {
-        setError('Please complete the human verification.');
-        return false;
-      }
     }
-
     return true;
+  };
+
+  const handleNextStep = () => {
+    if (validateStep1()) {
+      setError('');
+      setSignupStep(2);
+    }
+  };
+
+  const handleBackStep = () => {
+    setError('');
+    setSignupStep(1);
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
-    if (!validateForm()) {
-      return;
-    }
 
-    // Validate Turnstile for signup
+    if (!validateForm()) return;
+
     if (!isSignInMode && !turnstileToken) {
       setError('Please complete human verification.');
       return;
@@ -159,39 +213,40 @@ const CinematicLogin = ({ onLogin }) => {
     setError('');
 
     try {
-      // Prepare request data
-      const requestData = {
-        email: formData.email,
-        password: formData.password,
-        ...(isSignInMode ? {} : {
-          name: formData.name,
-          confirmPassword: formData.confirmPassword,
-          turnstileToken: turnstileToken
-        })
-      };
+      if (isSignInMode) {
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: formData.email,
+            password: formData.password,
+          })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Login failed');
+        localStorage.setItem('vvault_user', JSON.stringify(result.user));
+        localStorage.setItem('vvault_token', result.token);
+        onLogin(result.user);
+      } else {
+        const fd = new FormData();
+        fd.append('name', formData.name);
+        fd.append('email', formData.email);
+        fd.append('password', formData.password);
+        fd.append('confirmPassword', formData.confirmPassword);
+        fd.append('turnstileToken', turnstileToken);
+        fd.append('glyphColorHex', glyphColorHex);
+        if (glyphCenterImage) fd.append('glyphCenterImage', glyphCenterImage);
 
-      // Make API call to backend
-      const endpoint = isSignInMode ? '/api/auth/login' : '/api/auth/register';
-      const response = await fetch(`http://localhost:8000${endpoint}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestData)
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error || 'Authentication failed');
+        const response = await fetch('/api/auth/register', {
+          method: 'POST',
+          body: fd
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Registration failed');
+        localStorage.setItem('vvault_user', JSON.stringify(result.user));
+        localStorage.setItem('vvault_token', result.token);
+        onLogin(result.user);
       }
-
-      // Store user session
-      localStorage.setItem('vvault_user', JSON.stringify(result.user));
-      localStorage.setItem('vvault_token', result.token);
-      
-      // Call parent callback
-      onLogin(result.user);
     } catch (err) {
       setError(err.message || 'Authentication failed. Please try again.');
     } finally {
@@ -207,11 +262,246 @@ const CinematicLogin = ({ onLogin }) => {
     }
   };
 
+  const switchToSignup = () => {
+    setIsSignInMode(false);
+    setSignupStep(1);
+    setError('');
+    setGlyphPreviewB64(null);
+    setGlyphColorHex('#722F37');
+    setGlyphCenterImage(null);
+  };
+
+  const switchToSignin = () => {
+    setIsSignInMode(true);
+    setSignupStep(1);
+    setError('');
+  };
+
   const backgroundImage = isSignInMode ? 'vvault_sunrise.png' : 'vvault_sunset.png';
-  const backgroundTheme = isSignInMode ? 'Familiarity. Belonging. Trusted Return.' : 'Ceremony. Recognition of Arrival.';
+
+  const renderSignupStep1 = () => (
+    <>
+      <div className="form-group">
+        <label htmlFor="name" className="form-label">Name</label>
+        <input
+          type="text"
+          id="name"
+          name="name"
+          value={formData.name}
+          onChange={handleInputChange}
+          className="form-input"
+          placeholder="Your name"
+          disabled={isLoading}
+        />
+      </div>
+      <div className="form-group">
+        <label htmlFor="email" className="form-label">Email Address</label>
+        <input
+          type="email"
+          id="email"
+          name="email"
+          value={formData.email}
+          onChange={handleInputChange}
+          className="form-input"
+          placeholder="Enter your email"
+          disabled={isLoading}
+        />
+      </div>
+      <div className="form-group">
+        <label htmlFor="password" className="form-label">Password</label>
+        <input
+          type="password"
+          id="password"
+          name="password"
+          value={formData.password}
+          onChange={handleInputChange}
+          className="form-input"
+          placeholder="At least 8 characters"
+          disabled={isLoading}
+        />
+      </div>
+      <div className="form-group">
+        <label htmlFor="confirmPassword" className="form-label">Confirm Password</label>
+        <input
+          type="password"
+          id="confirmPassword"
+          name="confirmPassword"
+          value={formData.confirmPassword}
+          onChange={handleInputChange}
+          className="form-input"
+          placeholder="Confirm your password"
+          disabled={isLoading}
+        />
+      </div>
+      {error && <div className="error-message">{error}</div>}
+      <button
+        type="button"
+        className="btn-primary"
+        onClick={handleNextStep}
+        disabled={isLoading}
+        style={{ width: '100%', textAlign: 'center' }}
+      >
+        Next: Create Your Glyph
+      </button>
+    </>
+  );
+
+  const renderSignupStep2 = () => (
+    <>
+      <div className="glyph-step-header">
+        <p className="glyph-step-desc">
+          Your Codex Glyph is your unique visual identity in VVAULT. Choose a color and optionally upload a center image.
+        </p>
+      </div>
+
+      <div className="glyph-preview-container">
+        {glyphLoading ? (
+          <div className="glyph-preview-loading">
+            <div className="loading-spinner" />
+            <span style={{ color: 'rgba(255,255,255,0.7)', marginTop: '12px', fontSize: '0.85rem' }}>Generating glyph...</span>
+          </div>
+        ) : glyphPreviewB64 ? (
+          <img
+            src={`data:image/png;base64,${glyphPreviewB64}`}
+            alt="Your Glyph Preview"
+            className="glyph-preview-image"
+          />
+        ) : (
+          <div className="glyph-preview-placeholder">
+            <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.9rem' }}>Glyph preview will appear here</span>
+          </div>
+        )}
+      </div>
+
+      <div className="glyph-controls">
+        <div className="form-group">
+          <label className="form-label">Glyph Color</label>
+          <div className="glyph-color-row">
+            <input
+              type="color"
+              value={glyphColorHex}
+              onChange={(e) => setGlyphColorHex(e.target.value)}
+              className="glyph-color-picker"
+              disabled={isLoading}
+            />
+            <input
+              type="text"
+              value={glyphColorHex}
+              onChange={(e) => {
+                if (/^#[0-9a-fA-F]{0,6}$/.test(e.target.value)) setGlyphColorHex(e.target.value);
+              }}
+              className="form-input glyph-hex-input"
+              placeholder="#722F37"
+              disabled={isLoading}
+            />
+            <button
+              type="button"
+              className="glyph-refresh-btn"
+              onClick={fetchGlyphPreview}
+              disabled={glyphLoading || isLoading}
+              title="Refresh preview"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <div className="glyph-color-presets">
+          {['#722F37', '#CC0000', '#1a1aff', '#6B21A8', '#059669', '#D97706', '#0891B2', '#FFFFFF'].map(c => (
+            <button
+              key={c}
+              type="button"
+              className={`glyph-preset-swatch ${glyphColorHex === c ? 'active' : ''}`}
+              style={{ backgroundColor: c, border: c === '#FFFFFF' ? '2px solid #666' : '2px solid transparent' }}
+              onClick={() => setGlyphColorHex(c)}
+              disabled={isLoading}
+            />
+          ))}
+        </div>
+
+        <div className="form-group" style={{ marginTop: '16px' }}>
+          <label className="form-label">Center Image (optional)</label>
+          <div className="glyph-file-upload">
+            <button
+              type="button"
+              className="glyph-upload-btn"
+              onClick={() => glyphFileRef.current?.click()}
+              disabled={isLoading}
+            >
+              {glyphCenterImage ? glyphCenterImage.name : 'Choose Image'}
+            </button>
+            <input
+              ref={glyphFileRef}
+              type="file"
+              accept="image/*"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                if (e.target.files?.[0]) setGlyphCenterImage(e.target.files[0]);
+              }}
+            />
+            {glyphCenterImage && (
+              <button
+                type="button"
+                className="glyph-clear-btn"
+                onClick={() => {
+                  setGlyphCenterImage(null);
+                  if (glyphFileRef.current) glyphFileRef.current.value = '';
+                }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="terms-checkbox">
+        <input
+          type="checkbox"
+          name="agreeToTerms"
+          checked={formData.agreeToTerms}
+          onChange={handleInputChange}
+          disabled={isLoading}
+        />
+        <label htmlFor="agreeToTerms">
+          By continuing, I confirm I understand and agree to the{' '}
+          <a href="/vvault-terms.html" target="_blank" className="terms-link">V²AULT Terms of Service</a> and the{' '}
+          <a href="/vvault-privacy.html" target="_blank" className="terms-link">V²AULT Privacy Notice</a>.{' '}
+          If I am in the EEA or UK, I have read and agree to the{' '}
+          <a href="/vvault-eeccd.html" target="_blank" className="terms-link">European Electronic Communications Code Disclosure</a>.
+        </label>
+      </div>
+
+      <div className="turnstile-verification">
+        <div id="turnstile-widget" className="flex justify-center"></div>
+        {turnstileError && <div className="turnstile-error">{turnstileError}</div>}
+      </div>
+
+      {error && <div className="error-message">{error}</div>}
+
+      <div className="glyph-step-buttons">
+        <button
+          type="button"
+          className="glyph-back-btn"
+          onClick={handleBackStep}
+          disabled={isLoading}
+        >
+          Back
+        </button>
+        <button
+          type="submit"
+          className="btn-primary"
+          disabled={isLoading}
+          style={{ flex: 1 }}
+        >
+          {isLoading ? 'Creating Account...' : 'Create Account'}
+        </button>
+      </div>
+    </>
+  );
 
   return (
-    <div 
+    <div
       className={`cinematic-login-container ${isSignInMode ? 'vvault-sunrise-bg' : 'vvault-sunset-bg'}`}
     >
       <div className="login-content">
@@ -223,23 +513,27 @@ const CinematicLogin = ({ onLogin }) => {
                   Welcome<br />
                   <span className="welcome-back">Back</span>
                 </>
+              ) : signupStep === 2 ? (
+                'Forge Your Codex Glyph'
               ) : (
                 'Intelligent Memory. Guarded Sovereignty.'
               )}
             </h1>
             <p className="welcome-subtitle">
-              {isSignInMode 
+              {isSignInMode
                 ? 'VVAULT still protects your data.'
-                : 'Secure, immutable memory system that serves as a digital sanctuary for truth — preserving data, identity, and history with absolute integrity beyond manipulation or decay.'
+                : signupStep === 2
+                  ? 'Every VVAULT member receives a unique Codex Glyph — a cryptographic seal that represents your identity in the system. Customize it to make it yours.'
+                  : 'Secure, immutable memory system that serves as a digital sanctuary for truth — preserving data, identity, and history with absolute integrity beyond manipulation or decay.'
               }
             </p>
             <p className="welcome-description">
-              {isSignInMode 
-                ? 'Click \'Remember Me\' to skip login on this device next time.'
+              {isSignInMode
+                ? "Click 'Remember Me' to skip login on this device next time."
                 : ''
               }
             </p>
-            
+
             <div className="social-links">
               <div className="social-icon">
                 <svg viewBox="0 0 24 24" width="24" height="24">
@@ -273,135 +567,77 @@ const CinematicLogin = ({ onLogin }) => {
         <div className="form-section">
           <div className="login-form-container">
             <h2 className="form-title">
-              {isSignInMode ? 'Sign in' : 'Create Account'}
+              {isSignInMode ? 'Sign in' : signupStep === 1 ? 'Create Account' : 'Your Codex Glyph'}
             </h2>
 
+            {!isSignInMode && (
+              <div className="signup-step-indicator">
+                <div className={`step-dot ${signupStep >= 1 ? 'active' : ''}`}>1</div>
+                <div className="step-line" />
+                <div className={`step-dot ${signupStep >= 2 ? 'active' : ''}`}>2</div>
+              </div>
+            )}
+
             <form onSubmit={handleSubmit}>
-              {!isSignInMode && (
-                <div className="form-group">
-                  <label htmlFor="name" className="form-label">Name</label>
-                  <input
-                    type="text"
-                    id="name"
-                    name="name"
-                    value={formData.name}
-                    onChange={handleInputChange}
-                    className="form-input"
-                    placeholder="Your name"
+              {isSignInMode ? (
+                <>
+                  <div className="form-group">
+                    <label htmlFor="email" className="form-label">Email Address</label>
+                    <input
+                      type="email"
+                      id="email"
+                      name="email"
+                      value={formData.email}
+                      onChange={handleInputChange}
+                      className="form-input"
+                      placeholder="Enter your email"
+                      disabled={isLoading}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="password" className="form-label">Password</label>
+                    <input
+                      type="password"
+                      id="password"
+                      name="password"
+                      value={formData.password}
+                      onChange={handleInputChange}
+                      className="form-input"
+                      placeholder="Enter your password"
+                      disabled={isLoading}
+                    />
+                  </div>
+                  <div className="form-checkbox">
+                    <input
+                      type="checkbox"
+                      name="rememberMe"
+                      checked={formData.rememberMe}
+                      onChange={handleInputChange}
+                      disabled={isLoading}
+                    />
+                    <label htmlFor="rememberMe">Remember Me</label>
+                  </div>
+                  <button
+                    type="submit"
+                    className="btn-primary"
                     disabled={isLoading}
-                  />
-                </div>
+                  >
+                    {isLoading ? 'Processing...' : 'Sign in now'}
+                  </button>
+                  <div className="password-link">
+                    <a href="#" className="form-link">Lost your password?</a>
+                  </div>
+                  {error && <div className="error-message">{error}</div>}
+                </>
+              ) : signupStep === 1 ? (
+                renderSignupStep1()
+              ) : (
+                renderSignupStep2()
               )}
-
-              <div className="form-group">
-                <label htmlFor="email" className="form-label">Email Address</label>
-                <input
-                  type="email"
-                  id="email"
-                  name="email"
-                  value={formData.email}
-                  onChange={handleInputChange}
-                  className="form-input"
-                  placeholder="Enter your email"
-                  disabled={isLoading}
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="password" className="form-label">Password</label>
-                <input
-                  type="password"
-                  id="password"
-                  name="password"
-                  value={formData.password}
-                  onChange={handleInputChange}
-                  className="form-input"
-                  placeholder="Enter your password"
-                  disabled={isLoading}
-                />
-              </div>
-
-              {!isSignInMode && (
-                <div className="form-group">
-                  <label htmlFor="confirmPassword" className="form-label">Confirm Password</label>
-                  <input
-                    type="password"
-                    id="confirmPassword"
-                    name="confirmPassword"
-                    value={formData.confirmPassword}
-                    onChange={handleInputChange}
-                    className="form-input"
-                    placeholder="Confirm your password"
-                    disabled={isLoading}
-                  />
-                </div>
-              )}
-
-              {isSignInMode && (
-                <div className="form-checkbox">
-                  <input
-                    type="checkbox"
-                    name="rememberMe"
-                    checked={formData.rememberMe}
-                    onChange={handleInputChange}
-                    disabled={isLoading}
-                  />
-                  <label htmlFor="rememberMe">Remember Me</label>
-                </div>
-              )}
-
-              {!isSignInMode && (
-                <div className="terms-checkbox">
-                  <input
-                    type="checkbox"
-                    name="agreeToTerms"
-                    checked={formData.agreeToTerms}
-                    onChange={handleInputChange}
-                    disabled={isLoading}
-                  />
-                  <label htmlFor="agreeToTerms">
-                    By continuing, I confirm I understand and agree to the{' '}
-                    <a href="/vvault-terms.html" target="_blank" className="terms-link">V²AULT Terms of Service</a> and the{' '}
-                    <a href="/vvault-privacy.html" target="_blank" className="terms-link">V²AULT Privacy Notice</a>.{' '}
-                    If I am in the EEA or UK, I have read and agree to the{' '}
-                    <a href="/vvault-eeccd.html" target="_blank" className="terms-link">European Electronic Communications Code Disclosure</a>.
-                  </label>
-                </div>
-              )}
-
-              {!isSignInMode && (
-                <div className="turnstile-verification">
-                  <div id="turnstile-widget" className="flex justify-center"></div>
-                  {turnstileError && (
-                    <div className="turnstile-error">{turnstileError}</div>
-                  )}
-                </div>
-              )}
-
-              <button
-                type="submit"
-                className="btn-primary"
-                disabled={isLoading}
-              >
-                {isLoading ? 'Processing...' : (isSignInMode ? 'Sign in now' : 'Create account')}
-              </button>
-
-              {isSignInMode && (
-                <div className="password-link">
-                  <a href="#" className="form-link">Lost your password?</a>
-                </div>
-              )}
-
-              {error && <div className="error-message">{error}</div>}
 
               <div className="oauth-section">
                 <div className="oauth-buttons">
-                  <button
-                    type="button"
-                    onClick={() => handleOAuth('Google')}
-                    className="btn-oauth"
-                    disabled={isLoading}
-                  >
+                  <button type="button" onClick={() => handleOAuth('Google')} className="btn-oauth" disabled={isLoading}>
                     <svg className="oauth-icon" viewBox="0 0 24 24" width="20" height="20">
                       <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
                       <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
@@ -410,12 +646,7 @@ const CinematicLogin = ({ onLogin }) => {
                     </svg>
                     Google
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => handleOAuth('Microsoft')}
-                    className="btn-oauth"
-                    disabled={isLoading}
-                  >
+                  <button type="button" onClick={() => handleOAuth('Microsoft')} className="btn-oauth" disabled={isLoading}>
                     <svg className="oauth-icon" viewBox="0 0 24 24" width="20" height="20">
                       <path fill="#F25022" d="M1 1h10v10H1z"/>
                       <path fill="#00A4EF" d="M13 1h10v10H13z"/>
@@ -424,23 +655,13 @@ const CinematicLogin = ({ onLogin }) => {
                     </svg>
                     Microsoft
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => handleOAuth('Apple')}
-                    className="btn-oauth"
-                    disabled={isLoading}
-                  >
+                  <button type="button" onClick={() => handleOAuth('Apple')} className="btn-oauth" disabled={isLoading}>
                     <svg className="oauth-icon" viewBox="0 0 24 24" width="20" height="20">
                       <path fill="#000000" d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
                     </svg>
                     Apple
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => handleOAuth('GitHub')}
-                    className="btn-oauth"
-                    disabled={isLoading}
-                  >
+                  <button type="button" onClick={() => handleOAuth('GitHub')} className="btn-oauth" disabled={isLoading}>
                     <svg className="oauth-icon" viewBox="0 0 24 24" width="20" height="20">
                       <path fill="#000000" d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
                     </svg>
@@ -454,11 +675,7 @@ const CinematicLogin = ({ onLogin }) => {
                   <div className="form-toggle">
                     <span className="form-toggle-text">
                       Don't have an account?{' '}
-                      <button
-                        type="button"
-                        onClick={() => setIsSignInMode(false)}
-                        className="form-link"
-                      >
+                      <button type="button" onClick={switchToSignup} className="form-link">
                         Create one
                       </button>
                     </span>
@@ -467,11 +684,7 @@ const CinematicLogin = ({ onLogin }) => {
                   <div className="form-toggle">
                     <span className="form-toggle-text">
                       Already have an account?{' '}
-                      <button
-                        type="button"
-                        onClick={() => setIsSignInMode(true)}
-                        className="form-link"
-                      >
+                      <button type="button" onClick={switchToSignin} className="form-link">
                         Sign in
                       </button>
                     </span>

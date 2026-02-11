@@ -3001,12 +3001,72 @@ def login():
         logger.error(f"Login error: {e}")
         return jsonify({"success": False, "error": "Login failed"}), 500
 
+@app.route('/api/auth/glyph-preview', methods=['POST'])
+def glyph_preview():
+    """Generate a glyph preview image (base64) without storing it"""
+    try:
+        if request.content_length and request.content_length > 5 * 1024 * 1024:
+            return jsonify({"success": False, "error": "Request too large (max 5MB)"}), 413
+
+        color_hex = '#722F37'
+        center_image_bytes = None
+        identity_seed = 'preview-001'
+
+        if request.content_type and 'multipart' in request.content_type:
+            color_hex = request.form.get('color_hex', '#722F37')
+            identity_seed = request.form.get('name', 'preview-001')
+            if 'center_image' in request.files:
+                f = request.files['center_image']
+                if f and f.filename:
+                    center_image_bytes = f.read()
+                    if len(center_image_bytes) > 2 * 1024 * 1024:
+                        return jsonify({"success": False, "error": "Center image too large (max 2MB)"}), 413
+        else:
+            data = request.get_json() or {}
+            color_hex = data.get('color_hex', '#722F37')
+            identity_seed = data.get('name', 'preview-001')
+
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+        from glyph_generator import generate_glyph_to_base64
+        preview_ts = datetime.now().isoformat()
+        b64, number_rows = generate_glyph_to_base64(
+            identity_seed, color_hex, center_image_bytes, preview_ts
+        )
+        return jsonify({
+            "success": True,
+            "glyph_base64": b64,
+            "number_rows": number_rows,
+        })
+    except Exception as e:
+        logger.error(f"Glyph preview error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/api/auth/register', methods=['POST'])
 def register():
     """User registration endpoint with bcrypt password hashing and Supabase storage"""
     ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     try:
-        data = request.get_json()
+        glyph_color_hex = '#722F37'
+        glyph_center_image_bytes = None
+
+        if request.content_type and 'multipart' in request.content_type:
+            data = {}
+            data['email'] = request.form.get('email', '')
+            data['password'] = request.form.get('password', '')
+            data['confirmPassword'] = request.form.get('confirmPassword', '')
+            data['name'] = request.form.get('name', '')
+            data['turnstileToken'] = request.form.get('turnstileToken', '')
+            glyph_color_hex = request.form.get('glyphColorHex', '#722F37')
+            if 'glyphCenterImage' in request.files:
+                f = request.files['glyphCenterImage']
+                if f and f.filename:
+                    glyph_center_image_bytes = f.read()
+        else:
+            data = request.get_json() or {}
+            glyph_color_hex = data.get('glyphColorHex', '#722F37')
+
         email = data.get('email', '').strip().lower()
         password = data.get('password', '')
         confirm_password = data.get('confirmPassword', '')
@@ -3091,18 +3151,65 @@ def register():
         # Create default folder structure for the new user
         if new_user_id:
             _create_default_user_folders(new_user_id, email)
-        
+
+        glyph_data = None
+        try:
+            import sys as _sys
+            _sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+            from glyph_generator import generate_glyph_to_bytes
+            glyph_identity = f"{name}_{int(datetime.now().timestamp() * 1000)}"
+            glyph_bytes, glyph_number_rows = generate_glyph_to_bytes(
+                glyph_identity, glyph_color_hex, glyph_center_image_bytes
+            )
+            import base64 as b64mod
+            glyph_b64 = b64mod.b64encode(glyph_bytes).decode('utf-8')
+            glyph_sha = hashlib.sha256(glyph_bytes).hexdigest()
+            glyph_filename = f"{glyph_identity}_glyph.png"
+            glyph_meta = {
+                'user_email': email,
+                'provider': 'vvault_registration',
+                'folder': 'account',
+                'glyph_number_rows': glyph_number_rows,
+                'color_hex': glyph_color_hex,
+                'type': 'user_glyph',
+            }
+            if supabase_client and new_user_id:
+                glyph_record = {
+                    'filename': glyph_filename,
+                    'file_type': 'binary',
+                    'content': glyph_b64,
+                    'construct_id': None,
+                    'user_id': new_user_id,
+                    'is_system': False,
+                    'sha256': glyph_sha,
+                    'metadata': json.dumps(glyph_meta),
+                    'created_at': datetime.now().isoformat(),
+                }
+                gr = supabase_client.table('vault_files').insert(glyph_record).execute()
+                if gr.data:
+                    logger.info(f"User glyph stored for {email}: {glyph_filename}")
+            glyph_data = {
+                'glyph_base64': glyph_b64,
+                'number_rows': glyph_number_rows,
+                'color_hex': glyph_color_hex,
+            }
+        except Exception as ge:
+            logger.warning(f"User glyph generation failed (non-fatal): {ge}")
+
         user_data = {'email': email, 'name': name, 'role': 'user'}
         log_auth_decision('registration_success', email, '/api/auth/register', 'allowed', 'user_created', ip)
         logger.info(f"New user registered: {email}")
         
-        return jsonify({
+        resp = {
             "success": True,
             "user": user_data,
             "token": token,
             "expires_at": expires_at.isoformat(),
             "message": "Registration successful"
-        })
+        }
+        if glyph_data:
+            resp['glyph'] = glyph_data
+        return jsonify(resp)
         
     except Exception as e:
         logger.error(f"Registration error: {e}")
