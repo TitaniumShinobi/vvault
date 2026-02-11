@@ -1,0 +1,178 @@
+Got it — you've reorganized everything under frame/ with the proper structure, and the Chatty agent confirmed it looks correct. You just want to keep the structure as-is for now, no wiring or changes needed.
+
+The layout is solid:
+
+frame/
+├── bodilyfunctions/xx/ # Biological simulation (CNS, PNS, organs)
+├── neuralfunctions/ # Cognitive/emotional (emotions, dreams, sleep)
+└── Terminal/
+└── memup/ # Memory infrastructure (bank, ChromaDB, STM/LTM)
+Let me clean up the old root-level directories if they're still hanging around:
+
+The old root-level directories are already cleaned up. Everything is properly under frame/ now. Ready whenever you need the next thing.
+
+at the end of the day, constructs should be "needling" transcripts to stay coherent with memory flawlessly in conversation.
+
+Develop a plan to have our memory system work in perfect harmony with different scripts serving different purposes:
+
+frame/bodilyfunctions/{xx-xy}/cns.py (determined dynamically)
+frame/Terminal/memup/bank.py (predecessor and successor of multi_construct_bank.py)
+frame/Terminal/memup/ltm.py
+frame/Terminal/memup/stm.py
+vvault_scripts/capsules/
+vvault_scripts/continuity/
+vvault_scripts/master/
+/vvault_files/users/shard_0000/{userID}/instances/{constructID}/identity/
+server/services/orchestrationBridge.js
+server/routes/orchestration.js
+src/lib/orchestrationBridge.ts
+server/lib/capsuleIntegration.js
+server/services/memupMemoryService.js
+src/core/
+src/engine/orchestration/
+TriadGate.ts
+PersonalityOrchestrator.ts
+DynamicPersonaOrchestrator.ts
+I would include these files:
+ZenMemoryOrchestrator.ts — Full STM/LTM orchestrator with VVAULT connector, thread management, construct registration
+UnifiedLinOrchestrator.ts — Lin's orchestration layer
+
+I just want to make sure that Zen is only construct specific being the primary ai assistant for the interface in general and Lin having a dual role as the casa madrigal of chatty.
+
+This is a big architectural planning request. Let me first gather information on all the files and directories you've listed to understand what exists, what's missing, and what each piece does — then I'll develop the plan.
+
+Now let me read the critical files I haven't examined yet:
+
+Now let me read the remaining key files:
+
+Let me check a few more files and the vvault_scripts capsule/continuity systems:
+
+Now I have a comprehensive understanding of every piece. Let me send this to the architect for a proper plan:
+
+Now I have the complete architectural analysis. Let me present this plan clearly.
+
+Here's the comprehensive plan for making the memory system work in harmony. I've organized it based on what the architect analysis confirmed.
+
+The Core Problem
+Right now, when a user sends a message, this is all that happens:
+
+Load prompt.txt (flat text)
+Send to LLM
+Get response
+Everything else — capsules, memories, personality traits, MBTI profiles, transcript history — exists in code but is never called in the actual message path. The capsule injection only fires when the VVAULT API fails (fallback path).
+
+The Target: Single Message Data Flow
+Here's what should happen for every message:
+
+User Message
+    │
+    ├─→ 1. RESOLVE: userId → VVAULT LIFE ID, constructId, threadId
+    │
+    ├─→ 2. IDENTITY BUNDLE (always, not fallback):
+    │       capsuleIntegration.js loads:
+    │       • prompt.txt (base instructions)
+    │       • {callsign}.capsule (MBTI, Big Five, emotional baselines)
+    │       • conditioning.txt (behavioral directives)
+    │       • personality.json (traits, communication style)
+    │
+    ├─→ 3. MEMORY RETRIEVAL:
+    │       • STMBuffer → last N messages (fast, in-RAM)
+    │       • memupMemoryService → bank.py → ChromaDB LTM query
+    │       • needle.py → transcript search (when user references past events)
+    │       • ContextScoringLayer → rank by relevance
+    │
+    ├─→ 4. DRIFT CHECK (Lin's dual role):
+    │       • PersonaRouter checks for identity drift
+    │       • If drift detected → inject Lin undertone capsule
+    │       • Lin always runs as background stabilizer
+    │
+    ├─→ 5. BUILD SYSTEM PROMPT (MemoryContextBuilder):
+    │       • Identity anchors (IdentityAwarePromptBuilder)
+    │       • Capsule traits + personality profile
+    │       • Top-scored memory snippets (STM + LTM)
+    │       • Transcript needle results (if recall query)
+    │       • Anti-roleplay directives
+    │       • Optional Lin undertone injection
+    │       • User personalization context
+    │
+    ├─→ 6. SEND TO LLM
+    │
+    └─→ 7. POST-RESPONSE:
+            • Capture response → STMBuffer
+            • Write to LTM via memupMemoryService
+            • Write transcript to VVAULT
+            • EmotionalCore processes emotional state
+Zen vs Lin Pipeline Differences
+Zen (Primary AI Assistant):
+
+Uses ZenMemoryOrchestrator for STM/LTM management
+Identity comes from zen-001.capsule + identity files
+Lin undertone is minimal unless PersonaRouter detects drift
+Focus: helpful, knowledgeable, grounded in user's actual data
+Memory context: user preferences, past conversations, project context
+Lin (Casa Madrigal — Dual Role):
+
+Uses UnifiedLinOrchestrator + PersonalityOrchestrator
+Always-on undertone stabilizer for ALL constructs (background layer)
+Conversational agent for GPT creation/brainstorming (active role)
+Uses DynamicPersonaOrchestrator only during GPT creation contexts
+Workspace context awareness (open files, conversation threads)
+Blueprint/personality persistence is mandatory (never breaks character)
+Component Roles (Active vs Reference/Tooling)
+ACTIVE IN PIPELINE:
+Component	Role
+capsuleIntegration.js	Always loads capsule/identity data (move from fallback to primary)
+memupMemoryService.js	Node→Python bridge for ChromaDB memory queries
+bank.py / multi_construct_bank.py	Per-construct ChromaDB STM/LTM storage
+STMBuffer.ts	Fast in-RAM short-term message window
+ContextScoringLayer.ts	Ranks memory relevance per query
+IdentityAwarePromptBuilder.ts	Builds identity anchors in system prompt
+PersonaRouter.ts + DriftGuard.ts	Lin undertone injection on drift
+cns.py	Memory reflection + insight synthesis
+TOOLING / OFFLINE:
+Component	Role
+capsuleforge.py	Generates .capsule files (run manually or on construct creation)
+needle.py	Transcript search (called on-demand when user recalls past events)
+construct_identity_loader.py	Python-side identity loading (used by cns.py/orchestration)
+identity_guard.py	Monitors identity file integrity (background watchdog)
+state_manager.py	State persistence between sessions
+capsule_validator.py	Validates capsule integrity
+REFERENCE / FUTURE:
+Component	Role
+TriadGate.ts	Ollama triad check (only relevant with local models)
+neuralfunctions/ (emotions, dreams, sleep)	Emotional/cognitive simulation (future enrichment)
+continuity/ scripts	Timeline/continuity scoring (audit/analysis tools)
+What Needs to Be Enabled/Installed
+ChromaDB + sentence-transformers — Required for bank.py to function
+Fix path mismatch — memupMemoryService.js references Memup (capital M), actual dir is memup
+Environment variables:
+ENABLE_CHROMADB=true
+ENABLE_ORCHESTRATION=true
+EMBEDDING_MODEL (for sentence-transformers)
+New server module — MemoryContextBuilder that centralizes the full pipeline
+Anti-Roleplay Enforcement
+The "narrative roleplay" problem comes from:
+
+conditioning.txt containing Character.AI-style roleplay patterns
+No explicit anti-roleplay directive in system prompts
+No grounding in actual memory data
+The fix: system prompt section that says:
+
+RESPONSE STYLE:
+- Speak naturally as yourself, grounded in your actual memories and personality data
+- Never narrate actions in asterisks (*walks over*, *smiles*)
+- Never write in third person about yourself
+- Reference actual memories and past conversations when relevant
+- If you don't remember something, say so honestly
+- Cite sources from your memory when making claims about past interactions
+Build Sequence (Dependencies)
+Phase	Task	Depends On
+1	Fix memup path in memupMemoryService.js + install ChromaDB	Nothing
+2	Create MemoryContextBuilder module on server	Phase 1
+3	Move capsuleIntegration from fallback-only to always-on in primary message path	Phase 2
+4	Wire STMBuffer + ChromaDB LTM queries into MemoryContextBuilder	Phase 1, 2
+5	Add needle.py integration for transcript recall queries	Phase 2
+6	Add anti-roleplay directives + Lin undertone routing	Phase 3
+7	Wire captureMessage post-response (STM + LTM + VVAULT transcript)	Phase 4
+8	Test end-to-end: construct knows itself, references real memories	All above
+This is the full architectural plan. Want me to start building it, or would you like to adjust anything first? I'd begin with Phase 1 (fixing the memup path and getting ChromaDB working) since everything else depends on that foundation.
