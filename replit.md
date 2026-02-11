@@ -61,14 +61,22 @@ A 5-layer security system for sovereign construct identity preservation with a s
 - **Service API**: VVAULT serves as a config and credentials vault for external services.
 - **VXRunner Integration API**: VVAULT exposes capsule data as forensic DNA baselines for VXRunner's construct detection system.
 
+### Vault File System (Canonical Paths)
+- **Root**: `/vvault_files/users/shard_0000/{userID}/` where userID = `{name}_{timestamp}` (e.g., `devon_woodson_1762969514958`)
+- **Construct instances**: `/vvault_files/users/shard_0000/{userID}/instances/{callsign}/` (e.g., `instances/katana-001/`, never `instances/katana/`)
+- **CRITICAL**: External agents (Chatty, etc.) must NEVER write files using full internal paths as filenames. Files use flat filenames with the `construct_id` column set to the callsign.
+
 ### Construct File Structure (per instance)
-- `identity/prompt.json` — name, description, instructions (system prompt)
+- `identity/prompt.txt` — name, description, instructions (system prompt), conversation starters
 - `identity/avatar.png` — construct avatar
+- `identity/personality.json` — behavioral profile
+- `identity/conditioning.txt` — conditioning directives
 - `assets/` — media files (png, jpg, jpeg, svg)
 - `documents/` — all other files (knowledge base, raw docs)
-- `chatty/chat_with_{id}.md` — chat transcripts
-- `config/metadata.json`, `config/personality.json` — capsule-updated config
-- `memup/{id}.capsule` — memory capsules
+- `chatty/chat_with_{callsign}.md` — Chatty chat transcripts
+- `chatgpt/` — ChatGPT conversation transcripts
+- `config/metadata.json` — capsule-updated config
+- `memup/{callsign}.capsule` — memory capsules
 - `logs/` — various operational logs
 
 ### VVAULT Frontend Session Management
