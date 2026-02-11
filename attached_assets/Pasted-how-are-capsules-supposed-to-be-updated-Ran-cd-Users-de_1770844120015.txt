@@ -1,0 +1,39 @@
+how are capsules supposed to be updated?
+
+Ran cd /Users/devon/Documents/GitHub && find . -path '*ai-004.capsule' -maxdepth 6 2>/dev/null | head for 2s
+
+
+Explored 1 file
+Ran cd /Users/devon/Documents/GitHub/vvault && for f in users/shard_0000/devon_woodson_1762969514958/capsules/ai-00{1,2,3}.capsule; do echo "--- $f"; sed -n '1,40p' "$f"; done
+
+
+Explored 1 file, 4 searches, 2 lists
+Ran python3 -c 'import capsuleforge,inspect; print(capsuleforge.__file__)'
+
+
+Explored 1 file
+Context automatically compacted
+I’m going to inspect the capsule-related docs + the scripts that generate/consume *.capsule files in vvault/ so we can answer “update” precisely (append-only snapshot vs in-place edit, and what pointer/index files get updated).
+
+Explored 6 files, 1 search, 4 lists
+Ran cd /Users/devon/Documents/GitHub/vvault && ls -la | grep -E 'index|indexes|memory_records|capsules' || true && ls -la indexes 2>/dev/null | head || true
+
+
+Explored 6 files, 2 searches, 1 list
+Ran cd /Users/devon/Documents/GitHub/vvault && ls -la capsules 2>/dev/null | head -50 || echo 'no vvault/capsules dir'
+
+
+Ran cd /Users/devon/Documents/GitHub/vvault && ls -la capsules 2>&1 | sed -n '1,50p'
+
+
+Explored 3 files, 1 search
+Worked for 14m 49s
+Capsules are meant to be versioned snapshots, not “live files” you edit in place.
+
+AI construct capsules (CapsuleForge-style): create a new .capsule with a new metadata.uuid + metadata.timestamp, recompute metadata.fingerprint_hash, and store it as an additional version (keep old ones for continuity evidence). The canonical code path is vvault_core.py VVAULTCore.store_capsule() which appends a new file and updates the per-instance index (e.g. <Instance>_index.json with latest_uuid).
+User capsules: evolve by overwriting current.capsule and writing a versioned copy under account/capsule/versions/ (append-only history). That behavior is implemented in user_capsule_forge.py UserCapsuleForge.evolve_user_capsule().
+For the file you’re editing (ai-004.capsule): if you change anything inside it, the fingerprint will no longer validate unless you recompute metadata.fingerprint_hash (VVAULT’s integrity check is SHA-256 of the JSON with fingerprint_hash blank, sort_keys=True; see vvault_core.py _validate_capsule_integrity()).
+
+If you want, I can add a tiny script that “re-fingerprints” a capsule after edits and/or converts these *.capsule into the canonical capsules/<instance>/... + <instance>_index.json structure.
+
+
