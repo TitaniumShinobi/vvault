@@ -5,6 +5,7 @@ import Capsules from './components/Capsules';
 import VaultBrowser from './components/VaultBrowser';
 import Blockchain from './components/Blockchain';
 import Settings from './components/Settings';
+import CreateConstruct from './components/CreateConstruct';
 import CinematicLogin from './components/CinematicLogin';
 import { validateSession, SESSION_EXPIRED_EVENT } from './utils/authFetch';
 import './App.css';
@@ -18,6 +19,7 @@ const Navigation = ({ user, onLogout }) => {
     { path: '/vault', label: 'Vault', icon: '🔒' },
     { path: '/capsules', label: 'Capsules', icon: '📦' },
     { path: '/blockchain', label: 'Blockchain', icon: '⛓️' },
+    { path: '/create', label: 'Create', icon: '✦' },
     { path: '/settings', label: 'Settings', icon: '⚙️' }
   ];
   
@@ -217,6 +219,7 @@ function App() {
             <Route path="/vault" element={<VaultBrowser user={user} />} />
             <Route path="/capsules" element={<Capsules user={user} />} />
             <Route path="/blockchain" element={<Blockchain user={user} />} />
+            <Route path="/create" element={<CreateConstruct user={user} />} />
             <Route path="/settings" element={<Settings systemInfo={systemInfo} user={user} />} />
           </Routes>
         </main>

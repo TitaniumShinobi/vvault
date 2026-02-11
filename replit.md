@@ -25,6 +25,24 @@ Preferred communication style: Simple, everyday language.
 - **Identity Module Architecture**: Each construct has an `/identity` folder containing modules for functions like scouting, navigation, context direction, autonomous execution, identity binding/drift monitoring, central control, self-improvement, outreach, state management, and self-correction.
 - **Support Modules**: Utilities for construct identity loading, logging, continuity scoring, evidence validation, hypothesis generation, and terminal management.
 
+### Codex Glyph System
+- **Generator**: `vvault/server/glyph_generator.py` — Pillow-based codex seal generator.
+- **Universal Elements**: Mandala frame (12-point star, teardrop flames, square border), 8-point star center, three cipher phrase rings ("VEK UREN TA", "NYESH TORAN VAL", "ZAV'ARUN TAHN'KEL VARRA"), symbol icons.
+- **Per-Construct Unique**: Three rows of 80-digit numbers derived from SHA-512 hash of construct identity (callsign + timestamp + salt). Multiverse-scale uniqueness.
+- **Customizable**: User-chosen color scheme (hex), user-uploaded center image (composited circular mask).
+- **Output**: `{callsign}_glyph.png` (1563x1563 RGBA), stored as binary in vault_files with glyph_number_rows in metadata.
+- **API**: `generate_glyph()`, `generate_glyph_to_bytes()`, `generate_glyph_to_base64()`.
+
+### Construct Creation (Full Directory Scaffold)
+- **Endpoint**: `POST /api/chatty/construct/create` — accepts multipart/form-data or JSON.
+- **Scaffolds 16 files** per the VSI Directory Template:
+  - `identity/`: prompt.json, conditioning.txt, {callsign}_glyph.png
+  - `config/`: metadata.json, personality.json
+  - `chatty/`: chat_with_{callsign}.md
+  - `logs/`: capsule, chat, cns, identity_guard, independence, ltm, self_improvement_agent, server, stm, watchdog
+- **Validation**: Callsign format ({name}-{NNN}), filename path injection blocking, duplicate detection.
+- **Frontend**: React CreateConstruct component at /create route.
+
 ### Capsule System
 - **CapsuleForge**: Generates `.capsule` files containing complete AI personality snapshots (MBTI, Big Five, cognitive biases, memory categorization).
 - **VVAULT Core**: Manages capsule storage/retrieval with automatic versioning, tagging, and SHA-256 integrity validation.
