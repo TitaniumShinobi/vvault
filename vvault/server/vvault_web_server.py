@@ -1189,7 +1189,10 @@ def _strip_user_prefix(path: str) -> str:
 def _transform_files_for_display(files: list, is_admin: bool = False, user_id: str = None) -> list:
     """Transform file paths for user-friendly display, filtering out system files.
     
-    For regular users: Use storage_path, strip bucket prefix and user folder for display
+    For regular users: Use storage_path, strip bucket prefix and user folder for display.
+    If a file has no nested storage_path but has construct_id and metadata.folder,
+    build a logical display_path: instances/{construct_id}/{folder}/{filename}
+    
     Storage path format: {user_id}/{user_slug}/...
     Display path format: capsules/..., instances/..., etc.
     """
@@ -1203,32 +1206,52 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
             continue
         
         file_copy = dict(f)
-        storage_path = f.get('storage_path') or f.get('filename') or ''
+        storage_path = f.get('storage_path') or ''
+        filename = f.get('filename') or 'unknown'
+        construct_id = f.get('construct_id') or ''
+        
+        metadata = file_copy.get('metadata', {})
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except:
+                metadata = {}
+            file_copy['metadata'] = metadata
+        
+        folder = metadata.get('folder', '')
         
         if not is_admin and user_id:
             display_path = storage_path
             display_path = UUID_PATTERN.sub('', display_path)
             display_path = USER_SLUG_PATTERN.sub('', display_path)
             
-            if not display_path:
-                display_path = f.get('filename', 'unknown')
+            if not display_path or display_path == filename:
+                if construct_id and folder:
+                    display_path = f"instances/{construct_id}/{folder}/{filename}"
+                elif construct_id:
+                    display_path = f"instances/{construct_id}/{filename}"
+                else:
+                    file_type = metadata.get('type', '')
+                    if file_type == 'user_glyph':
+                        display_path = f"account/{filename}"
+                    else:
+                        display_path = filename
             
             file_copy['display_path'] = display_path
-            file_copy['storage_path'] = storage_path
-            file_copy['internal_path'] = storage_path
-            
-            metadata = file_copy.get('metadata', {})
-            if isinstance(metadata, str):
-                try:
-                    metadata = json.loads(metadata)
-                except:
-                    metadata = {}
+            file_copy['storage_path'] = storage_path or display_path
+            file_copy['internal_path'] = storage_path or display_path
             metadata['original_path'] = display_path
-            file_copy['metadata'] = metadata
         else:
-            file_copy['display_path'] = storage_path
-            file_copy['storage_path'] = storage_path
-            file_copy['internal_path'] = storage_path
+            if storage_path:
+                file_copy['display_path'] = storage_path
+            elif construct_id and folder:
+                file_copy['display_path'] = f"instances/{construct_id}/{folder}/{filename}"
+            elif construct_id:
+                file_copy['display_path'] = f"instances/{construct_id}/{filename}"
+            else:
+                file_copy['display_path'] = filename
+            file_copy['storage_path'] = storage_path or file_copy['display_path']
+            file_copy['internal_path'] = storage_path or file_copy['display_path']
         
         transformed.append(file_copy)
     return transformed
