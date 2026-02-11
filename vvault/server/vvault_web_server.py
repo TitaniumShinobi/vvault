@@ -1715,6 +1715,10 @@ def upsert_system_file():
         file_type = (data.get("file_type") or "text/markdown").strip()
         metadata = data.get("metadata", {})
 
+        ok, err = _validate_vault_filename(filename)
+        if not ok:
+            return jsonify({"success": False, "error": err}), 400
+
         # Normalize metadata to a JSON string for storage.
         if metadata is None:
             metadata_obj = {}
@@ -2196,6 +2200,170 @@ def _bare_name_from_callsign(callsign: str) -> str:
     import re
     m = re.match(r'^(.+)-\d{3}$', callsign)
     return m.group(1) if m else callsign
+
+
+ALLOWED_VAULT_FILE_TYPES = {'binary', 'text', 'conversation', 'transcript', 'drift_log', 'enforcement_config'}
+
+def _validate_vault_filename(filename):
+    """Reject filenames containing full internal paths. Returns (ok, error)."""
+    bad_patterns = ['vvault/', '/users/', '/shard_', 'vvault_files/']
+    for pat in bad_patterns:
+        if pat in filename:
+            return False, f"Filename must not contain internal path '{pat}'. Use flat filenames with construct_id column."
+    return True, None
+
+
+@app.route('/api/chatty/construct/create', methods=['POST'])
+@require_chatty_auth
+def create_construct():
+    """Scaffold a new construct instance in Supabase vault_files.
+
+    POST body: {
+        "callsign": "sera-001",           (required, must match {name}-{NNN} format)
+        "name": "Sera",                   (required, display name)
+        "description": "...",             (optional)
+        "instructions": "...",            (optional, system prompt body)
+        "conversationStarters": ["...",], (optional)
+        "personality": { ... },           (optional, behavioral profile)
+        "conditioning": "...",            (optional, conditioning directives)
+    }
+
+    Creates the following files in vault_files:
+      - identity/prompt.txt        (with name, description, instructions, conversation starters)
+      - identity/personality.json  (behavioral profile or empty default)
+      - identity/conditioning.txt  (conditioning directives or empty default)
+      - chatty/chat_with_{callsign}.md (empty transcript scaffold)
+
+    All files use flat filenames with construct_id = callsign.
+    Rejects duplicates — if prompt.txt already exists for this callsign, returns 409.
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        data = request.get_json(silent=True)
+        if not data or not isinstance(data, dict):
+            return jsonify({"success": False, "error": "Invalid or missing JSON body"}), 400
+
+        callsign = data.get('callsign', '').strip().lower()
+        name = data.get('name', '').strip()
+
+        if not callsign or not name:
+            return jsonify({"success": False, "error": "callsign and name are required"}), 400
+
+        import re
+        if not re.match(r'^[a-z]+-\d{3}$', callsign):
+            return jsonify({"success": False, "error": f"Invalid callsign format '{callsign}'. Must be {{name}}-{{NNN}} (e.g., sera-001)"}), 400
+
+        current_user = request.current_user
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        existing = supabase_client.table('vault_files').select('id').eq('construct_id', callsign).eq('filename', 'prompt.txt').execute()
+        if existing.data:
+            return jsonify({"success": False, "error": f"Construct {callsign} already exists (prompt.txt found)"}), 409
+
+        description = data.get('description', '')
+        instructions = data.get('instructions', '')
+        conversation_starters = data.get('conversationStarters', [])
+        personality = data.get('personality', {})
+        conditioning = data.get('conditioning', '')
+
+        prompt_content = f"**You Are {name}**\n"
+        if description:
+            prompt_content += f"*{description}*\n"
+        if instructions:
+            prompt_content += f"```\nInstructions for {name}:\n{instructions}\n```\n"
+        if conversation_starters:
+            prompt_content += "\n**Conversation Starters:**\n"
+            for starter in conversation_starters:
+                prompt_content += f"- *{starter}*\n"
+
+        if not personality:
+            personality = {
+                "construct_id": callsign,
+                "instance_name": name,
+                "traits": [],
+                "rules": [],
+                "metadata": {
+                    "extractionTimestamp": datetime.now().isoformat(),
+                    "mergedWithExisting": False
+                }
+            }
+        elif 'construct_id' not in personality:
+            personality['construct_id'] = callsign
+
+        if not conditioning:
+            conditioning = f"You are {name} ({callsign}). Maintain your identity at all times."
+
+        now = datetime.now().isoformat()
+        transcript_content = f"# Chat with {name}\n\nTranscript started {now}\n"
+
+        files_to_create = [
+            {
+                'filename': 'prompt.txt',
+                'file_type': 'text',
+                'content': prompt_content,
+            },
+            {
+                'filename': 'personality.json',
+                'file_type': 'text',
+                'content': json.dumps(personality, indent=2),
+            },
+            {
+                'filename': 'conditioning.txt',
+                'file_type': 'text',
+                'content': conditioning,
+            },
+            {
+                'filename': f'instances/{callsign}/chatty/chat_with_{callsign}.md',
+                'file_type': 'conversation',
+                'content': transcript_content,
+            },
+        ]
+
+        created_files = []
+        for file_def in files_to_create:
+            ok, err = _validate_vault_filename(file_def['filename'])
+            if not ok:
+                return jsonify({"success": False, "error": err}), 400
+
+            sha256 = hashlib.sha256(file_def['content'].encode('utf-8')).hexdigest()
+            record = {
+                'filename': file_def['filename'],
+                'file_type': file_def['file_type'],
+                'content': file_def['content'],
+                'construct_id': callsign,
+                'user_id': user_id,
+                'is_system': False,
+                'sha256': sha256,
+                'metadata': json.dumps({'construct_id': callsign, 'provider': 'chatty', 'created_by': 'vvault_scaffold'}),
+                'created_at': now,
+            }
+            result = supabase_client.table('vault_files').insert(record).execute()
+            if result.data:
+                created_files.append({
+                    'id': result.data[0]['id'],
+                    'filename': file_def['filename'],
+                    'file_type': file_def['file_type'],
+                })
+
+        logger.info(f"CONSTRUCT_CREATED: callsign={callsign} name={name} files={len(created_files)} user={user_email}")
+
+        return jsonify({
+            "success": True,
+            "callsign": callsign,
+            "name": name,
+            "files_created": created_files,
+            "message": f"Construct {callsign} scaffolded with {len(created_files)} files"
+        }), 201
+
+    except Exception as e:
+        logger.error(f"Error creating construct: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route('/api/chatty/constructs')
