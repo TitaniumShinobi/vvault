@@ -1,0 +1,38 @@
+
+I'm tracking all of this. Here's the core problem: when you create a new GPT in Chatty, it only saves the construct record to the local database — it doesn't bootstrap the instance folder structure in VVAULT. No instances/{callsign}/ folder, no identity/ subfolder, no prompt.txt, no conditioning.txt, no capsule. The construct exists in Chatty's DB but is a ghost in VVAULT.
+
+The conversation with the VVAULT side also surfaced that they offered to build a POST /api/chatty/construct/create endpoint to scaffold the full instance structure. That would be the clean approach — Chatty calls VVAULT after creating a GPT, VVAULT creates the proper folder tree.
+
+Before I plan anything, let me understand the current GPT creation flow to see exactly what happens and what's missing:
+
+Now I have the full picture. Here's what's happening and what's missing:
+
+Current GPT creation flow:
+
+User fills out GPTCreator form → frontend calls AIService.createAI() or GPTService.createGPT()
+Backend POST /api/gpts/ saves the construct record to the local gpts table (or ais table)
+It bootstraps a conversation scaffold in Supabase vault_files (a chat_with_{callsign}.md entry) so the GPT shows up in the Address Book
+What's missing:
+
+No call to VVAULT to create the instance folder structure (instances/{callsign}/)
+No identity files created (identity/prompt.txt, identity/conditioning.txt, identity/personality.json)
+No capsule generated
+No chatty/, chatgpt/, assets/, documents/ subfolders scaffolded
+The VVAULT side offered to build a POST /api/chatty/construct/create endpoint to handle the scaffolding. That's the clean path — Chatty calls VVAULT after creating the GPT record, VVAULT creates the correct folder structure with identity files populated from the GPTCreator form data (name, description, instructions).
+
+My proposed approach:
+
+Since VVAULT would own the scaffolding endpoint, Chatty's job is to:
+
+After GPT record creation succeeds, call VVAULT's scaffold endpoint with the construct data (callsign, name, description, instructions, personality traits)
+If VVAULT is unreachable, fall back to writing the minimum identity files directly to Supabase vault_files using the correct relative paths (instances/{callsign}/identity/prompt.txt, etc.)
+Store the instructions/description from the GPTCreator Configure tab as the prompt.txt content
+Does the VVAULT side have that scaffold endpoint ready, or should I build the Supabase-direct fallback first so new GPTs at least get their identity files created properly?
+
+
+Scroll to latest
+Add VVAULT call to GPT creation
+Save identity files to data storage
+Use only existing file patterns
+Check new GPT files in storage
+Agent has identified a task list to work on. If everything looks good, start building to make these updates to your app.
