@@ -1,0 +1,67 @@
+
+I see what happened. The VVAULT conversation is about a different issue — Chatty can't send messages to Sera because the VVAULT API's /api/chatty/message endpoint is rejecting the request with "User not found." That's a VVAULT-side fix, not something I can do from this Chatty project.
+
+But the part about sending a message to Sera from within Chatty itself — that should work fine since Chatty uses its own message routing (OpenRouter/OpenAI, not the VVAULT message endpoint).
+
+Do you want me to test sending a message to Sera right now from Chatty's backend to confirm the chat pipeline works, including the new ledger enrichment?
+
+recap and document all planned orchestration and continuity processes
+
+report this in a / some specific relevant document(s) in docs/
+
+I'll create documentation files in docs/ covering the orchestration and continuity architecture. Let me first check if a docs/ directory already exists.
+
+There's already a well-organized docs/ directory. Let me check the existing memory and architecture docs to see what's there and avoid duplication.
+
+There's already a MEMORY_ORCHESTRATION_PLAN.md in architecture. Let me check its content, then I'll plan the documentation.
+
+Good news — there's already a docs/ directory with relevant architecture and memory subdirectories. The existing MEMORY_ORCHESTRATION_PLAN.md is dated Feb 11 and marked "PROPOSED — Not yet implemented," but most of it has now been implemented.
+
+Here's my plan:
+
+Update docs/architecture/MEMORY_ORCHESTRATION_PLAN.md — Change status from PROPOSED to IMPLEMENTED, reflect current state of all systems that are now live
+Create docs/architecture/CONTINUITY_LEDGER_SYSTEM.md — Dedicated doc for the new ContinuityGPT ledger system (date estimation, vibe classification, topic extraction, continuity hooks, caching, API endpoints)
+Create docs/architecture/MASTER_SCRIPTS_ENSEMBLE.md — Documents the autonomy stack (Needle, IdentityGuard, StateManager, IndependentRunner), bootstrap flow, and Memory toggle integration
+Created task list
+Start building
+Let me read the full existing orchestration plan first, then write all three docs.
+
+Now I have the full picture. Let me write all three docs in parallel.
+
+Now let me update the replit.md to reference these new docs, then get the architect review.
+
+Good, the replit.md already has the full documentation inline. Now let me add a reference to the new docs and get the architect review.
+
+Now let me get the architect review for all three docs.
+
+Good feedback. Let me refine the docs to be more accurate about what's conditional vs guaranteed, and correct the claims about additional classes in masterScriptsBridge.
+
+Good. Now I can see the full picture. The architect was right about missing classes. Let me update all three docs with accurate information.
+
+Now update the MASTER_SCRIPTS_ENSEMBLE.md to include all classes:
+
+Now let me also fix the MASTER_SCRIPTS_ENSEMBLE.md bootstrap line that still says "frontend calls":
+
+That line was already updated. The docs are now accurate. Let me mark tasks as completed and do a final review.
+
+Let me verify the specific claims and make the final corrections.
+
+Now I can see exactly what's happening. The ledger auto-generation is confirmed in memoryContextBuilder.js lines 450-456. buildEnrichedContext is called at vvault.js lines 3727 and 4105 (primary and fallback paths). Let me make the final accuracy corrections.
+
+Now let me mark all tasks completed:
+
+All three docs are written and reviewed. Here's what was created:
+
+Updated:
+
+docs/architecture/MEMORY_ORCHESTRATION_PLAN.md — Changed from PROPOSED to IMPLEMENTED, shows the full 12-step message data flow with exact code locations (vvault.js lines ~3727 and ~4105), notes which subsystems are conditional vs always-on
+Created:
+
+docs/architecture/CONTINUITY_LEDGER_SYSTEM.md — Full documentation of the ledger system: date estimation, 8 vibe types, 16 topic categories, 7 continuity hook types, storage format, caching, auto-generation flow, API endpoints, and how it enriches needle hits and verified memories
+
+docs/architecture/MASTER_SCRIPTS_ENSEMBLE.md — Documents all 8 autonomy stack classes (Needle, IdentityGuard, StateManager, IndependentRunner, Aviator, Navigator, UnstuckHelper, ConstructLogger), the bootstrap flow from Layout.tsx, the Memory toggle in GPTCreator, the 3-tier memory authority hierarchy, conversation persistence, and tri-provider routing
+
+The replit.md has also been updated with an Architecture Documentation section pointing to all three docs.
+
+
+Scroll to latest
