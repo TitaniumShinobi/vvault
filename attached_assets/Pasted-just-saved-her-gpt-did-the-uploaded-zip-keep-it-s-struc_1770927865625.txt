@@ -1,0 +1,43 @@
+just saved her gpt... did the uploaded zip keep it's structure?
+
+Let me check the logs to see what happened with the zip upload.
+
+Good question. Since you saved Nova on the production site, the upload logs would be there, not in the dev server. Let me check Supabase directly to see what got stored for Nova's knowledge files.
+
+The production database isn't accessible through the dev tools here. Let me check the code to answer your question about zip structure — specifically how the upload handler processes zip files.
+
+Yes, the zip structure is preserved. Here's what's happening when you upload a zip as a knowledge file:
+
+The zip gets extracted on your browser (client-side)
+Each file inside keeps its full path from the zip as its filename — so if the zip had docs/guide.md or prompts/system.txt, those paths are stored as-is
+Text files (.txt, .md, .json, .csv, etc.) have their content read directly
+Binary files (.pdf, .doc, images, video) are kept as binary blobs for upload
+So if your zip had a folder structure like:
+
+nova-knowledge/
+  identity/
+    backstory.md
+  prompts/
+    system.txt
+  reference/
+    notes.json
+Each file would be stored with that full path intact. The directory structure isn't flattened — it's preserved in the filenames.
+
+You can verify by opening Nova's GPTCreator on the production site and scrolling to the knowledge files section — you should see the extracted files listed with their original paths from the zip.
+
+that isn't what I uploaded
+
+if i delete things in the ui will it delete from the supabase?
+
+Good question. Let me check what happens when you delete a knowledge file from the UI.
+
+No — deleting from the UI does not delete from Supabase. The remove button (handleRemoveFile) only removes the file from the local list in memory. It's just filtering it out of what you see on screen.
+
+The actual data in Supabase stays untouched. This is consistent with the project's data protection rule that vault_files records are never deleted, only updated.
+
+So feel free to clean things up in the UI without worrying about losing anything in Supabase.
+
+
+Scroll to latest
+
+Make, test, iterate…
