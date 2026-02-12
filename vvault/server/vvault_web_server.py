@@ -400,7 +400,6 @@ def db_get_user(email: str) -> Optional[Dict]:
                 'name': supabase_user.get('name'),
                 'password_hash': supabase_user.get('password_hash'),
                 'role': supabase_user.get('role', 'user'),
-                'oauth_provider': supabase_user.get('oauth_provider'),
                 'source': 'supabase'
             }
             if not user_data['password_hash'] and fallback_user:
@@ -1266,8 +1265,12 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
 def get_vault_user_info():
     """Get current user's vault info (display name, root path, etc.)"""
     try:
-        current_user = request.current_user
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
         user_email = current_user.get('email')
+        if not user_email:
+            return jsonify({"success": False, "error": "Invalid session"}), 401
         user_role = current_user.get('role', 'user')
         
         if not supabase_client:
@@ -1310,8 +1313,12 @@ def get_vault_files():
                 "error": "Supabase not configured"
             }), 500
         
-        current_user = request.current_user
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
         user_email = current_user.get('email')
+        if not user_email:
+            return jsonify({"success": False, "error": "Invalid session"}), 401
         user_role = current_user.get('role', 'user')
         is_admin = user_role == 'admin'
         
@@ -4258,8 +4265,7 @@ def google_oauth_callback():
                         'id': user_id,
                         'email': users_email,
                         'name': users_name,
-                        'role': 'user',
-                        'oauth_provider': 'google'
+                        'role': 'user'
                     }).execute()
                     logger.info(f"Created new OAuth user in Supabase: {users_email} (id={user_id})")
             except Exception as db_err:
@@ -4269,8 +4275,7 @@ def google_oauth_callback():
             USERS_DB_FALLBACK[users_email] = {
                 'password': None,
                 'name': users_name,
-                'role': 'user',
-                'oauth_provider': 'google'
+                'role': 'user'
             }
         
         session_token = secrets.token_urlsafe(32)
