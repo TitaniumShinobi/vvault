@@ -113,9 +113,21 @@ A 5-layer security system for sovereign construct identity preservation with a s
 - **Purpose**: VVAULT capsules serve as ground truth identity baselines for VXRunner (NovaRunner), a signal detection framework that detects unauthorized clones, derivatives, and replicants of AI constructs.
 - **Converter Module**: `vvault/server/vxrunner_baseline.py` transforms `.capsule` files into VXRunner's forensic baseline JSON format, extracting lexical, structural, tonal, and signature phrase features.
 
+### Frame Directory (`frame/`)
+- **bodilyfunctions/xx/**: Biological simulation layer (CNS, PNS, organs). `cns.py` is the central nervous system — standalone memory reflection + insight synthesis via OpenAI.
+- **neuralfunctions/**: Cognitive/emotional layer (emotions, dreams, sleep, personality islands).
+- **Terminal/memup/**: Memory infrastructure — `bank.py` (`UnifiedMemoryBank`), `multi_construct_bank.py`, `stm.py`, `ltm.py`, ChromaDB config, memory importers.
+- See `docs/architecture/FRAME_DIRECTORY.md` for full module listing.
+
+### Transcript Memory Fallback (Chatty Integration)
+- **Implemented in Chatty codebase**: When ChromaDB is unavailable, the system extracts relevant past exchanges from Supabase conversation transcripts using weighted keyword scoring.
+- **Keyword scoring**: Identity (+5), continuity (+4), emotional (+3), query-relevant (+3), topic (+1).
+- **Verified**: Katana correctly referenced specific past topics (11 memories from 122 messages).
+- See `docs/architecture/TRANSCRIPT_MEMORY_FALLBACK.md` for details.
+
 ### LLM Backend
 - **Ollama**: Utilizes `qwen2.5:0.5b` model.
-- **Identity Loading**: Constructs load system prompts from `instances/{construct_id}/identity/prompt.json`.
+- **Identity Loading**: Constructs load system prompts from `instances/{construct_id}/identity/prompt.txt` (primary) and `prompt.json` (structured alternative).
 
 ### Zero Trust Security
 - **Implementation**: Per-request authorization middleware, database-backed sessions, bcrypt password hashing, audit logging, Turnstile CAPTCHA, and multi-tenant vault files with Row Level Security (RLS).
@@ -133,3 +145,12 @@ IPFS, various Blockchain Networks (Ethereum, Bitcoin, Polygon, Arbitrum, Optimis
 
 ### Storage
 Local JSON-based capsule storage, JSON indexes, ChromaDB (vector database), SQLite (audit logs).
+
+## Architecture Documentation
+
+Detailed architecture docs are in `docs/architecture/`:
+- `FILE_ORGANIZATION.md` — Vault file system, storage_path convention, callsign enforcement
+- `CAPSULE_SYSTEM.md` — Capsule lifecycle, CapsuleForge schema, VVAULTCore storage, Supabase integration
+- `FRAME_DIRECTORY.md` — frame/ directory structure and module listing
+- `MEMORY_ORCHESTRATION_PLAN.md` — (PROPOSED) Target message flow, component roles, build phases
+- `TRANSCRIPT_MEMORY_FALLBACK.md` — Transcript-based memory extraction system (implemented in Chatty)
