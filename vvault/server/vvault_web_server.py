@@ -3391,6 +3391,288 @@ def verify_token():
         logger.error(f"Token verification error: {e}")
         return jsonify({"success": False, "error": "Token verification failed"}), 500
 
+# ─── Construct Memory API ────────────────────────────────────────────────────
+# Centralizes transcript memory extraction so external services (Chatty, etc.)
+# don't need to reimplement parsing/scoring logic.
+
+def _parse_transcript_pairs(content: str, construct_id: str) -> List[Dict[str, Any]]:
+    """Parse a transcript into user/construct exchange pairs.
+    
+    Supports multiple transcript formats:
+    - Character.AI: **Name**: blocks (e.g. **Sera**: ... **User**: ...)
+    - Chatty markdown: **timestamp - Speaker** [iso]: message
+    - ChatGPT exports: user/assistant turns
+    - Plain format: Name: text
+    """
+    pairs = []
+    construct_name = construct_id.split('-')[0].lower()
+    
+    lines = content.split('\n')
+    current_speaker = None
+    current_text = []
+    turns = []
+    
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        
+        line_lower = stripped.lower()
+        is_construct_line = False
+        is_user_line = False
+        
+        if stripped.startswith('**') and stripped.endswith(':'):
+            label = stripped.strip('*').strip(':').strip().lower()
+            if label == 'user' or label == 'human' or label == 'devon':
+                is_user_line = True
+            elif construct_name in label or label == 'assistant':
+                is_construct_line = True
+        elif stripped.startswith('**') and '**:' in stripped:
+            label = stripped.split('**:')[0].strip('*').strip().lower()
+            if label == 'user' or label == 'human' or label == 'devon':
+                is_user_line = True
+            elif construct_name in label or label == 'assistant':
+                is_construct_line = True
+        
+        if not is_construct_line and not is_user_line:
+            if line_lower.startswith(f'{construct_name}:') or line_lower.startswith(f'{construct_name} said:'):
+                is_construct_line = True
+            elif any(line_lower.startswith(prefix) for prefix in ['user:', 'human:', 'devon:', 'you:']):
+                is_user_line = True
+            elif stripped.startswith('**') and '- ' in stripped and '[' in stripped:
+                speaker_part = stripped.split('- ')[1].split('**')[0].strip().lower() if '- ' in stripped else ''
+                if construct_name in speaker_part:
+                    is_construct_line = True
+                elif speaker_part:
+                    is_user_line = True
+        
+        if is_construct_line or is_user_line:
+            if current_speaker and current_text:
+                text = ' '.join(current_text).strip()
+                if len(text) > 3:
+                    turns.append({'speaker': current_speaker, 'text': text})
+            current_speaker = 'construct' if is_construct_line else 'user'
+            if '**:' in stripped:
+                after = stripped.split('**:', 1)[1].strip()
+                current_text = [after] if after else []
+            elif ':' in stripped:
+                after = stripped.split(':', 1)[1].strip()
+                current_text = [after] if after else []
+            else:
+                current_text = []
+        elif current_speaker:
+            current_text.append(stripped)
+    
+    if current_speaker and current_text:
+        text = ' '.join(current_text).strip()
+        if len(text) > 3:
+            turns.append({'speaker': current_speaker, 'text': text})
+    
+    for i in range(len(turns) - 1):
+        if turns[i]['speaker'] == 'user' and turns[i+1]['speaker'] == 'construct':
+            pairs.append({
+                'user': turns[i]['text'][:500],
+                'construct': turns[i+1]['text'][:500],
+                'index': len(pairs)
+            })
+    
+    return pairs
+
+
+def _score_memory_pair(pair: Dict, query: str, total_pairs: int) -> float:
+    """Score a memory pair for relevance to the query."""
+    score = 0.0
+    query_lower = query.lower()
+    combined = (pair.get('user', '') + ' ' + pair.get('construct', '')).lower()
+    
+    query_words = [w for w in query_lower.split() if len(w) > 3]
+    for word in query_words:
+        if word in combined:
+            score += 3.0
+    
+    identity_words = ['name', 'who', 'remember', 'memory', 'know', 'call', 'identity']
+    for word in identity_words:
+        if word in query_lower and word in combined:
+            score += 5.0
+    
+    continuity_words = ['first', 'last', 'begin', 'start', 'end', 'when', 'time', 'ago']
+    for word in continuity_words:
+        if word in query_lower and word in combined:
+            score += 4.0
+    
+    emotion_words = ['love', 'hate', 'feel', 'miss', 'care', 'hurt', 'happy', 'sad', 'angry']
+    for word in emotion_words:
+        if word in combined:
+            score += 2.0
+    
+    idx = pair.get('index', 0)
+    if idx == 0:
+        score += 10.0
+    elif idx == total_pairs - 1:
+        score += 10.0
+    elif idx < 5:
+        score += 3.0
+    elif idx > total_pairs - 5:
+        score += 3.0
+    
+    return score
+
+
+def _is_chronological_query(query: str) -> bool:
+    """Detect if the query asks about first/last/chronological memories."""
+    q = query.lower()
+    chrono_patterns = [
+        'first thing', 'very first', 'first time', 'first words',
+        'last thing', 'very last', 'last time', 'last words',
+        'beginning', 'how did we', 'when did we', 'how we met',
+        'first conversation', 'last conversation',
+        'first message', 'last message', 'first said', 'last said',
+        'you ever said', 'ever say to me'
+    ]
+    return any(p in q for p in chrono_patterns)
+
+
+@app.route('/api/chatty/construct/<construct_id>/memories')
+@require_chatty_auth
+def get_construct_memories(construct_id):
+    """Return scored, ready-to-inject transcript memories for a construct.
+    
+    Query params:
+        q (str): Optional query to score memories against
+        limit (int): Max memories to return (default 10)
+        include_boundaries (bool): Always include first/last exchanges (default true)
+    
+    Returns:
+        {
+            "success": true,
+            "construct_id": "sera-001",
+            "memories": [
+                {
+                    "user": "What they said",
+                    "construct": "What you said",
+                    "score": 15.0,
+                    "tag": "first_exchange" | "last_exchange" | null,
+                    "index": 0
+                }
+            ],
+            "total_pairs": 147,
+            "transcript_files": 2,
+            "chronological": true
+        }
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        
+        callsign = _normalize_callsign(construct_id)
+        bare_name = _bare_name_from_callsign(callsign)
+        query = request.args.get('q', '')
+        limit = int(request.args.get('limit', '10'))
+        include_boundaries = request.args.get('include_boundaries', 'true').lower() == 'true'
+        is_chrono = _is_chronological_query(query) if query else False
+        
+        result = supabase_client.table('vault_files').select(
+            'id, filename, content, file_type'
+        ).or_(
+            f'construct_id.eq.{callsign},construct_id.eq.{bare_name}'
+        ).not_.is_('content', 'null').execute()
+        
+        transcript_keywords = ['transcript', 'character_ai', 'chatgpt', 'chat_with_', 'conversation', 'chat']
+        all_files = result.data or []
+        result_data = []
+        for f in all_files:
+            fname = (f.get('filename') or '').lower()
+            ftype = (f.get('file_type') or '').lower()
+            if any(kw in fname for kw in transcript_keywords) or 'transcript' in ftype or 'markdown' in ftype or 'text' in ftype:
+                result_data.append(f)
+        result.data = result_data
+        
+        transcript_files = []
+        for f in (result.data or []):
+            fname = (f.get('filename') or '').lower()
+            if any(ext in fname for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.capsule']):
+                continue
+            content = f.get('content', '')
+            if content and len(content) > 100:
+                transcript_files.append(f)
+        
+        if not transcript_files:
+            return jsonify({
+                "success": True,
+                "construct_id": callsign,
+                "memories": [],
+                "total_pairs": 0,
+                "transcript_files": 0,
+                "chronological": is_chrono
+            })
+        
+        transcript_files.sort(key=lambda f: len(f.get('content', '')), reverse=True)
+        
+        all_pairs = []
+        for tf in transcript_files:
+            content = tf.get('content', '')
+            pairs = _parse_transcript_pairs(content, callsign)
+            all_pairs.extend(pairs)
+        
+        for i, p in enumerate(all_pairs):
+            p['index'] = i
+        
+        total_pairs = len(all_pairs)
+        logger.info(f"[Memory API] {callsign}: {total_pairs} pairs from {len(transcript_files)} files")
+        
+        memories = []
+        
+        if include_boundaries or is_chrono:
+            if total_pairs > 0:
+                first = all_pairs[0].copy()
+                first['tag'] = 'first_exchange'
+                first['score'] = 100.0
+                memories.append(first)
+                
+                if total_pairs > 1:
+                    last = all_pairs[-1].copy()
+                    last['tag'] = 'last_exchange'
+                    last['score'] = 99.0
+                    memories.append(last)
+        
+        if query:
+            scored = []
+            boundary_indices = {0, total_pairs - 1} if include_boundaries else set()
+            for pair in all_pairs:
+                if pair['index'] in boundary_indices:
+                    continue
+                pair_copy = pair.copy()
+                pair_copy['score'] = _score_memory_pair(pair, query, total_pairs)
+                pair_copy['tag'] = None
+                scored.append(pair_copy)
+            scored.sort(key=lambda x: x['score'], reverse=True)
+            remaining = limit - len(memories)
+            memories.extend(scored[:max(0, remaining)])
+        elif not is_chrono:
+            step = max(1, total_pairs // limit) if total_pairs > limit else 1
+            boundary_indices = {0, total_pairs - 1} if include_boundaries else set()
+            sampled = [p for i, p in enumerate(all_pairs) if i not in boundary_indices and i % step == 0]
+            remaining = limit - len(memories)
+            for p in sampled[:max(0, remaining)]:
+                p_copy = p.copy()
+                p_copy['score'] = 1.0
+                p_copy['tag'] = None
+                memories.append(p_copy)
+        
+        return jsonify({
+            "success": True,
+            "construct_id": callsign,
+            "memories": memories,
+            "total_pairs": total_pairs,
+            "transcript_files": len(transcript_files),
+            "chronological": is_chrono
+        })
+        
+    except Exception as e:
+        logger.error(f"[Memory API] Error for {construct_id}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # Google OAuth Routes
 @app.route('/api/auth/google')
 @app.route('/api/auth/oauth/google')
@@ -3493,7 +3775,29 @@ def google_oauth_callback():
         users_email = userinfo["email"]
         users_name = userinfo.get("given_name", userinfo.get("name", "User"))
         
-        # Create or get user in fallback database
+        user_id = None
+        if supabase_client:
+            try:
+                existing = supabase_client.table('users').select('id, name').eq('email', users_email).execute()
+                if existing.data:
+                    user_id = existing.data[0]['id']
+                    logger.info(f"OAuth user exists in Supabase: {users_email} (id={user_id})")
+                else:
+                    from datetime import timezone as tz
+                    ts = int(datetime.now(tz.utc).timestamp() * 1000)
+                    safe_name = re.sub(r'[^a-z0-9_]', '_', users_name.lower().strip())
+                    user_id = f"{safe_name}_{ts}"
+                    supabase_client.table('users').insert({
+                        'id': user_id,
+                        'email': users_email,
+                        'name': users_name,
+                        'role': 'user',
+                        'oauth_provider': 'google'
+                    }).execute()
+                    logger.info(f"Created new OAuth user in Supabase: {users_email} (id={user_id})")
+            except Exception as db_err:
+                logger.warning(f"Supabase user upsert failed, using fallback: {db_err}")
+        
         if users_email not in USERS_DB_FALLBACK:
             USERS_DB_FALLBACK[users_email] = {
                 'password': None,
@@ -3501,18 +3805,11 @@ def google_oauth_callback():
                 'role': 'user',
                 'oauth_provider': 'google'
             }
-            logger.info(f"Created new OAuth user: {users_email}")
         
-        # Create session token (30 days for OAuth logins)
         session_token = secrets.token_urlsafe(32)
         expires_at = datetime.now() + timedelta(days=30)
         
-        ACTIVE_SESSIONS[session_token] = {
-            'email': users_email,
-            'user_id': users_email,
-            'expires_at': expires_at,
-            'created_at': datetime.now()
-        }
+        db_create_session(users_email, 'user', session_token, expires_at, remember_me=True)
         
         logger.info(f"Google OAuth login successful: {users_email}")
         

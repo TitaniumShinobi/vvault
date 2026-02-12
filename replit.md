@@ -83,6 +83,7 @@ A 5-layer security system for sovereign construct identity preservation with a s
   - `POST /api/chatty/transcript/<id>` — update transcript
   - `POST /api/chatty/transcript/<id>/message` — append message
   - `POST /api/chatty/message` — send message to construct (LLM inference)
+  - `GET /api/chatty/construct/<id>/memories?q=...&limit=10` — pre-processed, scored transcript memories with chronological boundary pairs (first/last exchanges always tagged). Centralizes memory extraction so Chatty doesn't reimplement parsing/scoring.
 - **Service API**: VVAULT serves as a config and credentials vault for external services.
 - **VXRunner Integration API**: VVAULT exposes capsule data as forensic DNA baselines for VXRunner's construct detection system.
 
