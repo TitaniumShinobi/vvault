@@ -4216,6 +4216,8 @@ def google_oauth_callback():
         base = f"{parsed.scheme}://{parsed.netloc}"
         authorization_response = f"{base}{request.full_path}"
         
+        oauth_origin_base = base
+        
         logger.info(f"Processing OAuth callback with redirect_url: {callback_url}")
         
         # Exchange authorization code for tokens
@@ -4286,10 +4288,7 @@ def google_oauth_callback():
         logger.info(f"Google OAuth login successful: {users_email}")
         
         from urllib.parse import quote
-        if OAUTH_BASE_URL:
-            frontend_url = OAUTH_BASE_URL
-        else:
-            frontend_url = f"https://{REPLIT_DEV_DOMAIN}"
+        frontend_url = oauth_origin_base
         encoded_email = quote(users_email, safe='')
         encoded_name = quote(users_name, safe='')
         redirect_url = f"{frontend_url}/?token={session_token}&email={encoded_email}&name={encoded_name}"
