@@ -4149,6 +4149,7 @@ def google_oauth_login():
             authorization_endpoint,
             redirect_uri=callback_url,
             scope=["openid", "email", "profile"],
+            prompt="select_account",
         )
         
         logger.info(f"Redirecting to Google OAuth with callback: {callback_url}")
