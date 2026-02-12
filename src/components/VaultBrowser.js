@@ -334,25 +334,52 @@ const VaultBrowser = ({ user }) => {
             const isActive = currentPath.length >= 2 && 
               currentPath[0] === 'instances' && currentPath[1] === construct.id;
             const isSyncing = syncingConstruct === construct.id;
+            const simDrivePath = ['instances', construct.id, 'simDrive'];
+            const isSimDriveActive = currentPath.length >= 3 &&
+              currentPath[0] === 'instances' && currentPath[1] === construct.id && currentPath[2] === 'simDrive';
             return (
-              <div key={idx} className={`sidebar-item construct-row ${isActive ? 'active' : ''}`}>
-                <div className="construct-nav"
-                  onClick={() => { setCurrentPath(constructPath); setSelectedFile(null); setFileContent(null); }}
-                >
-                  <span 
-                    className="construct-dot" 
-                    style={{ backgroundColor: construct.color }}
-                  ></span>
-                  <span className="sidebar-label">{construct.name}</span>
+              <div key={idx} className="construct-block">
+                <div className={`sidebar-item construct-row ${isActive ? 'active' : ''}`}>
+                  <div className="construct-nav"
+                    onClick={() => { setCurrentPath(constructPath); setSelectedFile(null); setFileContent(null); }}
+                  >
+                    <span 
+                      className="construct-dot" 
+                      style={{ backgroundColor: construct.color }}
+                    ></span>
+                    <span className="sidebar-label">{construct.name}</span>
+                  </div>
+                  <button
+                    className="sync-btn"
+                    title={`Sync ${construct.id} transcripts to memup capsule`}
+                    disabled={isSyncing}
+                    onClick={(e) => { e.stopPropagation(); triggerMemupSync(construct.id); }}
+                  >
+                    {isSyncing ? '...' : '⟳'}
+                  </button>
                 </div>
-                <button
-                  className="sync-btn"
-                  title={`Sync ${construct.id} transcripts to memup capsule`}
-                  disabled={isSyncing}
-                  onClick={(e) => { e.stopPropagation(); triggerMemupSync(construct.id); }}
-                >
-                  {isSyncing ? '...' : '⟳'}
-                </button>
+                {isActive && (
+                  <div className="construct-sublinks">
+                    <div
+                      className={`sublink ${isSimDriveActive ? 'active' : ''}`}
+                      onClick={() => { setCurrentPath(simDrivePath); setSelectedFile(null); setFileContent(null); }}
+                    >
+                      ◈ SimDrive
+                    </div>
+                    <div
+                      className={`sublink ${currentPath.join('/') === ['instances', construct.id, 'memup'].join('/') ? 'active' : ''}`}
+                      onClick={() => { setCurrentPath(['instances', construct.id, 'memup']); setSelectedFile(null); setFileContent(null); }}
+                    >
+                      ◈ Memup
+                    </div>
+                    <div
+                      className={`sublink ${currentPath.join('/') === ['instances', construct.id, 'identity'].join('/') ? 'active' : ''}`}
+                      onClick={() => { setCurrentPath(['instances', construct.id, 'identity']); setSelectedFile(null); setFileContent(null); }}
+                    >
+                      ◈ Identity
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}

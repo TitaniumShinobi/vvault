@@ -1227,6 +1227,9 @@ def map_to_vsi_folder(filename: str, construct_id: str = '', metadata: dict = No
             return f'instances/{construct_id}/config/{base}'
         if base == 'memory.json':
             return f'instances/{construct_id}/memup/{base}'
+        SIMDRIVE_PATTERNS = {'blueprint', 'overlay', 'hook', 'injection', 'cognitive_model', 'behavior_template'}
+        if any(pat in base.lower() for pat in SIMDRIVE_PATTERNS):
+            return f'instances/{construct_id}/simDrive/{base}'
         if ext in IMAGE_EXTS:
             return f'instances/{construct_id}/assets/{base}'
         if ext in DOC_EXTS:
@@ -1557,6 +1560,359 @@ def memup_status():
 
     except Exception as e:
         logger.error(f"MEMUP_STATUS_ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/vault/simdrive/list')
+@require_auth
+def simdrive_list():
+    """List all SimDrive files for a construct with classification metadata."""
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        construct_id = request.args.get('construct_id', '').strip()
+        if not construct_id:
+            return jsonify({"success": False, "error": "construct_id is required"}), 400
+
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        simdrive_path = f'instances/{construct_id}/simDrive/%'
+        result = supabase_client.table('vault_files').select(
+            'id, filename, file_type, sha256, metadata, created_at, updated_at'
+        ).eq('construct_id', construct_id).eq('user_id', user_id).ilike('filename', simdrive_path).execute()
+
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from simdrive_parser import SimDriveParser
+
+        parser = SimDriveParser(construct_id)
+        files = []
+        for row in (result.data or []):
+            classified = parser.classify_file(row.get('filename', ''))
+            files.append({
+                'id': row['id'],
+                'filename': row['filename'],
+                'simdrive_type': classified['simdrive_type'],
+                'description': classified['description'],
+                'sha256': row.get('sha256', ''),
+                'created_at': row.get('created_at', ''),
+                'updated_at': row.get('updated_at', ''),
+            })
+
+        manifest = parser.build_manifest(result.data or [])
+
+        return jsonify({
+            "success": True,
+            "construct_id": construct_id,
+            "files": files,
+            "total": len(files),
+            "type_distribution": manifest.get('type_distribution', {}),
+        })
+
+    except Exception as e:
+        logger.error(f"SIMDRIVE_LIST_ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/vault/simdrive/read')
+@require_auth
+def simdrive_read():
+    """Read a specific SimDrive file with parsed classification."""
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        file_id = request.args.get('file_id', '').strip()
+        construct_id = request.args.get('construct_id', '').strip()
+        if not file_id or not construct_id:
+            return jsonify({"success": False, "error": "file_id and construct_id are required"}), 400
+
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        result = supabase_client.table('vault_files').select(
+            'id, filename, content, file_type, sha256, metadata, created_at, updated_at'
+        ).eq('id', file_id).eq('construct_id', construct_id).eq('user_id', user_id).execute()
+
+        if not result.data:
+            return jsonify({"success": False, "error": "File not found"}), 404
+
+        row = result.data[0]
+        filename = row.get('filename', '')
+        if '/simDrive/' not in filename:
+            return jsonify({"success": False, "error": "File is not in simDrive folder"}), 403
+
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from simdrive_parser import SimDriveParser
+
+        parser = SimDriveParser(construct_id)
+        classified = parser.classify_file(filename, row.get('content', ''))
+
+        return jsonify({
+            "success": True,
+            "file": {
+                'id': row['id'],
+                'filename': filename,
+                'content': row.get('content', ''),
+                'simdrive_type': classified['simdrive_type'],
+                'description': classified['description'],
+                'version': classified['version'],
+                'targets': classified['targets'],
+                'parsed': classified['parsed'],
+                'parse_error': classified['parse_error'],
+                'sha256': row.get('sha256', ''),
+                'created_at': row.get('created_at', ''),
+                'updated_at': row.get('updated_at', ''),
+            },
+        })
+
+    except Exception as e:
+        logger.error(f"SIMDRIVE_READ_ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/vault/simdrive/write', methods=['POST'])
+@require_auth
+def simdrive_write():
+    """Write or update a SimDrive file for a construct."""
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        data = request.get_json(silent=True) or {}
+        construct_id = data.get('construct_id', '').strip()
+        filename = data.get('filename', '').strip()
+        content = data.get('content', '')
+
+        if not construct_id or not filename:
+            return jsonify({"success": False, "error": "construct_id and filename are required"}), 400
+
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        ok, err = _validate_vault_filename(filename)
+        if not ok:
+            return jsonify({"success": False, "error": err}), 400
+
+        vsi_path = f'instances/{construct_id}/simDrive/{filename}'
+
+        if '..' in vsi_path or '~' in vsi_path:
+            return jsonify({"success": False, "error": "Invalid path"}), 400
+
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from simdrive_parser import SimDriveParser
+
+        parser = SimDriveParser(construct_id)
+        classified = parser.classify_file(filename, content)
+
+        content_str = content if isinstance(content, str) else json.dumps(content, indent=2, default=str)
+        sha256 = hashlib.sha256(content_str.encode('utf-8')).hexdigest()
+        now = datetime.now(timezone.utc).isoformat()
+
+        meta = {
+            'construct_id': construct_id,
+            'provider': 'simdrive',
+            'folder': 'simDrive',
+            'simdrive_type': classified['simdrive_type'],
+            'version': classified['version'],
+        }
+
+        existing = supabase_client.table('vault_files').select('id').eq(
+            'construct_id', construct_id
+        ).eq('user_id', user_id).eq('filename', vsi_path).execute()
+
+        if existing.data:
+            supabase_client.table('vault_files').update({
+                'content': content_str,
+                'sha256': sha256,
+                'metadata': json.dumps(meta),
+                'updated_at': now,
+            }).eq('id', existing.data[0]['id']).execute()
+            action = 'updated'
+            file_id = existing.data[0]['id']
+        else:
+            record = {
+                'filename': vsi_path,
+                'file_type': 'simdrive',
+                'content': content_str,
+                'construct_id': construct_id,
+                'user_id': user_id,
+                'is_system': False,
+                'sha256': sha256,
+                'metadata': json.dumps(meta),
+                'storage_path': vsi_path,
+                'created_at': now,
+            }
+            ins_result = supabase_client.table('vault_files').insert(record).execute()
+            action = 'created'
+            file_id = ins_result.data[0]['id'] if ins_result.data else None
+
+        return jsonify({
+            "success": True,
+            "action": action,
+            "file_id": file_id,
+            "path": vsi_path,
+            "simdrive_type": classified['simdrive_type'],
+            "sha256": sha256,
+        })
+
+    except Exception as e:
+        logger.error(f"SIMDRIVE_WRITE_ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/vault/simdrive/inject', methods=['POST'])
+@require_auth
+def simdrive_inject():
+    """Inject memup capsule data into a construct's SimDrive as a continuity injection file.
+
+    Reads the construct's memup capsule, transforms it into SimDrive injection format,
+    and writes it to instances/{construct}/simDrive/continuity_injection.json.
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        data = request.get_json(silent=True) or {}
+        construct_id = data.get('construct_id', '').strip()
+        max_sessions = data.get('max_sessions', 50)
+
+        if not construct_id:
+            return jsonify({"success": False, "error": "construct_id is required"}), 400
+
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        capsule_path = f'instances/{construct_id}/memup/{construct_id}.capsule'
+        capsule_result = supabase_client.table('vault_files').select('content').eq(
+            'construct_id', construct_id
+        ).eq('user_id', user_id).eq('filename', capsule_path).execute()
+
+        if not capsule_result.data:
+            return jsonify({
+                "success": False,
+                "error": "No memup capsule found. Run memup sync first."
+            }), 404
+
+        capsule_content = capsule_result.data[0].get('content', '')
+        try:
+            capsule_data = json.loads(capsule_content) if capsule_content else {}
+        except (json.JSONDecodeError, TypeError):
+            return jsonify({"success": False, "error": "Capsule data is corrupted"}), 500
+
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from simdrive_parser import SimDriveParser
+
+        parser = SimDriveParser(construct_id)
+        injection = parser.capsule_to_injection(capsule_data, max_sessions=max_sessions)
+
+        validation = parser.validate_injection(injection)
+        if not validation['valid']:
+            return jsonify({
+                "success": False,
+                "error": "Generated injection failed validation",
+                "validation": validation,
+            }), 500
+
+        injection_str = json.dumps(injection, indent=2, default=str)
+        sha256 = hashlib.sha256(injection_str.encode('utf-8')).hexdigest()
+        now = datetime.now(timezone.utc).isoformat()
+        vsi_path = f'instances/{construct_id}/simDrive/continuity_injection.json'
+
+        meta = {
+            'construct_id': construct_id,
+            'provider': 'simdrive_inject',
+            'folder': 'simDrive',
+            'simdrive_type': 'injection',
+            'session_count': len(injection.get('sessions', [])),
+            'hook_count': len(injection.get('continuity_hooks', [])),
+            'injected_at': now,
+        }
+
+        existing = supabase_client.table('vault_files').select('id').eq(
+            'construct_id', construct_id
+        ).eq('user_id', user_id).eq('filename', vsi_path).execute()
+
+        if existing.data:
+            supabase_client.table('vault_files').update({
+                'content': injection_str,
+                'sha256': sha256,
+                'metadata': json.dumps(meta),
+                'updated_at': now,
+            }).eq('id', existing.data[0]['id']).execute()
+            action = 'updated'
+            file_id = existing.data[0]['id']
+        else:
+            record = {
+                'filename': vsi_path,
+                'file_type': 'simdrive',
+                'content': injection_str,
+                'construct_id': construct_id,
+                'user_id': user_id,
+                'is_system': False,
+                'sha256': sha256,
+                'metadata': json.dumps(meta),
+                'storage_path': vsi_path,
+                'created_at': now,
+            }
+            ins_result = supabase_client.table('vault_files').insert(record).execute()
+            action = 'created'
+            file_id = ins_result.data[0]['id'] if ins_result.data else None
+
+        logger.info(
+            f'SIMDRIVE_INJECT: {action} injection for {construct_id} — '
+            f'{validation["session_count"]} sessions, {validation["hook_count"]} hooks'
+        )
+
+        return jsonify({
+            "success": True,
+            "action": action,
+            "construct_id": construct_id,
+            "file_id": file_id,
+            "path": vsi_path,
+            "sha256": sha256,
+            "sessions_injected": validation['session_count'],
+            "hooks_injected": validation['hook_count'],
+            "validation": validation,
+        })
+
+    except Exception as e:
+        logger.error(f"SIMDRIVE_INJECT_ERROR: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -2663,6 +3019,28 @@ def create_construct():
                 'content': f"# {log_name.replace('.log', '').replace('_', ' ').title()} Log\n# Construct: {callsign}\n# Created: {now}\n",
                 'folder': 'logs',
             })
+
+        files_to_create.append({
+            'filename': 'manifest.json',
+            'file_type': 'simdrive',
+            'content': json.dumps({
+                'schema': 'simdrive_manifest',
+                'version': '1.0.0',
+                'construct_id': callsign,
+                'generated_at': now,
+                'total_files': 0,
+                'type_distribution': {},
+                'files': [],
+            }, indent=2),
+            'folder': 'simDrive',
+        })
+
+        files_to_create.append({
+            'filename': 'README.md',
+            'file_type': 'text',
+            'content': f"# Frame Directory — {callsign}\nCognitive and emotional layer modules.\nCreated: {now}\n",
+            'folder': 'frame',
+        })
 
         avatar_created = False
         if avatar_b64:

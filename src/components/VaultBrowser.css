@@ -117,6 +117,34 @@
   color: #f44336;
 }
 
+.construct-block {
+  margin-bottom: 2px;
+}
+
+.construct-sublinks {
+  padding-left: 36px;
+  padding-bottom: 4px;
+}
+
+.sublink {
+  font-size: 11px;
+  color: #777;
+  padding: 3px 8px;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.15s;
+}
+
+.sublink:hover {
+  color: #ccc;
+  background: #1a1a1a;
+}
+
+.sublink.active {
+  color: #4fc3f7;
+  background: #1a2a3a;
+}
+
 .vault-main {
   flex: 1;
   display: flex;
