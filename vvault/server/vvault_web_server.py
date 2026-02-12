@@ -25,6 +25,9 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import hashlib
 import threading
+import zipfile
+import io
+import mimetypes
 import time
 import secrets
 import jwt
@@ -61,6 +64,7 @@ PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.pat
 
 app = Flask(__name__, static_folder=DIST_DIR, static_url_path='')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'vvault-secret-key-change-in-production')
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 _cors_origins = ["http://localhost:7784", "http://localhost:5000", "https://vvault.thewreck.org"]
 _replit_domain = os.environ.get("REPLIT_DEV_DOMAIN") or os.environ.get("REPL_SLUG")
 if _replit_domain:
@@ -1463,6 +1467,247 @@ def get_knowledge_files():
         })
     except Exception as e:
         logger.error(f"Error fetching knowledge files for {request.args.get('construct_id')}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+KNOWLEDGE_SKIP_EXTS = {'.ds_store', '.thumbs.db', '.desktop.ini'}
+KNOWLEDGE_MAX_SINGLE_FILE = 50 * 1024 * 1024
+KNOWLEDGE_ALLOWED_EXTS = {
+    '.txt', '.md', '.pdf', '.doc', '.docx', '.json', '.csv',
+    '.xlsx', '.xls', '.pptx', '.ppt', '.rtf', '.html', '.htm',
+    '.xml', '.yaml', '.yml', '.log', '.capsule', '.py', '.js',
+    '.ts', '.sh', '.cfg', '.ini', '.toml', '.png', '.jpg',
+    '.jpeg', '.svg', '.gif', '.webp',
+}
+
+def _guess_file_type(filename):
+    ext = os.path.splitext(filename)[1].lower()
+    mime, _ = mimetypes.guess_type(filename)
+    if mime:
+        return mime
+    type_map = {
+        '.md': 'text/markdown', '.txt': 'text/plain', '.json': 'application/json',
+        '.pdf': 'application/pdf', '.csv': 'text/csv', '.capsule': 'application/json',
+        '.yaml': 'text/yaml', '.yml': 'text/yaml', '.log': 'text/plain',
+    }
+    return type_map.get(ext, 'application/octet-stream')
+
+BINARY_EXTS = {'.pdf', '.doc', '.docx', '.xlsx', '.xls', '.pptx', '.ppt',
+               '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.rtf', '.zip'}
+
+def _read_file_content(raw_bytes, filename):
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in BINARY_EXTS:
+        return base64.b64encode(raw_bytes).decode('ascii')
+    try:
+        return raw_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        return base64.b64encode(raw_bytes).decode('ascii')
+
+
+@app.route('/api/vault/knowledge-files/upload', methods=['POST'])
+@require_chatty_auth
+def upload_knowledge_files():
+    """Bulk upload knowledge files for a construct.
+
+    Accepts multipart/form-data with:
+      - construct_id (form field, required)
+      - files (one or more file fields)
+      - If a file is a .zip, it is extracted and each inner file is stored individually.
+
+    Each file is routed to its VSI folder via map_to_vsi_folder() and inserted
+    into Supabase vault_files. Existing files with the same path are updated
+    (upsert by filename + construct_id + user_id).
+
+    Returns summary with created/updated/skipped/failed counts.
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 503
+
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        construct_id = (request.form.get('construct_id') or '').strip()
+        if not construct_id:
+            return jsonify({"success": False, "error": "construct_id is required"}), 400
+
+        callsign = _normalize_callsign(construct_id)
+        uploaded_files = request.files.getlist('files')
+        if not uploaded_files or all(f.filename == '' for f in uploaded_files):
+            return jsonify({"success": False, "error": "No files provided"}), 400
+
+        file_entries = []
+
+        for upload in uploaded_files:
+            if not upload.filename:
+                continue
+            raw = upload.read()
+            fname_lower = upload.filename.lower()
+
+            if fname_lower.endswith('.zip'):
+                try:
+                    zf = zipfile.ZipFile(io.BytesIO(raw))
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        inner_name = info.filename
+                        basename = os.path.basename(inner_name)
+                        if not basename or basename.startswith('.'):
+                            continue
+                        ext = os.path.splitext(basename)[1].lower()
+                        if ext in KNOWLEDGE_SKIP_EXTS or ext not in KNOWLEDGE_ALLOWED_EXTS:
+                            continue
+                        if info.file_size > KNOWLEDGE_MAX_SINGLE_FILE:
+                            continue
+                        inner_bytes = zf.read(info.filename)
+                        subfolder = ''
+                        parts = inner_name.replace('\\', '/').split('/')
+                        if len(parts) > 1:
+                            subfolder = parts[-2]
+
+                        file_entries.append({
+                            'basename': basename,
+                            'subfolder': subfolder,
+                            'content': _read_file_content(inner_bytes, basename),
+                            'raw_sha256': hashlib.sha256(inner_bytes).hexdigest(),
+                            'file_type': _guess_file_type(basename),
+                            'size': info.file_size,
+                        })
+                    zf.close()
+                except zipfile.BadZipFile:
+                    return jsonify({"success": False, "error": f"Invalid zip file: {upload.filename}"}), 400
+            else:
+                basename = os.path.basename(upload.filename)
+                ext = os.path.splitext(basename)[1].lower()
+                if ext in KNOWLEDGE_SKIP_EXTS:
+                    continue
+                if ext not in KNOWLEDGE_ALLOWED_EXTS:
+                    continue
+                if len(raw) > KNOWLEDGE_MAX_SINGLE_FILE:
+                    continue
+
+                file_entries.append({
+                    'basename': basename,
+                    'subfolder': '',
+                    'content': _read_file_content(raw, basename),
+                    'raw_sha256': hashlib.sha256(raw).hexdigest(),
+                    'file_type': _guess_file_type(basename),
+                    'size': len(raw),
+                })
+
+        if not file_entries:
+            return jsonify({"success": False, "error": "No valid files found in upload"}), 400
+
+        now = datetime.now().isoformat()
+        created = 0
+        updated = 0
+        skipped = 0
+        failed = 0
+        failed_files = []
+
+        existing_result = supabase_client.table('vault_files').select(
+            'id, filename'
+        ).eq('construct_id', callsign).eq('user_id', user_id).execute()
+        existing_map = {}
+        for row in (existing_result.data or []):
+            existing_map[row['filename']] = row['id']
+
+        for entry in file_entries:
+            try:
+                metadata = {'folder': entry['subfolder']} if entry['subfolder'] else {}
+                vsi_path = map_to_vsi_folder(entry['basename'], callsign, metadata if metadata.get('folder') else None)
+
+                sha = entry.get('raw_sha256', hashlib.sha256(
+                    entry['content'].encode('utf-8') if isinstance(entry['content'], str) else entry['content']
+                ).hexdigest())
+
+                vsi_folder = vsi_path.rsplit('/', 1)[0].rsplit('/', 1)[-1] if '/' in vsi_path else ''
+                meta_json = json.dumps({
+                    'folder': entry['subfolder'] or vsi_folder,
+                    'original_size': entry['size'],
+                    'upload_batch': now,
+                })
+
+                record = {
+                    'filename': vsi_path,
+                    'storage_path': vsi_path,
+                    'file_type': entry['file_type'],
+                    'content': entry['content'],
+                    'construct_id': callsign,
+                    'user_id': user_id,
+                    'is_system': False,
+                    'sha256': sha,
+                    'metadata': meta_json,
+                    'updated_at': now,
+                }
+
+                if vsi_path in existing_map:
+                    file_id = existing_map[vsi_path]
+                    supabase_client.table('vault_files').update(record).eq('id', file_id).execute()
+                    updated += 1
+                else:
+                    record['created_at'] = now
+                    supabase_client.table('vault_files').insert(record).execute()
+                    existing_map[vsi_path] = True
+                    created += 1
+            except Exception as fe:
+                failed += 1
+                failed_files.append({'file': entry['basename'], 'error': str(fe)})
+                logger.error(f"KNOWLEDGE_UPLOAD: Failed to save {entry['basename']}: {fe}")
+
+        logger.info(f"KNOWLEDGE_UPLOAD: construct={callsign} user={user_email} created={created} updated={updated} skipped={skipped} failed={failed} total={len(file_entries)}")
+
+        return jsonify({
+            "success": True,
+            "construct_id": callsign,
+            "total_files": len(file_entries),
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+            "failed": failed,
+            "failed_files": failed_files if failed_files else None,
+            "message": f"Uploaded {created + updated} files ({created} new, {updated} updated)" + (f", {failed} failed" if failed else "")
+        })
+
+    except Exception as e:
+        logger.error(f"KNOWLEDGE_UPLOAD: Error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/vault/knowledge-files/<file_id>', methods=['DELETE'])
+@require_chatty_auth
+def delete_knowledge_file(file_id):
+    """Delete a single knowledge file by ID (user-scoped)."""
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 503
+
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        existing = supabase_client.table('vault_files').select('id, filename').eq('id', file_id).eq('user_id', user_id).execute()
+        if not existing.data:
+            return jsonify({"success": False, "error": "File not found or access denied"}), 404
+
+        supabase_client.table('vault_files').delete().eq('id', file_id).eq('user_id', user_id).execute()
+        logger.info(f"KNOWLEDGE_DELETE: file_id={file_id} user={user_email} filename={existing.data[0].get('filename')}")
+
+        return jsonify({"success": True, "message": "File deleted", "file_id": file_id})
+    except Exception as e:
+        logger.error(f"KNOWLEDGE_DELETE: Error deleting file {file_id}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 

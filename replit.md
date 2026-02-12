@@ -66,6 +66,8 @@ A 5-layer system for sovereign construct identity preservation with a specific b
 - **VSI Folder Structure**: `instances/{construct}/{identity,config,chatty,chatgpt,logs,assets,documents,memup}/`, `library/{assets,documents}/`, `account/`, `system/`.
 - **Smart Routing**: `map_to_vsi_folder()` automatically routes files to the correct VSI subfolder based on filename, extension, and metadata.
 - **Knowledge Files API**: `GET /api/vault/knowledge-files?construct_id=X` returns scoped files from documents, identity, config, and chatty folders only (user-scoped, no cross-tenant access).
+- **Knowledge Files Upload**: `POST /api/vault/knowledge-files/upload` accepts multipart/form-data with construct_id and files (including .zip). Zip files are extracted server-side, each file routed to VSI folder. Upserts by filename+construct+user. Max 500MB upload, 50MB per file. Binary files (PDF, images) stored as base64. SHA-256 computed from raw bytes.
+- **Knowledge File Delete**: `DELETE /api/vault/knowledge-files/<file_id>` removes a single file (user-scoped).
 - **Scaffold Error Tracking**: Construct creation tracks individual insert failures and surfaces them in the API response via `failed_files` field.
 
 ### Construct File Structure
