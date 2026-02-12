@@ -1214,13 +1214,15 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
         filename = f.get('filename') or 'unknown'
         construct_id = f.get('construct_id') or ''
         
-        metadata = file_copy.get('metadata', {})
+        metadata = file_copy.get('metadata') or {}
         if isinstance(metadata, str):
             try:
                 metadata = json.loads(metadata)
             except:
                 metadata = {}
-            file_copy['metadata'] = metadata
+        if not isinstance(metadata, dict):
+            metadata = {}
+        file_copy['metadata'] = metadata
         
         folder = metadata.get('folder', '')
         
