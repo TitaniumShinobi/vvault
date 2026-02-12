@@ -69,11 +69,8 @@ module.exports = {
       {
         context: ['/api'],
         target: 'http://localhost:8000',
-        changeOrigin: true,
+        changeOrigin: false,
         secure: false,
-        headers: {
-          'X-Forwarded-Host': 'localhost'
-        }
       }
     ],
     client: {
