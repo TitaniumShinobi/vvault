@@ -1,0 +1,53 @@
+Event: TRADE_OPENED
+Symbol: GBP_USD
+Time: 2026-02-12 02:25:02 AM EST
+
+Direction: BUY
+Units: 884948
+Entry Price: 1.36291
+Stop Loss: 1.36130
+Take Profit: 1.36773
+Style: DAY
+
+FXShinobi Trading Engine
+
+A live trade just fired. Let me pull the logs to see the full entry forensics.
+
+Two urgent issues spotted — the pyramid is spamming failed orders every 15 seconds. The root cause: OANDA rejects take_profit=0 as an invalid price. We're passing 0 but need None to omit the TP entirely. And since the order fails, pyramids_placed never increments, so it retries infinitely.
+
+Let me fix this immediately.
+
+I see the issue. Line 347 shows take_profit is not None — but we're passing 0 (which is not None), so it sends "price": "0" to OANDA which is invalid. The fix: pass None instead of 0 in the pyramid order call. Also need to prevent the infinite retry loop.
+
+Now I also need to prevent the infinite retry — when the pyramid order fails, it should still mark it as attempted so it doesn't keep trying every 15 seconds. Let me add that:
+
+that was two hours ago. its 4:30am
+
+I see the problem — the pyramid system has been spamming failed orders for hours because of two bugs: passing 0 instead of None for take profit (OANDA rejects price "0"), and not marking failed attempts so it retried infinitely. Both are already fixed. Let me restart immediately to stop the spam.
+
+VVAULT is temporarily unavailable — that's external. Let me retry the restart.
+
+VVAULT is still down. Let me retry once more — these external services sometimes take a moment.
+
+VVAULT is still returning 503. Both fixes are saved and ready — the moment VVAULT comes back, the system will restart cleanly with the corrected pyramid logic.
+
+Here's the situation:
+
+The pyramid spam is fixed — two bugs patched:
+
+Changed take_profit=0 to take_profit=None so OANDA won't reject the order
+Failed pyramid attempts now get marked as "attempted" so they never retry in an infinite loop
+VVAULT (your external config vault) is currently down — returning 503. That's why the system can't restart right now. This is outside our control.
+
+Your existing trades are still live on OANDA — the positions themselves are broker-side, so your GBP_USD BUY and any EUR_USD trade are unaffected by the system being down. Their stop losses are set server-side at OANDA.
+
+Once VVAULT comes back online, the system will start up cleanly with the fixed pyramid logic. Want me to keep trying to restart, or would you prefer to check back after some rest?
+
+That's an accurate recap. Let me check if VVAULT is back up now.
+
+VVAULT is still down (503). Your recap is spot-on — execution plumbing, not trading logic. The fixes are committed and will activate the moment VVAULT comes back and the system restarts.
+
+Your open positions are safe — SL lives on OANDA's servers regardless of whether FXShinobi is running.
+
+When you're ready to bring it back up, just let me know and I'll try the restart again.
+
