@@ -46,6 +46,7 @@ _server_dir = os.path.dirname(os.path.abspath(__file__))
 if _server_dir not in sys.path:
     sys.path.insert(0, _server_dir)
 from vxrunner_baseline import convert_capsule_to_baseline
+from continuity_parser import ContinuityParser
 
 # Configure logging
 logging.basicConfig(
@@ -3606,6 +3607,63 @@ def _detect_tone(text: str) -> str:
     return best
 
 
+def _enrich_memory_from_ledger(memory: Dict, ledger_sessions: List[Dict]) -> None:
+    """Enrich a memory with session context from the ContinuityGPT ledger.
+    
+    Matches memory text against ledger session first/last exchanges to find
+    the originating session, then adds continuity hooks and session metadata.
+    """
+    mem_user = memory.get('user', '').lower()[:100]
+    mem_construct = memory.get('construct', '').lower()[:100]
+    best_session = None
+    best_overlap = 0
+
+    for session in ledger_sessions:
+        first_ex = session.get('first_exchange', {})
+        last_ex = session.get('last_exchange', {})
+        for ex in [first_ex, last_ex]:
+            ex_user = ex.get('user', '').lower()[:100]
+            ex_construct = ex.get('construct', '').lower()[:100]
+            overlap = 0
+            if ex_user and mem_user:
+                user_words = set(mem_user.split())
+                ex_words = set(ex_user.split())
+                if user_words and ex_words:
+                    overlap = len(user_words & ex_words) / max(len(user_words), 1)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_session = session
+
+    if not best_session and ledger_sessions:
+        source = memory.get('source', '')
+        for session in ledger_sessions:
+            if session.get('source', '') == source:
+                best_session = session
+                break
+        if not best_session:
+            best_session = ledger_sessions[-1]
+
+    if best_session:
+        memory['session_context'] = {
+            'session_id': best_session.get('session_id', ''),
+            'estimated_date': best_session.get('estimated_date', ''),
+            'date_confidence': best_session.get('date_confidence', 0),
+            'vibe': best_session.get('vibe', 'neutral'),
+            'topics': best_session.get('topics', []),
+            'position': best_session.get('position', 'unknown'),
+        }
+        session_hooks = best_session.get('continuity_hooks', [])
+        if session_hooks:
+            memory['continuity_hooks'] = session_hooks[:3]
+        
+        date = best_session.get('estimated_date', '')
+        source = memory.get('source', best_session.get('source', 'Conversation'))
+        vibe = best_session.get('vibe', '')
+        vibe_desc = f' ({vibe} tone)' if vibe and vibe != 'neutral' else ''
+        if date and date != '2025-01-01':
+            memory['context_hint'] = f'From a {source} conversation around {date}{vibe_desc}'
+
+
 @app.route('/api/chatty/construct/<construct_id>/memories')
 @require_chatty_auth
 def get_construct_memories(construct_id):
@@ -3654,29 +3712,20 @@ def get_construct_memories(construct_id):
         
         query_terms = _clean_query(query) if query else []
         
-        result = supabase_client.table('vault_files').select(
-            'id, filename, content, file_type'
-        ).or_(
-            f'construct_id.eq.{callsign},construct_id.eq.{bare_name}'
-        ).not_.is_('content', 'null').execute()
+        ledger_sessions = None
+        try:
+            ledger_result = supabase_client.table('vault_files').select(
+                'content'
+            ).eq('filename', f'{callsign}_continuity_ledger.json').eq(
+                'construct_id', callsign
+            ).execute()
+            if ledger_result.data and ledger_result.data[0].get('content'):
+                ledger_sessions = json.loads(ledger_result.data[0]['content'])
+                logger.info(f"[Memory API] Using stored ledger for {callsign}: {len(ledger_sessions)} sessions")
+        except Exception as ledger_err:
+            logger.debug(f"[Memory API] No ledger available for {callsign}, using raw transcripts: {ledger_err}")
         
-        transcript_keywords = ['transcript', 'character_ai', 'chatgpt', 'chat_with_', 'conversation', 'chat']
-        all_files = result.data or []
-        result_data = []
-        for f in all_files:
-            fname = (f.get('filename') or '').lower()
-            ftype = (f.get('file_type') or '').lower()
-            if any(kw in fname for kw in transcript_keywords) or 'transcript' in ftype or 'markdown' in ftype or 'text' in ftype:
-                result_data.append(f)
-        
-        transcript_files = []
-        for f in result_data:
-            fname = (f.get('filename') or '').lower()
-            if any(ext in fname for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.capsule']):
-                continue
-            content = f.get('content', '')
-            if content and len(content) > 100:
-                transcript_files.append(f)
+        transcript_files = _get_transcript_files(callsign, bare_name)
         
         if not transcript_files:
             return jsonify({
@@ -3792,25 +3841,284 @@ def get_construct_memories(construct_id):
                     mem['context_hint'] = f'From a {source} conversation'
                 
                 mem.pop('file_index', None)
+                
+                if ledger_sessions:
+                    _enrich_memory_from_ledger(mem, ledger_sessions)
         else:
             for mem in memories:
                 mem.pop('file_index', None)
                 mem.pop('source', None)
         
-        return jsonify({
+        response_data = {
             "success": True,
             "construct_id": callsign,
             "memories": memories,
             "total_pairs": total_pairs,
             "transcript_files": total_files,
             "chronological": is_chrono,
-            "query_terms": query_terms
-        })
+            "query_terms": query_terms,
+            "ledger_available": ledger_sessions is not None,
+        }
+        
+        if ledger_sessions and output_format == 'rich':
+            all_hooks = []
+            seen_hook_types = set()
+            for session in ledger_sessions:
+                for hook in session.get('continuity_hooks', []):
+                    if hook.get('type') not in seen_hook_types:
+                        all_hooks.append(hook)
+                        seen_hook_types.add(hook.get('type'))
+            response_data['continuity_hooks'] = all_hooks[:10]
+            
+            dates = [s.get('estimated_date', '') for s in ledger_sessions if s.get('estimated_date')]
+            if dates:
+                response_data['date_range'] = {'earliest': min(dates), 'latest': max(dates)}
+        
+        return jsonify(response_data)
         
     except Exception as e:
         logger.error(f"[Memory API] Error for {construct_id}: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ─── Continuity Ledger API ───────────────────────────────────────────────────
+
+def _get_transcript_files(callsign: str, bare_name: str) -> List[Dict]:
+    """Fetch transcript files from Supabase for a construct. Shared helper."""
+    result = supabase_client.table('vault_files').select(
+        'id, filename, content, file_type'
+    ).or_(
+        f'construct_id.eq.{callsign},construct_id.eq.{bare_name}'
+    ).not_.is_('content', 'null').execute()
+
+    transcript_keywords = ['transcript', 'character_ai', 'chatgpt', 'chat_with_', 'conversation', 'chat']
+    candidates = []
+    for f in (result.data or []):
+        fname = (f.get('filename') or '').lower()
+        ftype = (f.get('file_type') or '').lower()
+        if any(kw in fname for kw in transcript_keywords) or 'transcript' in ftype or 'markdown' in ftype or 'text' in ftype:
+            if not any(ext in fname for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.capsule']):
+                content = f.get('content', '')
+                if content and len(content) > 100:
+                    candidates.append(f)
+    return candidates
+
+
+@app.route('/api/chatty/construct/<construct_id>/ledger/generate', methods=['POST'])
+@require_chatty_auth
+def generate_construct_ledger(construct_id):
+    """Generate a ContinuityGPT-style Continuity Ledger for a construct.
+    
+    Processes all transcript files into structured session entries with
+    chronological ordering, topic extraction, vibe detection, and
+    continuity hooks. Stores the ledger in Supabase vault_files.
+    
+    Query params:
+        include_exchanges (bool): Include full exchange arrays (default false)
+        format (str): 'json' or 'markdown' (default 'json')
+    
+    Returns:
+        {
+            "success": true,
+            "construct_id": "sera-001",
+            "sessions": [...],
+            "total_sessions": 5,
+            "total_exchanges": 340,
+            "date_range": {"earliest": "2025-02-14", "latest": "2025-11-20"}
+        }
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        callsign = _normalize_callsign(construct_id)
+        bare_name = _bare_name_from_callsign(callsign)
+        include_exchanges = request.args.get('include_exchanges', 'false').lower() == 'true'
+        output_format = request.args.get('format', 'json')
+
+        transcript_files = _get_transcript_files(callsign, bare_name)
+        if not transcript_files:
+            return jsonify({
+                "success": True,
+                "construct_id": callsign,
+                "sessions": [],
+                "total_sessions": 0,
+                "total_exchanges": 0,
+                "message": "No transcript files found"
+            })
+
+        parser = ContinuityParser(callsign)
+        entries = parser.process_all_transcripts(transcript_files)
+
+        if not entries:
+            return jsonify({
+                "success": True,
+                "construct_id": callsign,
+                "sessions": [],
+                "total_sessions": 0,
+                "total_exchanges": 0,
+                "message": "No parseable exchanges found in transcripts"
+            })
+
+        total_exchanges = sum(e.get('exchange_count', 0) for e in entries)
+        dates = [e['estimated_date'] for e in entries]
+
+        if output_format == 'markdown':
+            ledger_md = parser.generate_ledger_markdown(entries)
+            ledger_filename = f'{callsign}_continuity_ledger.md'
+            try:
+                existing = supabase_client.table('vault_files').select('id').eq(
+                    'filename', ledger_filename
+                ).eq('construct_id', callsign).execute()
+                ledger_record = {
+                    'filename': ledger_filename,
+                    'content': ledger_md,
+                    'file_type': 'ledger',
+                    'construct_id': callsign,
+                    'metadata': json.dumps({
+                        'type': 'continuity_ledger',
+                        'format': 'markdown',
+                        'total_sessions': len(entries),
+                        'total_exchanges': total_exchanges,
+                        'generated_at': datetime.utcnow().isoformat() + 'Z',
+                    })
+                }
+                if existing.data:
+                    supabase_client.table('vault_files').update(ledger_record).eq(
+                        'id', existing.data[0]['id']
+                    ).execute()
+                else:
+                    supabase_client.table('vault_files').insert(ledger_record).execute()
+                logger.info(f"[Ledger] Stored markdown ledger for {callsign}: {len(entries)} sessions")
+            except Exception as store_err:
+                logger.warning(f"[Ledger] Failed to store markdown ledger: {store_err}")
+
+            return jsonify({
+                "success": True,
+                "construct_id": callsign,
+                "format": "markdown",
+                "ledger": ledger_md,
+                "total_sessions": len(entries),
+                "total_exchanges": total_exchanges,
+                "date_range": {"earliest": min(dates), "latest": max(dates)},
+            })
+
+        ledger_json = parser.generate_ledger_json(entries, include_exchanges=include_exchanges)
+
+        ledger_filename = f'{callsign}_continuity_ledger.json'
+        try:
+            existing = supabase_client.table('vault_files').select('id').eq(
+                'filename', ledger_filename
+            ).eq('construct_id', callsign).execute()
+            ledger_record = {
+                'filename': ledger_filename,
+                'content': json.dumps(ledger_json),
+                'file_type': 'ledger',
+                'construct_id': callsign,
+                'metadata': json.dumps({
+                    'type': 'continuity_ledger',
+                    'format': 'json',
+                    'total_sessions': len(entries),
+                    'total_exchanges': total_exchanges,
+                    'generated_at': datetime.utcnow().isoformat() + 'Z',
+                })
+            }
+            if existing.data:
+                supabase_client.table('vault_files').update(ledger_record).eq(
+                    'id', existing.data[0]['id']
+                ).execute()
+            else:
+                supabase_client.table('vault_files').insert(ledger_record).execute()
+            logger.info(f"[Ledger] Stored JSON ledger for {callsign}: {len(entries)} sessions")
+        except Exception as store_err:
+            logger.warning(f"[Ledger] Failed to store JSON ledger: {store_err}")
+
+        return jsonify({
+            "success": True,
+            "construct_id": callsign,
+            "sessions": ledger_json,
+            "total_sessions": len(entries),
+            "total_exchanges": total_exchanges,
+            "date_range": {"earliest": min(dates), "latest": max(dates)},
+        })
+
+    except Exception as e:
+        logger.error(f"[Ledger] Error generating ledger for {construct_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/chatty/construct/<construct_id>/ledger')
+@require_chatty_auth
+def get_construct_ledger(construct_id):
+    """Retrieve a previously generated Continuity Ledger for a construct.
+    
+    Returns the stored ledger without re-processing transcripts.
+    If no ledger exists, returns empty with a hint to generate one.
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        callsign = _normalize_callsign(construct_id)
+        output_format = request.args.get('format', 'json')
+
+        if output_format == 'markdown':
+            ledger_filename = f'{callsign}_continuity_ledger.md'
+        else:
+            ledger_filename = f'{callsign}_continuity_ledger.json'
+
+        result = supabase_client.table('vault_files').select(
+            'content, metadata'
+        ).eq('filename', ledger_filename).eq('construct_id', callsign).execute()
+
+        if not result.data:
+            return jsonify({
+                "success": True,
+                "construct_id": callsign,
+                "ledger_exists": False,
+                "message": f"No ledger found. POST to /api/chatty/construct/{callsign}/ledger/generate to create one.",
+                "sessions": [],
+            })
+
+        content = result.data[0].get('content', '')
+        metadata = result.data[0].get('metadata', '{}')
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except:
+                metadata = {}
+
+        if output_format == 'json' and content:
+            try:
+                sessions = json.loads(content)
+            except:
+                sessions = []
+            return jsonify({
+                "success": True,
+                "construct_id": callsign,
+                "ledger_exists": True,
+                "sessions": sessions,
+                "total_sessions": metadata.get('total_sessions', len(sessions)),
+                "total_exchanges": metadata.get('total_exchanges', 0),
+                "generated_at": metadata.get('generated_at', ''),
+            })
+        else:
+            return jsonify({
+                "success": True,
+                "construct_id": callsign,
+                "ledger_exists": True,
+                "format": "markdown",
+                "ledger": content,
+                "total_sessions": metadata.get('total_sessions', 0),
+                "generated_at": metadata.get('generated_at', ''),
+            })
+
+    except Exception as e:
+        logger.error(f"[Ledger] Error retrieving ledger for {construct_id}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
