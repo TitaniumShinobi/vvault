@@ -4136,12 +4136,16 @@ def google_oauth_login():
         google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
         authorization_endpoint = google_provider_cfg["authorization_endpoint"]
         
-        if OAUTH_BASE_URL:
+        host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
+        is_replit_preview = host and 'replit.dev' in host
+        
+        if is_replit_preview:
+            callback_url = f"https://{host}/api/auth/oauth/google/callback"
+        elif OAUTH_BASE_URL:
             callback_url = f"{OAUTH_BASE_URL}/api/auth/google/callback"
         elif REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
-            callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/google/callback"
+            callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/oauth/google/callback"
         else:
-            host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
             callback_url = f"https://{host}/api/auth/google/callback"
         
         # Prepare the OAuth request
@@ -4181,14 +4185,22 @@ def google_oauth_callback():
         google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
         token_endpoint = google_provider_cfg["token_endpoint"]
         
-        if OAUTH_BASE_URL:
+        host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
+        is_replit_preview = host and 'replit.dev' in host
+        
+        if is_replit_preview:
+            base = f"https://{host}"
+            callback_path = "/api/auth/oauth/google/callback"
+        elif OAUTH_BASE_URL:
             base = OAUTH_BASE_URL
+            callback_path = "/api/auth/google/callback"
         elif REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
             base = f"https://{REPLIT_DEV_DOMAIN}"
+            callback_path = "/api/auth/oauth/google/callback"
         else:
-            host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
             base = f"https://{host}"
-        callback_url = f"{base}/api/auth/google/callback"
+            callback_path = "/api/auth/google/callback"
+        callback_url = f"{base}{callback_path}"
         authorization_response = f"{base}{request.full_path}"
         
         logger.info(f"Processing OAuth callback with redirect_url: {callback_url}")
