@@ -4136,17 +4136,23 @@ def google_oauth_login():
         google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
         authorization_endpoint = google_provider_cfg["authorization_endpoint"]
         
-        host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
-        is_replit_preview = host and 'replit.dev' in host
+        origin = request.headers.get('Origin', '')
+        referer = request.headers.get('Referer', '')
+        fwd_host = request.headers.get('X-Forwarded-Host', '')
+        req_host = request.headers.get('Host', request.host)
+        logger.info(f"OAuth login headers - Origin: {origin}, Referer: {referer}, X-Forwarded-Host: {fwd_host}, Host: {req_host}")
         
-        if is_replit_preview:
-            callback_url = f"https://{host}/api/auth/oauth/google/callback"
+        is_replit = 'replit.dev' in origin or 'replit.dev' in referer or 'replit.dev' in fwd_host or 'replit.dev' in req_host
+        
+        if is_replit and REPLIT_DEV_DOMAIN:
+            callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/oauth/google/callback"
         elif OAUTH_BASE_URL:
             callback_url = f"{OAUTH_BASE_URL}/api/auth/google/callback"
-        elif REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
-            callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/oauth/google/callback"
         else:
-            callback_url = f"https://{host}/api/auth/google/callback"
+            callback_url = f"https://{req_host}/api/auth/google/callback"
+        
+        from flask import session as flask_session
+        flask_session['oauth_callback_url'] = callback_url
         
         # Prepare the OAuth request
         request_uri = google_client.prepare_request_uri(
@@ -4185,22 +4191,22 @@ def google_oauth_callback():
         google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
         token_endpoint = google_provider_cfg["token_endpoint"]
         
-        host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
-        is_replit_preview = host and 'replit.dev' in host
+        from flask import session as flask_session
+        stored_callback = flask_session.pop('oauth_callback_url', None)
         
-        if is_replit_preview:
-            base = f"https://{host}"
-            callback_path = "/api/auth/oauth/google/callback"
+        if stored_callback:
+            callback_url = stored_callback
+        elif '/api/auth/oauth/google/callback' in request.path and REPLIT_DEV_DOMAIN:
+            callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/oauth/google/callback"
         elif OAUTH_BASE_URL:
-            base = OAUTH_BASE_URL
-            callback_path = "/api/auth/google/callback"
-        elif REPLIT_DEV_DOMAIN and 'replit.dev' in REPLIT_DEV_DOMAIN:
-            base = f"https://{REPLIT_DEV_DOMAIN}"
-            callback_path = "/api/auth/oauth/google/callback"
+            callback_url = f"{OAUTH_BASE_URL}/api/auth/google/callback"
         else:
-            base = f"https://{host}"
-            callback_path = "/api/auth/google/callback"
-        callback_url = f"{base}{callback_path}"
+            host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
+            callback_url = f"https://{host}/api/auth/google/callback"
+        
+        from urllib.parse import urlparse
+        parsed = urlparse(callback_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
         authorization_response = f"{base}{request.full_path}"
         
         logger.info(f"Processing OAuth callback with redirect_url: {callback_url}")
