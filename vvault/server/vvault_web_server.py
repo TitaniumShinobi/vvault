@@ -2619,6 +2619,7 @@ def create_construct():
         glyph_sha = hashlib.sha256(glyph_bytes).hexdigest()
 
         created_files = []
+        failed_files = []
         for file_def in files_to_create:
             ok, err = _validate_vault_filename(file_def['filename'])
             if not ok:
@@ -2645,16 +2646,23 @@ def create_construct():
                 'storage_path': vsi_path,
                 'created_at': now,
             }
-            insert_result = supabase_client.table('vault_files').insert(record).execute()
-            if insert_result.data:
-                created_files.append({
-                    'id': insert_result.data[0]['id'],
-                    'filename': vsi_path,
-                    'file_type': file_def['file_type'],
-                    'folder': folder,
-                })
-            else:
-                logger.error(f"Scaffold insert failed for {vsi_path}: no data returned")
+            try:
+                insert_result = supabase_client.table('vault_files').insert(record).execute()
+                if insert_result.data:
+                    created_files.append({
+                        'id': insert_result.data[0]['id'],
+                        'filename': vsi_path,
+                        'file_type': file_def['file_type'],
+                        'folder': folder,
+                    })
+                else:
+                    err_msg = f"No data returned for {vsi_path}"
+                    logger.error(f"SCAFFOLD_INSERT_FAIL: {err_msg}")
+                    failed_files.append({'filename': vsi_path, 'error': err_msg})
+            except Exception as insert_err:
+                err_msg = str(insert_err)
+                logger.error(f"SCAFFOLD_INSERT_FAIL: {vsi_path} -> {err_msg}")
+                failed_files.append({'filename': vsi_path, 'error': err_msg})
 
         import base64 as b64mod
         glyph_b64 = b64mod.b64encode(glyph_bytes).decode('utf-8')
@@ -2692,10 +2700,13 @@ def create_construct():
         else:
             logger.warning(f"Glyph insert returned no data for {callsign}")
 
-        logger.info(f"CONSTRUCT_CREATED: callsign={callsign} name={name} files={len(created_files)} user={user_email}")
+        if failed_files:
+            logger.error(f"SCAFFOLD_PARTIAL_FAIL: callsign={callsign} created={len(created_files)} failed={len(failed_files)} user={user_email}")
+        else:
+            logger.info(f"CONSTRUCT_CREATED: callsign={callsign} name={name} files={len(created_files)} user={user_email}")
 
-        return jsonify({
-            "success": True,
+        response_data = {
+            "success": len(created_files) > 0,
             "callsign": callsign,
             "name": name,
             "files_created": created_files,
@@ -2717,7 +2728,12 @@ def create_construct():
                 "data": [],
             },
             "message": f"Construct {callsign} scaffolded with {len(created_files)} files"
-        }), 201
+        }
+        if failed_files:
+            response_data["failed_files"] = failed_files
+            response_data["message"] += f" ({len(failed_files)} files failed to save)"
+        
+        return jsonify(response_data), 201
 
     except Exception as e:
         logger.error(f"Error creating construct: {e}")

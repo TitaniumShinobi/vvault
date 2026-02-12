@@ -23,24 +23,28 @@ const getLogicalPath = (file) => {
   
   const filename = file.filename || 'unknown';
   
-  if (!path || path === filename) {
-    let meta = file.metadata || {};
-    if (typeof meta === 'string') {
-      try { meta = JSON.parse(meta); } catch(e) { meta = {}; }
-    }
-    const folder = meta.folder || '';
-    const constructId = file.construct_id || meta.construct_id || '';
-    const metaType = meta.type || '';
-    
-    if (constructId && folder) {
-      path = `instances/${constructId}/${folder}/${filename}`;
-    } else if (constructId) {
-      path = `instances/${constructId}/${filename}`;
-    } else if (metaType === 'user_glyph') {
-      path = `account/${filename}`;
-    } else {
-      path = filename;
-    }
+  if (path && path.includes('/')) {
+    return path;
+  }
+  
+  if (filename.includes('/')) {
+    return filename;
+  }
+  
+  let meta = file.metadata || {};
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch(e) { meta = {}; }
+  }
+  const folder = meta.folder || '';
+  const constructId = file.construct_id || meta.construct_id || '';
+  const metaType = meta.type || '';
+  
+  if (constructId && folder) {
+    return `instances/${constructId}/${folder}/${filename}`;
+  } else if (constructId) {
+    return `instances/${constructId}/${filename}`;
+  } else if (metaType === 'user_glyph') {
+    return `account/${filename}`;
   }
   
   return path || filename;
@@ -254,11 +258,10 @@ const VaultBrowser = ({ user }) => {
 
   const favorites = [
     { name: 'All Files', icon: '📂', path: [] },
-    { name: 'Chats', icon: '💬', path: ['chats'] },
-    { name: 'Prompts', icon: '✨', path: ['prompts'] },
-    { name: 'Personality', icon: '🧠', path: ['personality'] },
-    { name: 'Memory', icon: '💾', path: ['memory'] },
-    { name: 'Documents', icon: '📚', path: ['documents'] }
+    { name: 'Instances', icon: '🤖', path: ['instances'] },
+    { name: 'Library', icon: '📚', path: ['library'] },
+    { name: 'Account', icon: '👤', path: ['account'] },
+    { name: 'System', icon: '⚙️', path: ['system'] },
   ];
 
   if (loading) {
@@ -303,15 +306,22 @@ const VaultBrowser = ({ user }) => {
         
         <div className="sidebar-section">
           <h3>CONSTRUCTS</h3>
-          {constructs.map((construct, idx) => (
-            <div key={idx} className="sidebar-item">
-              <span 
-                className="construct-dot" 
-                style={{ backgroundColor: construct.color }}
-              ></span>
-              <span className="sidebar-label">{construct.name}</span>
-            </div>
-          ))}
+          {constructs.map((construct, idx) => {
+            const constructPath = ['instances', construct.id];
+            const isActive = currentPath.length >= 2 && 
+              currentPath[0] === 'instances' && currentPath[1] === construct.id;
+            return (
+              <div key={idx} className={`sidebar-item ${isActive ? 'active' : ''}`}
+                onClick={() => { setCurrentPath(constructPath); setSelectedFile(null); setFileContent(null); }}
+              >
+                <span 
+                  className="construct-dot" 
+                  style={{ backgroundColor: construct.color }}
+                ></span>
+                <span className="sidebar-label">{construct.name}</span>
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -404,9 +414,11 @@ const VaultBrowser = ({ user }) => {
             ))}
             
             {fileList.map((file, idx) => {
-              const metadata = typeof file.metadata === 'string'
-                ? JSON.parse(file.metadata)
-                : file.metadata || {};
+              let metadata = file.metadata || {};
+              if (typeof metadata === 'string') {
+                try { metadata = JSON.parse(metadata); } catch(e) { metadata = {}; }
+              }
+              if (typeof metadata !== 'object' || metadata === null) metadata = {};
               
               return (
                 <div 

@@ -58,8 +58,12 @@ A 5-layer system for sovereign construct identity preservation with a specific b
 - **Service API**: Serves as a config and credentials vault for external services.
 - **VXRunner Integration API**: Exposes capsule data as forensic DNA baselines for construct detection.
 
-### Vault File System
-- **Canonical Paths**: Stores user and construct instance files in a structured hierarchy, enforcing `callsign` for construct directories and file metadata.
+### Vault File System (VSI Standard)
+- **Canonical Paths**: The `vault_files.filename` field stores full VSI (VVAULT Standard Instance) paths like `instances/{callsign}/identity/prompt.json`. All files follow this convention — zero flat filenames.
+- **VSI Folder Structure**: `instances/{construct}/{identity,config,chatty,chatgpt,logs,assets,documents,memup}/`, `library/{assets,documents}/`, `account/`, `system/`.
+- **Smart Routing**: `map_to_vsi_folder()` automatically routes files to the correct VSI subfolder based on filename, extension, and metadata.
+- **Knowledge Files API**: `GET /api/vault/knowledge-files?construct_id=X` returns scoped files from documents, identity, config, and chatty folders only (user-scoped, no cross-tenant access).
+- **Scaffold Error Tracking**: Construct creation tracks individual insert failures and surfaces them in the API response via `failed_files` field.
 
 ### Construct File Structure
 - Each construct instance includes `identity/` (prompt, avatar, personality, conditioning), `assets/`, `documents/`, chat transcripts (`chatty/`, `chatgpt/`), `config/metadata.json`, `memup/{callsign}.capsule`, and `logs/`.
