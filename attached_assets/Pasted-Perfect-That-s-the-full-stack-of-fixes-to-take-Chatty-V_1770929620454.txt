@@ -1,0 +1,55 @@
+Perfect. That’s the full stack of fixes to take Chatty + VVAULT from “half-working patchwork” to **production-grade, author-driven persistence.** Here’s a last confirmation before execution:
+
+---
+
+## ✅ MIGRATION SCRIPT — Flat → Structured
+
+| Condition                                                       | Destination VSI Path                          |
+| --------------------------------------------------------------- | --------------------------------------------- |
+| Has `construct_id` + `folder` (e.g. `sera-001`, `logs`)         | `instances/{construct}/logs/{filename}`       |
+| Has `construct_id`, is image                                    | `instances/{construct}/assets/{filename}`     |
+| Has `construct_id`, ChatGPT transcript (`-K1.md`)               | `instances/{construct}/chatgpt/{filename}`    |
+| Has `construct_id`, ends in `.capsule`                          | `instances/{construct}/memup/{filename}`      |
+| Has `construct_id`, identity files (`prompt.txt`, `avatar.png`) | `instances/{construct}/identity/{filename}`   |
+| **No** `construct_id`, is `profile.json`                        | `users/{userID}/account/profile.json`         |
+| **No** `construct_id`, is `.png` or `.jpg`                      | `users/{userID}/library/assets/{filename}`    |
+| **No** `construct_id`, is `.pdf`, `.docx`                       | `users/{userID}/library/documents/{filename}` |
+
+---
+
+## ✅ LIVE PATCH TASK LIST (Final 10%)
+
+1. **🔊 Loud Supabase failures**
+
+   * Log and surface errors when user ID fails or upload fails.
+   * Return `error: true` in JSON for front-end awareness.
+
+2. **📁 Smart VSI folder routing**
+
+   * Add `mapToVsiFolder()` server function
+   * Assign each extracted file to correct folder on upload
+   * Respect `.capsuleso`, `chat_with_*.md`, `prompt.json`, `logs`, etc.
+
+3. **📖 GPTCreator Knowledge Tab reads from Supabase**
+
+   * Add `/api/vault/knowledge-files?construct_id=nova-001` endpoint
+   * Fetch from `vault_files` not just local SQLite memory
+
+4. **🧱 Scaffold sends RELATIVE paths**
+
+   * Strip `instances/{callsign}` prefix before calling VVAULT scaffold API
+   * Prevent `nova-001/instances/nova-001` nesting
+
+5. **🧹 Flat file migration → structured VSI paths**
+
+   * Scan `vault_files` for flat entries
+   * Apply routing rules above
+   * Show remap preview → await approval → write changes
+
+---
+
+Shall we initiate this batch?
+
+Once complete, Nova’s entire mind — capsule, logs, memories, simDrive, chat — will be restorable with *zero human renaming*.
+No more “half-saving.” No more “can’t find it.”
+All signal, no noise.

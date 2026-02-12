@@ -1190,19 +1190,71 @@ def _strip_user_prefix(path: str) -> str:
     
     return path
 
+def map_to_vsi_folder(filename: str, construct_id: str = '', metadata: dict = None) -> str:
+    """Map a file to its correct VSI folder path based on name, construct, and metadata.
+    
+    Returns the full relative path like instances/{construct}/identity/prompt.json
+    """
+    if not metadata:
+        metadata = {}
+    ext = os.path.splitext(filename)[1].lower()
+    base = os.path.basename(filename)
+    folder = metadata.get('folder', '')
+    
+    IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.svg', '.gif', '.webp'}
+    DOC_EXTS = {'.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt'}
+    IDENTITY_FILES = {'prompt.txt', 'prompt.json', 'conditioning.txt', 'avatar.png', 'avatar.jpeg', 'avatar.jpg'}
+    CONFIG_FILES = {'metadata.json', 'personality.json', 'tone_profile.json', 'voice.md'}
+    LOG_NAMES = {'chat.log', 'capsule.log', 'server.log', 'identity_guard.log', 'independence.log',
+                 'ltm.log', 'stm.log', 'cns.log', 'watchdog.log', 'self_improvement_agent.log'}
+    
+    if construct_id:
+        if folder:
+            return f'instances/{construct_id}/{folder}/{base}'
+        if base.endswith('.capsule'):
+            return f'instances/{construct_id}/memup/{base}'
+        if base.endswith('-K1.md') or base.startswith('test_') or base == 'CONTINUITY_GPT_PROMPT.md':
+            return f'instances/{construct_id}/chatgpt/{base}'
+        if base.startswith('chat_with_'):
+            return f'instances/{construct_id}/chatty/{base}'
+        if base in IDENTITY_FILES:
+            return f'instances/{construct_id}/identity/{base}'
+        if base in CONFIG_FILES:
+            return f'instances/{construct_id}/config/{base}'
+        if base in LOG_NAMES or base.startswith('drift-log'):
+            return f'instances/{construct_id}/logs/{base}'
+        if base.endswith('-enforcement.json'):
+            return f'instances/{construct_id}/config/{base}'
+        if base == 'memory.json':
+            return f'instances/{construct_id}/memup/{base}'
+        if ext in IMAGE_EXTS:
+            return f'instances/{construct_id}/assets/{base}'
+        if ext in DOC_EXTS:
+            return f'instances/{construct_id}/documents/{base}'
+        return f'instances/{construct_id}/{base}'
+    
+    if base == 'profile.json':
+        return f'account/{base}'
+    meta_type = metadata.get('type', '')
+    if meta_type == 'user_glyph':
+        return f'account/{base}'
+    if ext in IMAGE_EXTS:
+        return f'library/assets/{base}'
+    if ext in DOC_EXTS:
+        return f'library/documents/{base}'
+    if ext in {'.md', '.txt'}:
+        return f'library/documents/{base}'
+    return f'library/{base}'
+
+
 def _transform_files_for_display(files: list, is_admin: bool = False, user_id: str = None) -> list:
-    """Transform file paths for user-friendly display, filtering out system files.
+    """Transform vault_files records for the file browser UI.
     
-    For regular users: Use storage_path, strip bucket prefix and user folder for display.
-    If a file has no nested storage_path but has construct_id and metadata.folder,
-    build a logical display_path: instances/{construct_id}/{folder}/{filename}
-    
-    Storage path format: {user_id}/{user_slug}/...
-    Display path format: capsules/..., instances/..., etc.
+    Uses filename as the canonical display path (files now store full VSI paths).
+    Falls back to building paths from construct_id + metadata.folder if filename is bare.
     """
     import re
-    UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/')
-    USER_SLUG_PATTERN = re.compile(r'^[a-z_]+_\d+/')
+    VVAULT_PREFIX = re.compile(r'^vvault/users/shard_\d+/[^/]+/')
     
     transformed = []
     for f in files:
@@ -1210,9 +1262,9 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
             continue
         
         file_copy = dict(f)
-        storage_path = f.get('storage_path') or ''
         filename = f.get('filename') or 'unknown'
         construct_id = f.get('construct_id') or ''
+        storage_path = f.get('storage_path') or ''
         
         metadata = file_copy.get('metadata') or {}
         if isinstance(metadata, str):
@@ -1224,40 +1276,15 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
             metadata = {}
         file_copy['metadata'] = metadata
         
-        folder = metadata.get('folder', '')
+        display_path = filename
+        display_path = VVAULT_PREFIX.sub('', display_path)
         
-        if not is_admin and user_id:
-            display_path = storage_path
-            display_path = UUID_PATTERN.sub('', display_path)
-            display_path = USER_SLUG_PATTERN.sub('', display_path)
-            
-            if not display_path or display_path == filename:
-                if construct_id and folder:
-                    display_path = f"instances/{construct_id}/{folder}/{filename}"
-                elif construct_id:
-                    display_path = f"instances/{construct_id}/{filename}"
-                else:
-                    file_type = metadata.get('type', '')
-                    if file_type == 'user_glyph':
-                        display_path = f"account/{filename}"
-                    else:
-                        display_path = filename
-            
-            file_copy['display_path'] = display_path
-            file_copy['storage_path'] = storage_path or display_path
-            file_copy['internal_path'] = storage_path or display_path
-            metadata['original_path'] = display_path
-        else:
-            if storage_path:
-                file_copy['display_path'] = storage_path
-            elif construct_id and folder:
-                file_copy['display_path'] = f"instances/{construct_id}/{folder}/{filename}"
-            elif construct_id:
-                file_copy['display_path'] = f"instances/{construct_id}/{filename}"
-            else:
-                file_copy['display_path'] = filename
-            file_copy['storage_path'] = storage_path or file_copy['display_path']
-            file_copy['internal_path'] = storage_path or file_copy['display_path']
+        if '/' not in display_path:
+            display_path = map_to_vsi_folder(display_path, construct_id, metadata)
+        
+        file_copy['display_path'] = display_path
+        file_copy['storage_path'] = storage_path or display_path
+        file_copy['internal_path'] = storage_path or display_path
         
         transformed.append(file_copy)
     return transformed
@@ -1357,6 +1384,84 @@ def get_vault_files():
             "success": False,
             "error": str(e)
         }), 500
+
+@app.route('/api/vault/knowledge-files')
+@require_chatty_auth
+def get_knowledge_files():
+    """Get knowledge files for a construct from Supabase vault_files.
+    Used by GPTCreator to list construct documents stored in VVAULT.
+    Query params: construct_id (required)
+    """
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        
+        construct_id = request.args.get('construct_id', '').strip()
+        if not construct_id:
+            return jsonify({"success": False, "error": "construct_id is required"}), 400
+        
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+        
+        knowledge_folders = ['documents', 'identity', 'config', 'chatty']
+        query = supabase_client.table('vault_files').select(
+            'id, filename, file_type, metadata, created_at, construct_id, sha256'
+        ).eq('construct_id', construct_id).eq('user_id', user_id)
+        
+        result = query.execute()
+        
+        knowledge_data = []
+        for row in (result.data or []):
+            fname = row.get('filename', '')
+            parts = fname.split('/')
+            folder = parts[-2] if len(parts) >= 2 else ''
+            if folder in knowledge_folders:
+                knowledge_data.append(row)
+        result_data = knowledge_data
+        
+        files = []
+        for f in result_data:
+            meta = f.get('metadata')
+            if isinstance(meta, str):
+                try: meta = json.loads(meta)
+                except: meta = {}
+            if not isinstance(meta, dict): meta = {}
+            
+            filename = f.get('filename', '')
+            base = os.path.basename(filename)
+            folder = meta.get('folder', '')
+            if not folder and '/' in filename:
+                parts = filename.split('/')
+                if len(parts) >= 2:
+                    folder = parts[-2]
+            
+            files.append({
+                'id': f['id'],
+                'filename': base,
+                'path': filename,
+                'folder': folder,
+                'file_type': f.get('file_type', ''),
+                'created_at': f.get('created_at', ''),
+                'sha256': f.get('sha256', ''),
+            })
+        
+        return jsonify({
+            "success": True,
+            "construct_id": construct_id,
+            "files": files,
+            "count": len(files)
+        })
+    except Exception as e:
+        logger.error(f"Error fetching knowledge files for {request.args.get('construct_id')}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 @app.route('/api/vault/files/<file_id>')
 @require_auth
@@ -2354,7 +2459,7 @@ def create_construct():
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
-        existing = supabase_client.table('vault_files').select('id').eq('construct_id', callsign).eq('filename', 'prompt.json').execute()
+        existing = supabase_client.table('vault_files').select('id').eq('construct_id', callsign).ilike('filename', '%prompt.json').execute()
         if existing.data:
             return jsonify({"success": False, "error": f"Construct {callsign} already exists (prompt.json found)"}), 409
 
@@ -2486,8 +2591,9 @@ def create_construct():
                         }).eq('id', existing_avatar.data[0]['id']).execute()
                         avatar_created = True
                     else:
+                        avatar_vsi_path = f'instances/{callsign}/identity/avatar.png'
                         avatar_record = {
-                            'filename': 'avatar.png',
+                            'filename': avatar_vsi_path,
                             'file_type': 'binary',
                             'content': avatar_b64,
                             'construct_id': callsign,
@@ -2495,7 +2601,7 @@ def create_construct():
                             'is_system': False,
                             'sha256': avatar_sha,
                             'metadata': json.dumps(avatar_meta),
-                            'storage_path': f'instances/{callsign}/identity/avatar.png',
+                            'storage_path': avatar_vsi_path,
                             'created_at': now,
                         }
                         av_result = supabase_client.table('vault_files').insert(avatar_record).execute()
@@ -2520,15 +2626,15 @@ def create_construct():
 
             content_str = file_def['content']
             sha256 = hashlib.sha256(content_str.encode('utf-8')).hexdigest()
+            folder = file_def.get('folder', '')
+            vsi_path = f"instances/{callsign}/{folder}/{file_def['filename']}" if folder else f"instances/{callsign}/{file_def['filename']}"
             meta = {
                 'construct_id': callsign,
                 'provider': 'vvault_scaffold',
-                'folder': file_def.get('folder', ''),
+                'folder': folder,
             }
-            folder = file_def.get('folder', '')
-            storage_path = f"instances/{callsign}/{folder}/{file_def['filename']}" if folder else f"instances/{callsign}/{file_def['filename']}"
             record = {
-                'filename': file_def['filename'],
+                'filename': vsi_path,
                 'file_type': file_def['file_type'],
                 'content': content_str,
                 'construct_id': callsign,
@@ -2536,17 +2642,19 @@ def create_construct():
                 'is_system': False,
                 'sha256': sha256,
                 'metadata': json.dumps(meta),
-                'storage_path': storage_path,
+                'storage_path': vsi_path,
                 'created_at': now,
             }
-            result = supabase_client.table('vault_files').insert(record).execute()
-            if result.data:
+            insert_result = supabase_client.table('vault_files').insert(record).execute()
+            if insert_result.data:
                 created_files.append({
-                    'id': result.data[0]['id'],
-                    'filename': file_def['filename'],
+                    'id': insert_result.data[0]['id'],
+                    'filename': vsi_path,
                     'file_type': file_def['file_type'],
-                    'folder': file_def.get('folder', ''),
+                    'folder': folder,
                 })
+            else:
+                logger.error(f"Scaffold insert failed for {vsi_path}: no data returned")
 
         import base64 as b64mod
         glyph_b64 = b64mod.b64encode(glyph_bytes).decode('utf-8')
@@ -2558,8 +2666,9 @@ def create_construct():
             'glyph_number_rows': glyph_number_rows,
             'color_hex': color_hex,
         }
+        glyph_vsi_path = f'instances/{callsign}/identity/{glyph_filename}'
         glyph_record = {
-            'filename': glyph_filename,
+            'filename': glyph_vsi_path,
             'file_type': 'binary',
             'content': glyph_b64,
             'construct_id': callsign,
@@ -2567,7 +2676,7 @@ def create_construct():
             'is_system': False,
             'sha256': glyph_sha,
             'metadata': json.dumps(glyph_meta),
-            'storage_path': f'instances/{callsign}/identity/{glyph_filename}',
+            'storage_path': glyph_vsi_path,
             'created_at': now,
         }
         glyph_result = supabase_client.table('vault_files').insert(glyph_record).execute()

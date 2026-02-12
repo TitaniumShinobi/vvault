@@ -1,0 +1,79 @@
+# VVAULT MIGRATION AND FIX PATCH - Phase 4 Finalization
+# ------------------------------------------------------
+# Task 1: Audit Supabase for flat files vs structured files
+# Task 2: Migrate flat files into correct VSI paths based on rules
+# Task 3: Improve Supabase upload error visibility
+# Task 4: Add VSI-smart folder routing to upload handler
+# Task 5: Update GPTCreator Knowledge tab to read from Supabase
+# Task 6: Fix VVAULT scaffold API to avoid double-nesting paths
+# Task 7: Run end-to-end test to verify correct VSI behavior
+
+# --- Task 1: Supabase Audit ---
+# Query Supabase vault_files to categorize by path status (flat/structured)
+# Output a list of flat files with construct_id and metadata
+
+def audit_supabase_vault_files(supabase):
+    all_files = supabase.table("vault_files").select("filename, construct_id, metadata").execute()
+    flat = []
+    structured = []
+
+    for f in all_files.data:
+        if "/" in f["filename"]:
+            structured.append(f)
+        else:
+            flat.append(f)
+
+    return flat, structured
+
+# --- Task 2: Migration Logic ---
+def map_to_vsi_path(file):
+    cid = file.get("construct_id")
+    name = file["filename"]
+
+    if not cid:
+        if name == "profile.json":
+            return f"users/{{userID}}/account/{name}"
+        elif name.endswith((".png", ".jpg")):
+            return f"users/{{userID}}/library/assets/{name}"
+        elif name.endswith((".pdf", ".docx")):
+            return f"users/{{userID}}/library/documents/{name}"
+    else:
+        if file.get("folder"):
+            return f"instances/{cid}/{file['folder']}/{name}"
+        elif name.endswith(".capsule"):
+            return f"instances/{cid}/memup/{name}"
+        elif name.startswith("chat_with_") and name.endswith(".md"):
+            return f"instances/{cid}/chatty/{name}"
+        elif name in ["prompt.txt", "prompt.json", "avatar.png", "personality.json"]:
+            return f"instances/{cid}/identity/{name}"
+        elif name.endswith(".log"):
+            return f"instances/{cid}/logs/{name}"
+        elif name.endswith(".md"):
+            return f"instances/{cid}/documents/{name}"
+        else:
+            return f"instances/{cid}/documents/{name}"
+
+# Will apply migration after preview
+
+# --- Task 3: Supabase Error Logging ---
+# In the file upload handler, wrap Supabase write in try/except
+# If failure, log visibly and return error:true to client
+
+# --- Task 4: Smart VSI Routing ---
+# Add folder routing logic to zip extractor to assign correct VSI folders
+# Use map_to_vsi_path() to route based on filename and type
+
+# --- Task 5: GPTCreator Knowledge Panel Patch ---
+# Add /api/vault/knowledge-files?construct_id=XYZ endpoint
+# On client, fetch these on GPTCreator mount if construct_id exists
+
+# --- Task 6: Scaffold Path Fix ---
+# Strip "instances/{callsign}/" from file paths before sending to VVAULT scaffold API
+# This prevents double-nesting inside construct folders
+
+# --- Task 7: Final Test ---
+# Upload full ZIP of Nova
+# Confirm structure in vault_files
+# Confirm Knowledge panel shows uploaded files
+# Confirm no duplicate folders
+# Confirm all logs, memup, and chatty files are correctly placed
