@@ -35,6 +35,9 @@ Preferred communication style: Simple, everyday language.
 ### Memory Management (`memup/`)
 - **Architecture**: A real-time memory processing pipeline uses short-term (`stm.py`) and long-term (`ltm.py`) memory collectors, processed by `bank.py`, and routed to ChromaDB, instance capsules, or evolving identity files.
 - **Isolation**: Each construct has isolated ChromaDB storage.
+- **Memup Sync** (`memup_sync.py`): Transcript-to-capsule synchronization. Fetches chatty/chatgpt transcripts from Supabase, runs ContinuityParser to extract forensic ledger entries, merges additively with existing capsule data, and writes back to `instances/{construct}/memup/{construct}.capsule`. Uses stable entry IDs derived from database row ID (file_db_id) to prevent duplicates on re-sync. Backfills entry_id for legacy sessions. Filters out non-transcript files (.capsule, images, PDFs) and memup/ paths.
+- **Sync Endpoints**: `POST /api/vault/memup/sync` triggers sync for a construct. `GET /api/vault/memup/status` checks capsule metadata. Both are user-scoped and auth-protected.
+- **Sync UI**: VaultBrowser sidebar shows a sync button per construct with inline progress/result feedback.
 
 ### Security Architecture (Pocketverse 5-Layer Security)
 A 5-layer system for sovereign construct identity preservation with a specific boot order (5→3→4→2→1), including Higher Plane (legal/ontological insulation) and Dimensional Distortion (runtime drift) layers.
