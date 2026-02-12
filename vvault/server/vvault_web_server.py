@@ -2710,22 +2710,19 @@ def chatty_message():
         if not user_message:
             return jsonify({"success": False, "error": "message is required"}), 400
         
-        # Get current user info for path construction
         current_user = request.current_user
         user_email = current_user.get('email')
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
-        
-        if not user_id:
-            return jsonify({"success": False, "error": "User not found"}), 403
-        
-        # Get construct name from ID (e.g., zen-001 -> Zen)
+        user_id = None
+        try:
+            user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+            user_id = user_result.data[0]['id'] if user_result.data else None
+        except Exception:
+            pass
+
         construct_name = construct_id.split('-')[0].title()
-        
-        # Load construct identity/system prompt
+
         system_prompt = _load_construct_identity(construct_id, construct_name)
-        
-        # Call Ollama for LLM inference
+
         try:
             ollama_response = requests.post(
                 'http://localhost:11434/api/generate',
@@ -2737,15 +2734,14 @@ def chatty_message():
                 },
                 timeout=60
             )
-            
-            # Check for non-200 responses
+
             if not ollama_response.ok:
                 logger.error(f"Ollama returned {ollama_response.status_code}: {ollama_response.text[:200]}")
                 return jsonify({
                     "success": False,
                     "error": f"LLM inference failed with status {ollama_response.status_code}"
                 }), 503
-            
+
             ollama_data = ollama_response.json()
             assistant_response = ollama_data.get('response')
             if not assistant_response:
@@ -2753,56 +2749,59 @@ def chatty_message():
                     "success": False,
                     "error": "LLM returned empty response"
                 }), 503
-                
+
         except requests.RequestException as e:
             logger.error(f"Ollama error: {e}")
             return jsonify({
-                "success": False, 
+                "success": False,
                 "error": "LLM inference failed. Is Ollama running?"
             }), 503
-        
-        # Format timestamp - use UTC for ISO, convert to user timezone for display
+
         from datetime import timezone as tz
         now_utc = datetime.now(tz.utc)
         iso_timestamp = now_utc.strftime('%Y-%m-%dT%H:%M:%S.') + f'{now_utc.microsecond // 1000:03d}Z'
-        
-        # Convert to EST for human-readable display (UTC-5)
+
         est_offset = timedelta(hours=-5)
         now_est = now_utc + est_offset
         human_time = now_est.strftime('%I:%M:%S %p').lstrip('0')
         date_header = now_est.strftime('%B %d, %Y')
-        
-        # Get current transcript - query user's files only
+
         search_filename = f"chat_with_{construct_id}.md"
-        user_chatty_path = _get_user_construct_path(user_id, user_email, construct_id, 'chatty')
-        expected_filepath = f"{user_chatty_path}{search_filename}"
-        
         file_id = None
         current_content = ''
-        
-        # Query for user's transcript file (must belong to this user)
-        existing = supabase_client.table('vault_files').select('id, content, filename').eq('user_id', user_id).ilike('filename', f'%{search_filename}%').execute()
-        
+
+        if user_id:
+            user_chatty_path = _get_user_construct_path(user_id, user_email, construct_id, 'chatty')
+            expected_filepath = f"{user_chatty_path}{search_filename}"
+            existing = supabase_client.table('vault_files').select('id, content, filename').eq('user_id', user_id).ilike('filename', f'%{search_filename}%').execute()
+        else:
+            callsign = _normalize_callsign(construct_id)
+            bare = _bare_name_from_callsign(callsign)
+            expected_filepath = f"instances/{construct_id}/chatty/{search_filename}"
+            existing = supabase_client.table('vault_files').select('id, content, filename').or_(f'construct_id.eq.{callsign},construct_id.eq.{bare}').ilike('filename', f'%{search_filename}%').execute()
+            logger.info(f"[Message] Service call for {construct_id} (user {user_email} not in users table), querying by construct_id")
+
         if existing.data and len(existing.data) > 0:
             file_id = existing.data[0]['id']
             current_content = existing.data[0].get('content', '')
             actual_transcript_filename = existing.data[0].get('filename', search_filename)
         else:
             actual_transcript_filename = search_filename
-            # Create new transcript file for user's construct
             new_file_data = {
                 'filename': expected_filepath,
                 'file_type': 'text/markdown',
                 'content': f"# Chat with {construct_name}\n\nTranscript started {datetime.now().isoformat()}\n",
-                'user_id': user_id,
                 'is_system': False,
+                'construct_id': construct_id,
                 'metadata': json.dumps({'construct_id': construct_id, 'provider': 'chatty'})
             }
+            if user_id:
+                new_file_data['user_id'] = user_id
             insert_result = supabase_client.table('vault_files').insert(new_file_data).execute()
             if insert_result.data:
                 file_id = insert_result.data[0]['id']
                 current_content = new_file_data['content']
-                logger.info(f"Created new transcript at {expected_filepath} for user {user_id}")
+                logger.info(f"Created new transcript at {expected_filepath}")
             else:
                 return jsonify({
                     "success": False,
@@ -2832,11 +2831,11 @@ def chatty_message():
         
         # Update transcript in Supabase
         sha256 = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
-        supabase_client.table('vault_files').update({
+        update_data = {
             'content': new_content,
             'sha256': sha256,
-            'updated_at': datetime.now().isoformat()
-        }).eq('id', file_id).execute()
+        }
+        supabase_client.table('vault_files').update(update_data).eq('id', file_id).execute()
         
         logger.info(f"Message exchange with {construct_id}: user sent {len(user_message)} chars, got {len(assistant_response)} chars (before={len(current_content)} after={len(new_content)})")
         
