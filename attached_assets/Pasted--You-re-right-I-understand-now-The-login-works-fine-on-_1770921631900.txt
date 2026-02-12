@@ -1,0 +1,33 @@
+
+You're right, I understand now. The login works fine on the actual domains (chatty.thewreck.org, vvault.thewreck.org) but fails with a 403 when accessed through the Replit workspace preview. The issue is that the OAuth redirect goes to the canonical domain, but Google is blocking requests originating from the Replit preview iframe/domain.
+
+Let me check how the OAuth flow handles the Replit preview domain:
+
+Now I understand the issue. The OAuth works fine on chatty.thewreck.org because that's the registered redirect URI in Google Cloud. But when you access Chatty from the Replit workspace preview, Google blocks it because the Replit dev domain isn't registered as an authorized redirect URI.
+
+Here's the fix - two things need to happen:
+
+In Google Cloud Console: Add the Replit dev domain callback URL as an authorized redirect URI. The URL would be: https://<your-replit-dev-domain>/api/auth/google/callback
+
+In the code: Update the OAuth flow to detect when the request comes from the Replit preview and use the Replit dev domain as the redirect_uri instead of always using the canonical domain.
+
+Let me check what the Replit dev domain is:
+
+Got it. Here's the plan:
+
+The Replit dev domain for your Chatty project is 9e87ef81-3206-41b7-ab62-5ac95372a8ad-00-1vnh2e2s81nle.riker.replit.dev. For OAuth to work from the Replit workspace preview, two things need to happen:
+
+You need to do (in Google Cloud Console):
+Add this URL as an authorized redirect URI in your Google Cloud OAuth credentials:
+
+https://9e87ef81-3206-41b7-ab62-5ac95372a8ad-00-1vnh2e2s81nle.riker.replit.dev/api/auth/google/callback
+I need to do (in the code):
+Update the OAuth flow so that when the login request comes from the Replit workspace preview, it uses the Replit dev domain as the redirect_uri instead of always hardcoding chatty.thewreck.org. Right now the code forces the canonical domain for every request, which is why Google rejects it from the Replit preview — the redirect URI doesn't match what's registered.
+
+
+Scroll to latest
+Update login to use Replit preview domain
+Handle login returns from both domains
+Return to Replit preview after login
+Test login works from both places
+Agent has identified a task list to work on. If everything looks good, start building to make these updates to your app.
