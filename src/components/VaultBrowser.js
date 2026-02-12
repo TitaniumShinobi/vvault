@@ -60,6 +60,8 @@ const VaultBrowser = ({ user }) => {
   const [viewMode, setViewMode] = useState('list');
   const [constructs, setConstructs] = useState([]);
   const [userInfo, setUserInfo] = useState({ root_label: 'Vault', is_admin: false });
+  const [syncingConstruct, setSyncingConstruct] = useState(null);
+  const [syncResult, setSyncResult] = useState(null);
 
   const fetchConstructs = useCallback(async () => {
     try {
@@ -121,6 +123,27 @@ const VaultBrowser = ({ user }) => {
     fetchFiles();
     fetchConstructs();
   }, [fetchUserInfo, fetchFiles, fetchConstructs]);
+
+  const triggerMemupSync = async (constructId) => {
+    setSyncingConstruct(constructId);
+    setSyncResult(null);
+    try {
+      const response = await authFetch('/api/vault/memup/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ construct_id: constructId }),
+      });
+      const data = await response.json();
+      setSyncResult(data);
+      if (data.success) {
+        fetchFiles();
+      }
+    } catch (err) {
+      setSyncResult({ success: false, error: 'Sync request failed' });
+    } finally {
+      setSyncingConstruct(null);
+    }
+  };
 
   const buildHierarchy = (files) => {
     const hierarchy = { folders: {}, files: [] };
@@ -310,18 +333,36 @@ const VaultBrowser = ({ user }) => {
             const constructPath = ['instances', construct.id];
             const isActive = currentPath.length >= 2 && 
               currentPath[0] === 'instances' && currentPath[1] === construct.id;
+            const isSyncing = syncingConstruct === construct.id;
             return (
-              <div key={idx} className={`sidebar-item ${isActive ? 'active' : ''}`}
-                onClick={() => { setCurrentPath(constructPath); setSelectedFile(null); setFileContent(null); }}
-              >
-                <span 
-                  className="construct-dot" 
-                  style={{ backgroundColor: construct.color }}
-                ></span>
-                <span className="sidebar-label">{construct.name}</span>
+              <div key={idx} className={`sidebar-item construct-row ${isActive ? 'active' : ''}`}>
+                <div className="construct-nav"
+                  onClick={() => { setCurrentPath(constructPath); setSelectedFile(null); setFileContent(null); }}
+                >
+                  <span 
+                    className="construct-dot" 
+                    style={{ backgroundColor: construct.color }}
+                  ></span>
+                  <span className="sidebar-label">{construct.name}</span>
+                </div>
+                <button
+                  className="sync-btn"
+                  title={`Sync ${construct.id} transcripts to memup capsule`}
+                  disabled={isSyncing}
+                  onClick={(e) => { e.stopPropagation(); triggerMemupSync(construct.id); }}
+                >
+                  {isSyncing ? '...' : '⟳'}
+                </button>
               </div>
             );
           })}
+          {syncResult && (
+            <div className={`sync-result ${syncResult.success ? 'sync-success' : 'sync-error'}`}>
+              {syncResult.success
+                ? `Synced: ${syncResult.entries_added || 0} new, ${syncResult.total_sessions || 0} total sessions`
+                : (syncResult.error || 'Sync failed')}
+            </div>
+          )}
         </div>
       </div>
 

@@ -1463,6 +1463,103 @@ def get_knowledge_files():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route('/api/vault/memup/sync', methods=['POST'])
+@require_auth
+def sync_memup():
+    """Trigger memup sync for a construct — processes transcripts into capsule data."""
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        data = request.get_json(silent=True) or {}
+        construct_id = data.get('construct_id', '').strip()
+        if not construct_id:
+            return jsonify({"success": False, "error": "construct_id is required"}), 400
+
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from memup_sync import sync_construct_memup
+
+        result = sync_construct_memup(supabase_client, construct_id, user_id)
+        status_code = 200 if result.get('success') else 404
+        return jsonify(result), status_code
+
+    except Exception as e:
+        logger.error(f"MEMUP_SYNC_ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/vault/memup/status')
+@require_auth
+def memup_status():
+    """Check memup sync status for a construct — returns capsule metadata if it exists."""
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        construct_id = request.args.get('construct_id', '').strip()
+        if not construct_id:
+            return jsonify({"success": False, "error": "construct_id is required"}), 400
+
+        user_email = current_user.get('email')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        capsule_path = f'instances/{construct_id}/memup/{construct_id}.capsule'
+        result = supabase_client.table('vault_files').select(
+            'id, filename, sha256, metadata, created_at, updated_at'
+        ).eq('construct_id', construct_id).eq('user_id', user_id).eq('filename', capsule_path).execute()
+
+        if result.data:
+            row = result.data[0]
+            meta = row.get('metadata')
+            if isinstance(meta, str):
+                try: meta = json.loads(meta)
+                except: meta = {}
+            if not isinstance(meta, dict): meta = {}
+
+            return jsonify({
+                "success": True,
+                "construct_id": construct_id,
+                "synced": True,
+                "file_id": row['id'],
+                "path": capsule_path,
+                "sha256": row.get('sha256', ''),
+                "last_synced_at": meta.get('last_synced_at', row.get('updated_at', row.get('created_at', ''))),
+                "total_sessions": meta.get('total_sessions', 0),
+                "capsule_version": meta.get('capsule_version', ''),
+            })
+        else:
+            return jsonify({
+                "success": True,
+                "construct_id": construct_id,
+                "synced": False,
+                "message": "No memup capsule found. Run sync to generate one."
+            })
+
+    except Exception as e:
+        logger.error(f"MEMUP_STATUS_ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/api/vault/files/<file_id>')
 @require_auth
 def get_vault_file(file_id):
