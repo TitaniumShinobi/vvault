@@ -59,8 +59,12 @@ ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.pat
 PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'public')
 
 app = Flask(__name__, static_folder=DIST_DIR, static_url_path='')
-app.config['SECRET_KEY'] = 'vvault-secret-key-change-in-production'
-CORS(app, origins=["http://localhost:7784", "https://vvault.thewreck.org"])
+app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'vvault-secret-key-change-in-production')
+_cors_origins = ["http://localhost:7784", "http://localhost:5000", "https://vvault.thewreck.org"]
+_replit_domain = os.environ.get("REPLIT_DEV_DOMAIN") or os.environ.get("REPL_SLUG")
+if _replit_domain:
+    _cors_origins.append(f"https://{_replit_domain}")
+CORS(app, origins=_cors_origins)
 
 # Google OAuth Configuration
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
@@ -3555,20 +3559,23 @@ def catch_all(e):
 
 def main():
     """Main entry point for VVAULT Web Server"""
+    port = int(os.environ.get("PORT", 8000))
+    is_production = os.environ.get("REPL_DEPLOYMENT") == "1" or port == 5000
+    
     print("🌐 VVAULT Web Server")
     print("=" * 50)
     print(f"🔧 Project Directory: {PROJECT_DIR}")
     print(f"📦 Capsules Directory: {CAPSULES_DIR}")
-    print(f"🌐 Backend Server: http://localhost:8000")
-    print(f"🎨 Frontend Server: http://localhost:7784")
+    print(f"🌐 Server Port: {port}")
+    print(f"🏭 Production Mode: {is_production}")
     print("=" * 50)
     
     try:
-        logger.info("🚀 Starting VVAULT Web Server on port 8000...")
+        logger.info(f"🚀 Starting VVAULT Web Server on port {port}...")
         app.run(
             host='0.0.0.0',
-            port=8000,
-            debug=True,
+            port=port,
+            debug=not is_production,
             threaded=True
         )
     except KeyboardInterrupt:

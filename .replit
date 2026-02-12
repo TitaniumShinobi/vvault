@@ -80,11 +80,14 @@ channel = "stable-25_05"
 packages = ["cairo", "cargo", "ffmpeg-full", "freetype", "ghostscript", "gobject-introspection", "gtk3", "kubo", "libiconv", "libxcrypt", "libyaml", "ollama", "openssl", "pkg-config", "qhull", "rustc", "tcl", "tk", "dejavu_fonts"]
 
 [deployment]
-deploymentTarget = "autoscale"
-run = ["bash", "-c", "OLLAMA_HOST=0.0.0.0:11434 ollama serve & python vvault/server/vvault_web_server.py"]
-build = ["bash", "-c", "npm run build"]
+deploymentTarget = "vm"
+run = ["python", "vvault/server/vvault_web_server.py"]
+build = ["npm", "run", "build"]
 
 [userenv]
 
 [userenv.shared]
 OAUTH_BASE_URL = "https://vvault.thewreck.org"
+
+[userenv.production]
+PORT = "5000"
