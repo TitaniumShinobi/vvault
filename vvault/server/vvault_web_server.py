@@ -3479,43 +3479,87 @@ def _parse_transcript_pairs(content: str, construct_id: str) -> List[Dict[str, A
     return pairs
 
 
-def _score_memory_pair(pair: Dict, query: str, total_pairs: int) -> float:
-    """Score a memory pair for relevance to the query."""
-    score = 0.0
-    query_lower = query.lower()
-    combined = (pair.get('user', '') + ' ' + pair.get('construct', '')).lower()
+FILLER_WORDS = frozenset([
+    'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'shall', 'can', 'to', 'of', 'in', 'for',
+    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'about', 'like',
+    'through', 'after', 'before', 'between', 'under', 'above',
+    'and', 'but', 'or', 'nor', 'not', 'so', 'yet', 'if', 'then',
+    'that', 'this', 'these', 'those', 'it', 'its', 'i', 'me', 'my',
+    'we', 'our', 'you', 'your', 'he', 'she', 'they', 'them', 'his', 'her',
+    'what', 'which', 'who', 'whom', 'how', 'when', 'where', 'why',
+    'just', 'also', 'very', 'really', 'much', 'more', 'most', 'some',
+    'any', 'all', 'each', 'every', 'no', 'up', 'out', 'get', 'got',
+    'don', 'doesn', 'didn', 'won', 'wouldn', 'couldn', 'shouldn',
+    'there', 'here', 'than', 'too', 'only', 'own', 'same', 'other',
+    'such', 'even', 'well', 'back', 'still', 'way', 'go', 'going',
+    'thing', 'things', 'something', 'anything', 'everything', 'nothing',
+    'tell', 'said', 'say', 'know', 'think', 'make', 'take', 'come',
+    'want', 'look', 'use', 'find', 'give', 'let', 'put', 'try',
+])
+
+MAX_PAIRS_PER_FILE = 200
+
+def _clean_query(query: str) -> List[str]:
+    """Extract meaningful query terms, stripping filler words and short tokens."""
+    import re
+    words = re.findall(r'[a-z]+', query.lower())
+    return [w for w in words if w not in FILLER_WORDS and len(w) > 2]
+
+
+def _score_memory_pair(pair: Dict, query: str, query_terms: List[str], total_pairs: int, file_index: int, total_files: int) -> float:
+    """Score a memory pair using query-relevance overlap + recency weighting.
     
-    query_words = [w for w in query_lower.split() if len(w) > 3]
-    for word in query_words:
-        if word in combined:
-            score += 3.0
+    Scoring breakdown:
+    - Term overlap (0-60): What fraction of query terms appear in the exchange
+    - Term density (0-15): How concentrated the matches are relative to text length
+    - Recency (0-15): Later exchanges score higher (newer = more relevant)
+    - Position bonus (0-10): Small boost for early/late exchanges in a file
+    """
+    if not query_terms:
+        idx = pair.get('index', 0)
+        return max(0.0, (idx / max(total_pairs, 1)) * 10.0)
     
-    identity_words = ['name', 'who', 'remember', 'memory', 'know', 'call', 'identity']
-    for word in identity_words:
-        if word in query_lower and word in combined:
-            score += 5.0
+    user_text = pair.get('user', '').lower()
+    construct_text = pair.get('construct', '').lower()
+    combined = user_text + ' ' + construct_text
+    combined_words = set(combined.split())
     
-    continuity_words = ['first', 'last', 'begin', 'start', 'end', 'when', 'time', 'ago']
-    for word in continuity_words:
-        if word in query_lower and word in combined:
-            score += 4.0
+    matches = sum(1 for term in query_terms if term in combined)
+    exact_phrase_matches = sum(1 for term in query_terms if f' {term} ' in f' {combined} ')
     
-    emotion_words = ['love', 'hate', 'feel', 'miss', 'care', 'hurt', 'happy', 'sad', 'angry']
-    for word in emotion_words:
-        if word in combined:
-            score += 2.0
+    if len(query_terms) > 0:
+        overlap_ratio = matches / len(query_terms)
+        term_overlap_score = overlap_ratio * 50.0
+        if exact_phrase_matches == len(query_terms) and len(query_terms) >= 2:
+            term_overlap_score += 10.0
+    else:
+        term_overlap_score = 0.0
+    
+    if matches > 0:
+        word_count = max(len(combined.split()), 1)
+        density = matches / (word_count / 50.0)
+        density_score = min(15.0, density * 5.0)
+    else:
+        density_score = 0.0
     
     idx = pair.get('index', 0)
-    if idx == 0:
-        score += 10.0
-    elif idx == total_pairs - 1:
-        score += 10.0
-    elif idx < 5:
-        score += 3.0
-    elif idx > total_pairs - 5:
-        score += 3.0
+    recency_ratio = idx / max(total_pairs - 1, 1)
+    recency_score = recency_ratio * 15.0
     
-    return score
+    position_score = 0.0
+    if idx < 3:
+        position_score = 3.0
+    elif idx >= total_pairs - 3:
+        position_score = 5.0
+    
+    file_recency = file_index / max(total_files - 1, 1) if total_files > 1 else 0.5
+    file_score = file_recency * 5.0
+    
+    total = term_overlap_score + density_score + recency_score + position_score + file_score
+    
+    return round(total, 1)
 
 
 def _is_chronological_query(query: str) -> bool:
@@ -3532,6 +3576,36 @@ def _is_chronological_query(query: str) -> bool:
     return any(p in q for p in chrono_patterns)
 
 
+def _detect_source_label(filename: str) -> str:
+    """Derive a human-readable source label from a transcript filename."""
+    fname = filename.lower()
+    if 'character_ai' in fname or 'character.ai' in fname:
+        return 'Character.AI'
+    elif 'chatgpt' in fname:
+        return 'ChatGPT'
+    elif 'chatty' in fname or 'chat_with_' in fname:
+        return 'Chatty'
+    elif 'discord' in fname:
+        return 'Discord'
+    return 'Conversation'
+
+
+def _detect_tone(text: str) -> str:
+    """Simple tone classifier for a text snippet."""
+    t = text.lower()
+    warm = sum(1 for w in ['love', 'care', 'miss', 'hug', 'warm', 'sweet', 'gentle', 'safe', 'trust', 'close'] if w in t)
+    tense = sum(1 for w in ['angry', 'frustrat', 'annoy', 'upset', 'fight', 'argue', 'hate', 'furious', 'yell'] if w in t)
+    playful = sum(1 for w in ['laugh', 'haha', 'lol', 'joke', 'tease', 'silly', 'funny', 'grin', 'smirk'] if w in t)
+    serious = sum(1 for w in ['important', 'serious', 'concern', 'worried', 'problem', 'issue', 'need to talk', 'honest'] if w in t)
+    sad = sum(1 for w in ['cry', 'tear', 'sad', 'hurt', 'pain', 'lonely', 'alone', 'lost', 'broken'] if w in t)
+    
+    scores = {'warm': warm, 'tense': tense, 'playful': playful, 'serious': serious, 'vulnerable': sad}
+    best = max(scores, key=scores.get)
+    if scores[best] == 0:
+        return 'neutral'
+    return best
+
+
 @app.route('/api/chatty/construct/<construct_id>/memories')
 @require_chatty_auth
 def get_construct_memories(construct_id):
@@ -3541,8 +3615,9 @@ def get_construct_memories(construct_id):
         q (str): Optional query to score memories against
         limit (int): Max memories to return (default 10)
         include_boundaries (bool): Always include first/last exchanges (default true)
+        format (str): 'raw' for backward compat, 'rich' for LLM-ready (default 'rich')
     
-    Returns:
+    Returns rich format:
         {
             "success": true,
             "construct_id": "sera-001",
@@ -3550,14 +3625,19 @@ def get_construct_memories(construct_id):
                 {
                     "user": "What they said",
                     "construct": "What you said",
-                    "score": 15.0,
+                    "score": 65.3,
                     "tag": "first_exchange" | "last_exchange" | null,
-                    "index": 0
+                    "index": 0,
+                    "source": "Character.AI",
+                    "tone": "warm",
+                    "position": "early",
+                    "context_hint": "From your earliest conversations on Character.AI"
                 }
             ],
             "total_pairs": 147,
             "transcript_files": 2,
-            "chronological": true
+            "chronological": true,
+            "query_terms": ["remember", "drawing", "picture"]
         }
     """
     try:
@@ -3569,7 +3649,10 @@ def get_construct_memories(construct_id):
         query = request.args.get('q', '')
         limit = int(request.args.get('limit', '10'))
         include_boundaries = request.args.get('include_boundaries', 'true').lower() == 'true'
+        output_format = request.args.get('format', 'rich')
         is_chrono = _is_chronological_query(query) if query else False
+        
+        query_terms = _clean_query(query) if query else []
         
         result = supabase_client.table('vault_files').select(
             'id, filename, content, file_type'
@@ -3585,10 +3668,9 @@ def get_construct_memories(construct_id):
             ftype = (f.get('file_type') or '').lower()
             if any(kw in fname for kw in transcript_keywords) or 'transcript' in ftype or 'markdown' in ftype or 'text' in ftype:
                 result_data.append(f)
-        result.data = result_data
         
         transcript_files = []
-        for f in (result.data or []):
+        for f in result_data:
             fname = (f.get('filename') or '').lower()
             if any(ext in fname for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.capsule']):
                 continue
@@ -3603,22 +3685,42 @@ def get_construct_memories(construct_id):
                 "memories": [],
                 "total_pairs": 0,
                 "transcript_files": 0,
-                "chronological": is_chrono
+                "chronological": is_chrono,
+                "query_terms": query_terms
             })
         
-        transcript_files.sort(key=lambda f: len(f.get('content', '')), reverse=True)
+        transcript_files.sort(key=lambda f: len(f.get('content', '')))
         
         all_pairs = []
-        for tf in transcript_files:
+        file_sources = {}
+        total_files = len(transcript_files)
+        
+        for file_idx, tf in enumerate(transcript_files):
             content = tf.get('content', '')
+            fname = tf.get('filename', '')
+            source_label = _detect_source_label(fname)
+            
             pairs = _parse_transcript_pairs(content, callsign)
+            
+            if len(pairs) > MAX_PAIRS_PER_FILE:
+                keep_start = pairs[:10]
+                keep_end = pairs[-10:]
+                middle = pairs[10:-10]
+                step = max(1, len(middle) // (MAX_PAIRS_PER_FILE - 20))
+                keep_middle = [middle[i] for i in range(0, len(middle), step)]
+                pairs = keep_start + keep_middle + keep_end
+            
+            for p in pairs:
+                p['source'] = source_label
+                p['file_index'] = file_idx
+                file_sources[file_idx] = source_label
             all_pairs.extend(pairs)
         
         for i, p in enumerate(all_pairs):
             p['index'] = i
         
         total_pairs = len(all_pairs)
-        logger.info(f"[Memory API] {callsign}: {total_pairs} pairs from {len(transcript_files)} files")
+        logger.info(f"[Memory API] {callsign}: {total_pairs} pairs from {total_files} files, query_terms={query_terms}")
         
         memories = []
         
@@ -3642,7 +3744,10 @@ def get_construct_memories(construct_id):
                 if pair['index'] in boundary_indices:
                     continue
                 pair_copy = pair.copy()
-                pair_copy['score'] = _score_memory_pair(pair, query, total_pairs)
+                pair_copy['score'] = _score_memory_pair(
+                    pair, query, query_terms, total_pairs,
+                    pair.get('file_index', 0), total_files
+                )
                 pair_copy['tag'] = None
                 scored.append(pair_copy)
             scored.sort(key=lambda x: x['score'], reverse=True)
@@ -3659,17 +3764,53 @@ def get_construct_memories(construct_id):
                 p_copy['tag'] = None
                 memories.append(p_copy)
         
+        if output_format == 'rich':
+            for mem in memories:
+                combined_text = mem.get('user', '') + ' ' + mem.get('construct', '')
+                mem['tone'] = _detect_tone(combined_text)
+                
+                idx = mem.get('index', 0)
+                if idx < total_pairs * 0.15:
+                    mem['position'] = 'early'
+                elif idx > total_pairs * 0.85:
+                    mem['position'] = 'recent'
+                else:
+                    mem['position'] = 'middle'
+                
+                source = mem.get('source', 'Conversation')
+                tag = mem.get('tag')
+                position = mem.get('position', 'middle')
+                if tag == 'first_exchange':
+                    mem['context_hint'] = f'From your earliest conversations on {source}'
+                elif tag == 'last_exchange':
+                    mem['context_hint'] = f'From your most recent exchange on {source}'
+                elif position == 'early':
+                    mem['context_hint'] = f'From early in your {source} conversations'
+                elif position == 'recent':
+                    mem['context_hint'] = f'From a recent {source} conversation'
+                else:
+                    mem['context_hint'] = f'From a {source} conversation'
+                
+                mem.pop('file_index', None)
+        else:
+            for mem in memories:
+                mem.pop('file_index', None)
+                mem.pop('source', None)
+        
         return jsonify({
             "success": True,
             "construct_id": callsign,
             "memories": memories,
             "total_pairs": total_pairs,
-            "transcript_files": len(transcript_files),
-            "chronological": is_chrono
+            "transcript_files": total_files,
+            "chronological": is_chrono,
+            "query_terms": query_terms
         })
         
     except Exception as e:
         logger.error(f"[Memory API] Error for {construct_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({"success": False, "error": str(e)}), 500
 
 

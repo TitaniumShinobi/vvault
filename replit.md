@@ -83,7 +83,11 @@ A 5-layer security system for sovereign construct identity preservation with a s
   - `POST /api/chatty/transcript/<id>` — update transcript
   - `POST /api/chatty/transcript/<id>/message` — append message
   - `POST /api/chatty/message` — send message to construct (LLM inference)
-  - `GET /api/chatty/construct/<id>/memories?q=...&limit=10` — pre-processed, scored transcript memories with chronological boundary pairs (first/last exchanges always tagged). Centralizes memory extraction so Chatty doesn't reimplement parsing/scoring.
+  - `GET /api/chatty/construct/<id>/memories?q=...&limit=10&format=rich` — pre-processed, scored transcript memories with chronological boundary pairs (first/last exchanges always tagged). Centralizes memory extraction so Chatty doesn't reimplement parsing/scoring.
+    - **Scoring**: Query-relevance (term overlap + density), recency weighting, position bonus. Filler words stripped via `_clean_query()`.
+    - **Rich format** (default): Each memory includes `source` (Character.AI/Chatty/ChatGPT), `tone` (warm/tense/playful/serious/vulnerable/neutral), `position` (early/middle/recent), `context_hint` (human-readable provenance string for LLM injection).
+    - **Per-file cap**: `MAX_PAIRS_PER_FILE=200` prevents one massive transcript from drowning others; samples evenly across early/middle/late segments.
+    - **Backward compat**: `format=raw` omits rich metadata fields.
 - **Service API**: VVAULT serves as a config and credentials vault for external services.
 - **VXRunner Integration API**: VVAULT exposes capsule data as forensic DNA baselines for VXRunner's construct detection system.
 
