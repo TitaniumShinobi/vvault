@@ -1217,6 +1217,8 @@ def map_to_vsi_folder(filename: str, construct_id: str = '', metadata: dict = No
             return f'instances/{construct_id}/{folder}/{base}'
         if base.endswith('.capsule'):
             return f'instances/{construct_id}/memup/{base}'
+        if 'character.ai' in base.lower() or 'character_ai' in base.lower():
+            return f'instances/{construct_id}/character.ai/{base}'
         if base.endswith('-K1.md') or base.startswith('test_') or base == 'CONTINUITY_GPT_PROMPT.md':
             return f'instances/{construct_id}/chatgpt/{base}'
         if base.startswith('chat_with_'):
