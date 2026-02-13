@@ -1365,7 +1365,7 @@ def get_vault_files():
         user_name = user_result.data[0].get('name', user_email.split('@')[0]) if user_result.data else user_email.split('@')[0]
         
         if is_admin:
-            result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, content, file_type, metadata, created_at').execute()
+            result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, file_type, metadata, created_at').execute()
             logger.debug(f"Admin {user_email} fetching all vault files")
             files = _transform_files_for_display(result.data or [], is_admin=True, user_id=None)
         else:
@@ -1377,7 +1377,7 @@ def get_vault_files():
                     "user_root": user_name,
                     "message": "No files yet - upload your first file to get started"
                 })
-            result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, content, file_type, metadata, created_at').eq('user_id', user_id).eq('is_system', False).execute()
+            result = supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, file_type, metadata, created_at').eq('user_id', user_id).eq('is_system', False).execute()
             logger.debug(f"User {user_email} fetching their vault files (user_id={user_id})")
             files = _transform_files_for_display(result.data or [], is_admin=False, user_id=user_id)
         
