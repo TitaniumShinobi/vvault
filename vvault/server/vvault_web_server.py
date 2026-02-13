@@ -1554,9 +1554,17 @@ def upload_knowledge_files():
             if fname_lower.endswith('.zip'):
                 try:
                     zf = zipfile.ZipFile(io.BytesIO(raw))
-                    for info in zf.infolist():
-                        if info.is_dir():
-                            continue
+                    zip_entries = [i for i in zf.infolist() if not i.is_dir()]
+                    zip_paths = [e.filename.replace('\\', '/') for e in zip_entries]
+                    common_prefix = ''
+                    if zip_paths:
+                        first_parts = zip_paths[0].split('/')
+                        if len(first_parts) > 1:
+                            candidate = first_parts[0] + '/'
+                            if all(p.startswith(candidate) for p in zip_paths):
+                                common_prefix = candidate
+
+                    for info in zip_entries:
                         inner_name = info.filename
                         basename = os.path.basename(inner_name)
                         if not basename or basename.startswith('.'):
@@ -1567,14 +1575,16 @@ def upload_knowledge_files():
                         if info.file_size > KNOWLEDGE_MAX_SINGLE_FILE:
                             continue
                         inner_bytes = zf.read(info.filename)
-                        subfolder = ''
-                        parts = inner_name.replace('\\', '/').split('/')
-                        if len(parts) > 1:
-                            subfolder = parts[-2]
+                        rel_path = inner_name.replace('\\', '/')
+                        if common_prefix and rel_path.startswith(common_prefix):
+                            rel_path = rel_path[len(common_prefix):]
+                        if '..' in rel_path:
+                            continue
+                        rel_dir = '/'.join(rel_path.split('/')[:-1])
 
                         file_entries.append({
                             'basename': basename,
-                            'subfolder': subfolder,
+                            'subfolder': rel_dir,
                             'content': _read_file_content(inner_bytes, basename),
                             'raw_sha256': hashlib.sha256(inner_bytes).hexdigest(),
                             'file_type': _guess_file_type(basename),
@@ -1621,16 +1631,19 @@ def upload_knowledge_files():
 
         for entry in file_entries:
             try:
-                metadata = {'folder': entry['subfolder']} if entry['subfolder'] else {}
-                vsi_path = map_to_vsi_folder(entry['basename'], callsign, metadata if metadata.get('folder') else None)
+                rel_dir = entry.get('subfolder', '')
+                if rel_dir:
+                    vsi_path = f'instances/{callsign}/{rel_dir}/{entry["basename"]}'
+                else:
+                    vsi_path = map_to_vsi_folder(entry['basename'], callsign, None)
 
                 sha = entry.get('raw_sha256', hashlib.sha256(
                     entry['content'].encode('utf-8') if isinstance(entry['content'], str) else entry['content']
                 ).hexdigest())
 
-                vsi_folder = vsi_path.rsplit('/', 1)[0].rsplit('/', 1)[-1] if '/' in vsi_path else ''
+                top_folder = rel_dir.split('/')[0] if rel_dir else (vsi_path.rsplit('/', 1)[0].rsplit('/', 1)[-1] if '/' in vsi_path else '')
                 meta_json = json.dumps({
-                    'folder': entry['subfolder'] or vsi_folder,
+                    'folder': top_folder,
                     'original_size': entry['size'],
                     'upload_batch': now,
                 })
