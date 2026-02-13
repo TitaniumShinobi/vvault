@@ -62,6 +62,9 @@ const VaultBrowser = ({ user }) => {
   const [userInfo, setUserInfo] = useState({ root_label: 'Vault', is_admin: false });
   const [syncingConstruct, setSyncingConstruct] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
+  const [uploadState, setUploadState] = useState({ active: false, progress: '', result: null });
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = React.useRef(null);
 
   const fetchConstructs = useCallback(async () => {
     try {
@@ -143,6 +146,81 @@ const VaultBrowser = ({ user }) => {
     } finally {
       setSyncingConstruct(null);
     }
+  };
+
+  const getActiveConstructId = () => {
+    if (currentPath.length >= 2 && currentPath[0] === 'instances') {
+      return currentPath[1];
+    }
+    return null;
+  };
+
+  const handleUploadFiles = async (fileList) => {
+    const constructId = getActiveConstructId();
+    if (!constructId) {
+      setUploadState({ active: false, progress: '', result: { success: false, error: 'Navigate to a construct folder first' } });
+      return;
+    }
+    if (!fileList || fileList.length === 0) return;
+
+    setUploadState({ active: true, progress: 'Preparing upload...', result: null });
+
+    const formData = new FormData();
+    formData.append('construct_id', constructId);
+    for (let i = 0; i < fileList.length; i++) {
+      formData.append('files', fileList[i]);
+    }
+
+    const totalSize = Array.from(fileList).reduce((s, f) => s + f.size, 0);
+    const sizeMB = (totalSize / (1024 * 1024)).toFixed(1);
+    setUploadState({ active: true, progress: `Uploading ${fileList.length} file(s) (${sizeMB} MB)...`, result: null });
+
+    try {
+      let token = null;
+      try {
+        const savedUser = localStorage.getItem('vvault_user');
+        if (savedUser) {
+          const parsed = JSON.parse(savedUser);
+          if (parsed.token) token = parsed.token;
+        }
+      } catch (e) {}
+      if (!token) token = localStorage.getItem('vvault_token');
+      const response = await fetch('/api/vault/knowledge-files/upload', {
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+        body: formData,
+      });
+      const data = await response.json();
+      setUploadState({ active: false, progress: '', result: data });
+      if (data.success) {
+        fetchFiles();
+      }
+      setTimeout(() => setUploadState(prev => ({ ...prev, result: null })), 8000);
+    } catch (err) {
+      setUploadState({ active: false, progress: '', result: { success: false, error: 'Upload failed: ' + err.message } });
+      setTimeout(() => setUploadState(prev => ({ ...prev, result: null })), 8000);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleUploadFiles(e.dataTransfer.files);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
   };
 
   const buildHierarchy = (files) => {
@@ -434,6 +512,26 @@ const VaultBrowser = ({ user }) => {
           </div>
 
           <div className="toolbar-actions">
+            {getActiveConstructId() && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept=".zip,.txt,.md,.pdf,.doc,.docx,.json,.csv,.xlsx,.png,.jpg,.jpeg,.svg,.capsule,.py,.js,.yaml,.yml"
+                  style={{ display: 'none' }}
+                  onChange={(e) => { handleUploadFiles(e.target.files); e.target.value = ''; }}
+                />
+                <button
+                  className="upload-btn"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadState.active}
+                  title="Upload files or .zip archive"
+                >
+                  {uploadState.active ? '...' : '+ Upload'}
+                </button>
+              </>
+            )}
             <input 
               type="text" 
               placeholder="Search files..." 
@@ -456,7 +554,38 @@ const VaultBrowser = ({ user }) => {
           </div>
         </div>
 
-        <div className={`vault-content ${viewMode}`}>
+        {(uploadState.active || uploadState.result) && (
+          <div className="upload-status-bar">
+            {uploadState.active && (
+              <div className="upload-progress">
+                <div className="upload-spinner"></div>
+                <span>{uploadState.progress}</span>
+              </div>
+            )}
+            {uploadState.result && (
+              <div className={`upload-result ${uploadState.result.success ? 'upload-success' : 'upload-error'}`}>
+                {uploadState.result.success
+                  ? `${uploadState.result.message || `Uploaded ${uploadState.result.total_files} files`}`
+                  : (uploadState.result.error || 'Upload failed')}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div
+          className={`vault-content ${viewMode} ${dragOver ? 'drag-over' : ''}`}
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+        >
+          {dragOver && (
+            <div className="drop-overlay">
+              <div className="drop-overlay-content">
+                <span className="drop-icon">📦</span>
+                <span>Drop files or .zip archive here</span>
+              </div>
+            </div>
+          )}
           <div className="file-list">
             <div className="file-list-header">
               <span className="col-name">NAME</span>
