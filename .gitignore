@@ -129,6 +129,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -254,3 +256,4 @@ node_modules
 
 # Ignore system files
 .DS_Store
+node_modules/
