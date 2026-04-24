@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { authFetch } from '../utils/authFetch';
+import { authFetch, SUPABASE_OUTAGE_EVENT } from '../utils/authFetch';
 import './VaultBrowser.css';
 
 const CONSTRUCT_COLORS = {
@@ -55,6 +55,7 @@ const VaultBrowser = ({ user }) => {
   const [currentPath, setCurrentPath] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [fileContent, setFileContent] = useState(null);
   const [viewMode, setViewMode] = useState('list');
@@ -64,12 +65,33 @@ const VaultBrowser = ({ user }) => {
   const [syncResult, setSyncResult] = useState(null);
   const [uploadState, setUploadState] = useState({ active: false, progress: '', result: null });
   const [dragOver, setDragOver] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [degraded, setDegraded] = useState({ active: false, message: '', errorCode: '' });
   const fileInputRef = React.useRef(null);
+
+  const applyDegradedContract = useCallback((data) => {
+    if (!data || (data.supabase_available !== false && data.degraded !== true)) return false;
+    setDegraded({
+      active: true,
+      message: data.message || 'Supabase is temporarily unavailable. Some vault data may be missing.',
+      errorCode: data.error_code || 'SUPABASE_TIMEOUT_522',
+    });
+    return true;
+  }, []);
+
+  const clearDegradedIfHealthy = useCallback((data) => {
+    if (data && data.supabase_available === false) return;
+    setDegraded((prev) => (prev.active ? { active: false, message: '', errorCode: '' } : prev));
+  }, []);
 
   const fetchConstructs = useCallback(async () => {
     try {
       const response = await authFetch('/api/chatty/constructs');
       const data = await response.json();
+      const isDegraded = applyDegradedContract(data);
+      if (!isDegraded && data.message) {
+        setNotice(data.message);
+      }
       if (data.success && data.constructs) {
         const formatted = data.constructs.map(c => ({
           id: c.construct_id,
@@ -78,36 +100,50 @@ const VaultBrowser = ({ user }) => {
           color: getConstructColor(c.construct_id)
         }));
         setConstructs(formatted);
+        clearDegradedIfHealthy(data);
+      } else if (isDegraded) {
+        setConstructs(data.constructs || []);
       }
     } catch (err) {
       console.error('Failed to fetch constructs:', err);
     }
-  }, []);
+  }, [applyDegradedContract, clearDegradedIfHealthy]);
 
   const fetchUserInfo = useCallback(async () => {
     try {
       const response = await authFetch('/api/vault/user-info');
       const data = await response.json();
+      const isDegraded = applyDegradedContract(data);
       if (data.success) {
         setUserInfo({
           root_label: data.root_label || 'Vault',
           display_name: data.display_name,
           is_admin: data.is_admin || false
         });
+        if (!isDegraded) {
+          clearDegradedIfHealthy(data);
+        }
       }
     } catch (err) {
       console.error('Failed to fetch user info:', err);
     }
-  }, []);
+  }, [applyDegradedContract, clearDegradedIfHealthy]);
 
-  const fetchFiles = useCallback(async () => {
-    setLoading(true);
+  const fetchFiles = useCallback(async (isRefresh = false) => {
+    if (!isRefresh) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const response = await authFetch('/api/vault/files');
       const data = await response.json();
-      if (data.success) {
+      const isDegraded = applyDegradedContract(data);
+      if (data.success || isDegraded) {
         setFiles(data.files || []);
+        if (!isDegraded) {
+          setNotice(data.message || null);
+          clearDegradedIfHealthy(data);
+        }
         if (data.user_root) {
           setUserInfo(prev => ({ ...prev, root_label: data.user_root }));
         }
@@ -117,15 +153,30 @@ const VaultBrowser = ({ user }) => {
     } catch (err) {
       setError('Failed to connect to server');
     } finally {
-      setLoading(false);
+      if (!isRefresh) {
+        setLoading(false);
+      }
     }
-  }, []);
+  }, [applyDegradedContract, clearDegradedIfHealthy]);
 
   useEffect(() => {
     fetchUserInfo();
     fetchFiles();
     fetchConstructs();
   }, [fetchUserInfo, fetchFiles, fetchConstructs]);
+
+  useEffect(() => {
+    const onOutage = (event) => {
+      const detail = event?.detail || {};
+      setDegraded({
+        active: true,
+        message: detail.message || 'Supabase is temporarily unavailable. Some vault data may be missing.',
+        errorCode: detail.error_code || 'SUPABASE_TIMEOUT_522',
+      });
+    };
+    window.addEventListener(SUPABASE_OUTAGE_EVENT, onOutage);
+    return () => window.removeEventListener(SUPABASE_OUTAGE_EVENT, onOutage);
+  }, []);
 
   const triggerMemupSync = async (constructId) => {
     setSyncingConstruct(constructId);
@@ -283,6 +334,18 @@ const VaultBrowser = ({ user }) => {
     setFileContent(null);
   };
 
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    setError(null);
+    try {
+      await fetchUserInfo();
+      await fetchFiles(true);
+      await fetchConstructs();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const navigateToBreadcrumb = (index) => {
     setCurrentPath(currentPath.slice(0, index + 1));
     setSelectedFile(null);
@@ -345,7 +408,7 @@ const VaultBrowser = ({ user }) => {
   };
 
   const formatSize = (bytes) => {
-    if (!bytes) return '-';
+    if (!bytes && bytes !== 0) return '-';
     const kb = bytes / 1024;
     if (kb < 1024) return `${kb.toFixed(1)} KB`;
     return `${(kb / 1024).toFixed(1)} MB`;
@@ -382,7 +445,7 @@ const VaultBrowser = ({ user }) => {
         <div className="vault-error">
           <span className="error-icon">⚠️</span>
           <p>{error}</p>
-          <button onClick={fetchFiles}>Retry</button>
+          <button onClick={handleRefresh}>Retry</button>
         </div>
       </div>
     );
@@ -466,6 +529,9 @@ const VaultBrowser = ({ user }) => {
               {syncResult.success
                 ? `Synced: ${syncResult.entries_added || 0} new, ${syncResult.total_sessions || 0} total sessions`
                 : (syncResult.error || 'Sync failed')}
+              {syncResult.touched_files?.length ? (
+                <div className="sync-files">Updated: {syncResult.touched_files.join(', ')}</div>
+              ) : null}
             </div>
           )}
         </div>
@@ -487,6 +553,14 @@ const VaultBrowser = ({ user }) => {
               disabled={currentPath.length === 0}
             >
               🏠
+            </button>
+            <button
+              className="nav-button"
+              onClick={handleRefresh}
+              disabled={refreshing || loading}
+              title="Refresh vault"
+            >
+              {refreshing ? <span className="upload-spinner" /> : '↻'}
             </button>
           </div>
           
@@ -572,6 +646,28 @@ const VaultBrowser = ({ user }) => {
           </div>
         )}
 
+        {degraded.active && (
+          <div className="vault-notice vault-notice-outage">
+            <span className="vault-notice-icon">!</span>
+            <span>{degraded.message}</span>
+            <button
+              type="button"
+              className="vault-notice-retry"
+              onClick={handleRefresh}
+              disabled={refreshing || loading}
+            >
+              {refreshing ? 'Retrying...' : 'Retry'}
+            </button>
+          </div>
+        )}
+
+        {notice && !degraded.active && (
+          <div className="vault-notice">
+            <span className="vault-notice-icon">!</span>
+            <span>{notice}</span>
+          </div>
+        )}
+
         <div
           className={`vault-content ${viewMode} ${dragOver ? 'drag-over' : ''}`}
           onDrop={handleDrop}
@@ -589,7 +685,6 @@ const VaultBrowser = ({ user }) => {
           <div className="file-list">
             <div className="file-list-header">
               <span className="col-name">NAME</span>
-              <span className="col-construct">CONSTRUCT</span>
               <span className="col-date">DATE MODIFIED</span>
               <span className="col-size">SIZE</span>
             </div>
@@ -604,7 +699,6 @@ const VaultBrowser = ({ user }) => {
                   <span className="file-icon">{getFileIcon(folderName, true)}</span>
                   <span className="file-name">{folderName}</span>
                 </span>
-                <span className="col-construct">-</span>
                 <span className="col-date">-</span>
                 <span className="col-size">-</span>
               </div>
@@ -623,24 +717,21 @@ const VaultBrowser = ({ user }) => {
                   className={`file-row ${selectedFile?.id === file.id ? 'selected' : ''}`}
                   onClick={() => selectFile(file)}
                 >
-                  <span className="col-name">
-                    <span className="file-icon">
-                      {getFileIcon(file.displayName || file.filename, false, file.file_type)}
-                    </span>
-                    <span className="file-name">{file.displayName || file.filename}</span>
+                <span className="col-name">
+                  <span className="file-icon">
+                    {getFileIcon(file.displayName || file.filename, false, file.file_type)}
                   </span>
-                  <span className="col-construct">
-                    {file.construct_id || '-'}
-                  </span>
-                  <span className="col-date">
-                    {formatDate(file.created_at || metadata.migrated_at)}
-                  </span>
-                  <span className="col-size">
-                    {formatSize(metadata.size)}
-                  </span>
-                </div>
-              );
-            })}
+                  <span className="file-name">{file.displayName || file.filename}</span>
+                </span>
+                <span className="col-date">
+                  {formatDate(file.display_date || file.created_at || metadata.migrated_at)}
+                </span>
+                <span className="col-size">
+                  {formatSize(file.display_size || metadata.size)}
+                </span>
+              </div>
+            );
+          })}
             
             {folderNames.length === 0 && fileList.length === 0 && (
               <div className="empty-folder">
