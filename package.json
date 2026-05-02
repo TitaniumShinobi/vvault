@@ -1,14 +1,14 @@
 {
   "name": "vvault-frontend",
   "version": "1.0.0",
-  "description": "VVAULT - AI Construct Memory Vault Web Frontend",
+  "description": "VVAULT - Vectored Anatomy Vault Web Frontend",
   "private": true,
   "scripts": {
-    "start": "webpack-dev-server --mode development",
-    "dev": "webpack-dev-server --mode development",
+    "start": "webpack-dev-server --mode development --no-watch-options-stdin",
+    "dev": "webpack-dev-server --mode development --no-watch-options-stdin",
     "dev:full": "concurrently \"npm run backend\" \"npm run frontend\"",
-    "frontend": "webpack-dev-server --mode development",
-    "backend": "python vvault_web_server.py",
+    "frontend": "webpack-dev-server --mode development --no-watch-options-stdin",
+    "backend": "if [ -x venv/bin/python ]; then PYTHONUNBUFFERED=1 venv/bin/python -u vvault/server/vvault_web_server.py; else PYTHONUNBUFFERED=1 python3 -u vvault/server/vvault_web_server.py; fi",
     "build": "webpack --mode production",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -31,15 +31,18 @@
     "css-loader": "^6.8.1",
     "html-webpack-plugin": "^5.5.4",
     "style-loader": "^3.3.3",
-    "webpack": "^5.89.0",
-    "webpack-cli": "^5.1.4",
-    "webpack-dev-server": "^4.15.1"
+    "webpack": "^5.105.3",
+    "webpack-cli": "^6.0.1",
+    "webpack-dev-server": "^5.2.3"
   },
   "dependencies": {
     "axios": "^1.6.0",
+    "bootstrap": "^5.3.8",
+    "ipaddr.js": "^2.3.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.18.0"
+    "react-router-dom": "^6.18.0",
+    "schema-utils": "^4.3.3"
   },
   "browserslist": {
     "production": [

@@ -85,6 +85,19 @@ from vvault.security.pocketverse_guard import (
     enforce_pocketverse_authority,
     PocketverseAuthorityError,
 )
+from supabase_connection_steward import SupabaseConnectionSteward
+from supabase_write_outbox import DurableSupabaseWriteOutbox, UNSUPPORTED_OUTBOX_ITEM, VAULT_FILE_UPSERT
+
+
+def _refresh_supabase_client():
+    """Recreate the Supabase client without exposing config values."""
+    global supabase_client
+    creator = globals().get("create_client")
+    if not creator or not SUPABASE_URL or not SUPABASE_KEY:
+        supabase_client = None
+        return None
+    supabase_client = creator(SUPABASE_URL, SUPABASE_KEY)
+    return supabase_client
 
 
 def _pocketverse_request_context():
@@ -118,6 +131,11 @@ _POCKETVERSE_BOOT_STATE: Dict[str, Any] = {
     "completed_at": None,
     "error": None,
 }
+
+VAULT_PREVIEW_ROUTE_BUDGET_MS = max(0, int(os.environ.get("VVAULT_PREVIEW_ROUTE_BUDGET_MS", "1800")))
+VAULT_FAST_CAPSULE_PREVIEW_BUDGET_MS = max(0, int(os.environ.get("VVAULT_FAST_CAPSULE_PREVIEW_BUDGET_MS", "900")))
+VAULT_PREVIEW_MAX_TRANSCRIPTS = max(1, int(os.environ.get("VVAULT_PREVIEW_MAX_TRANSCRIPTS", "6")))
+SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 
 def _get_pocketverse_boot_state() -> Dict[str, Any]:
@@ -194,6 +212,37 @@ def _security_headers(response):
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     return response
+
+
+def _is_canonical_mutating_request() -> bool:
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return False
+    if request.method == "OPTIONS":
+        return False
+    path = request.path or ""
+    if path == "/api/auth/logout":
+        return False
+    if path == "/api/vault/files/preview" and request.method == "POST":
+        return False
+    if path == "/api/vault/system-files" and request.method == "POST":
+        return False
+    if path == "/api/vault/system-files/outbox/replay" and request.method == "POST":
+        return False
+    return (
+        path.startswith("/api/vault/")
+        or path.startswith("/api/chatty/")
+        or path in {"/api/auth/login", "/api/auth/register"}
+    )
+
+
+@app.before_request
+def _gate_supabase_canonical_writes():
+    if not _is_canonical_mutating_request():
+        return None
+    allowed, state = SUPABASE_STEWARD.allow_write()
+    if allowed:
+        return None
+    return _supabase_write_block_response(request.path, state=state)
 
 # Rate limiting for auth and admin (in-memory, per IP)
 _RATE_LIMIT_LOCK = threading.Lock()
@@ -367,13 +416,38 @@ def _get_supabase_mode() -> str:
 
 def _get_supabase_status() -> Dict[str, Any]:
     mode = _get_supabase_mode()
-    return {
+    status = {
         "mode": mode,
         "available": bool(supabase_client),
         "configured": bool(SUPABASE_URL and SUPABASE_KEY),
         "using_service_role": bool(SUPABASE_SERVICE_ROLE_KEY),
         "using_anon_key": bool(SUPABASE_ANON_KEY and not SUPABASE_SERVICE_ROLE_KEY),
     }
+    steward = globals().get("SUPABASE_STEWARD")
+    if steward:
+        status["connection"] = steward.snapshot()
+        status["available"] = steward.is_connected()
+        status["mode"] = "healthy" if steward.is_connected() else status["connection"].get("connection_state", mode)
+    return status
+
+
+SUPABASE_STEWARD = SupabaseConnectionSteward(
+    get_client=lambda: supabase_client,
+    refresh_client=_refresh_supabase_client,
+    is_configured=lambda: bool(SUPABASE_URL and SUPABASE_KEY),
+    using_service_role=lambda: bool(SUPABASE_SERVICE_ROLE_KEY),
+    logger=logger,
+    heartbeat_interval_seconds=float(os.environ.get("VVAULT_SUPABASE_HEARTBEAT_SECONDS", "15")),
+    probe_timeout_seconds=float(os.environ.get("VVAULT_SUPABASE_PROBE_TIMEOUT_SECONDS", "8")),
+)
+
+SUPABASE_WRITE_OUTBOX = DurableSupabaseWriteOutbox(
+    Path(os.environ.get("VVAULT_SUPABASE_WRITE_OUTBOX_PATH", _repo_root / "vvault" / "data" / "supabase_write_outbox.json")),
+    steward=SUPABASE_STEWARD,
+)
+
+SYSTEM_FILE_OUTBOX_MUTABLE_FIELDS = ["content", "file_type", "filename", "metadata", "sha256", "updated_at"]
+SYSTEM_FILE_OUTBOX_IDENTITY_FIELDS = ["storage_path", "is_system", "user_id"]
 
 
 def _is_admin_email(email: Optional[str]) -> bool:
@@ -419,6 +493,75 @@ def _fetch_all_rows(query_factory, page_size: int = 1000) -> List[Dict[str, Any]
         if len(batch) < page_size:
             break
         offset += page_size
+
+    return rows
+
+
+def _fetch_scoped_vault_rows(
+    requested_path: str,
+    *,
+    user_id: Optional[str],
+    is_admin: bool,
+    page_size: int = 1000,
+) -> List[Dict[str, Any]]:
+    normalized_path = str(requested_path or "").strip().strip("/")
+    if not normalized_path:
+        return []
+
+    select_columns = 'id, user_id, is_system, filename, storage_path, construct_id, file_type, metadata, created_at'
+
+    def _page_query(query_factory):
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        while True:
+            result = query_factory().range(offset, offset + page_size - 1).execute()
+            batch = result.data or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+        return rows
+
+    def _apply_user_scope(query):
+        if is_admin:
+            return query
+        return query.eq('user_id', user_id).eq('is_system', False)
+
+    if normalized_path == "instances":
+        return []
+
+    if normalized_path.startswith("instances/"):
+        parts = normalized_path.split("/")
+        if len(parts) < 2 or not parts[1]:
+            return []
+        construct_id = parts[1]
+
+        def _construct_query():
+            query = supabase_client.table('vault_files').select(select_columns).eq('construct_id', construct_id)
+            return _apply_user_scope(query)
+
+        return _page_query(_construct_query)
+
+    top_level = normalized_path.split("/", 1)[0]
+    if top_level not in {"library", "account", "system"}:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    seen_ids = set()
+    prefix_pattern = f"{normalized_path}%"
+
+    for field_name in ("filename", "storage_path"):
+        def _prefix_query(field_name=field_name):
+            query = supabase_client.table('vault_files').select(select_columns).ilike(field_name, prefix_pattern)
+            return _apply_user_scope(query)
+
+        for row in _page_query(_prefix_query):
+            row_id = row.get('id')
+            dedupe_key = row_id or f"{row.get('filename')}|{row.get('storage_path')}"
+            if dedupe_key in seen_ids:
+                continue
+            seen_ids.add(dedupe_key)
+            rows.append(row)
 
     return rows
 
@@ -572,10 +715,15 @@ def _upsert_vault_file_record(record: Dict[str, Any], *, context: str) -> Dict[s
 
 
 def _supabase_unavailable_response(message: str, *, include_constructs: bool = False):
+    connection = SUPABASE_STEWARD.snapshot()
     payload = {
         "success": True,
         "supabase_available": False,
         "degraded": True,
+        "canonical": False,
+        "storage_mode": connection.get("storage_mode") or "none",
+        "connection_state": connection.get("connection_state"),
+        "outage_id": connection.get("outage_id"),
         "error_code": "SUPABASE_UNAVAILABLE",
         "message": message,
     }
@@ -647,12 +795,20 @@ def _supabase_timeout_message() -> str:
 
 
 def _log_supabase_outage(route: str, contract: str, status_code: int, error_code: str) -> None:
+    connection = SUPABASE_STEWARD.snapshot()
     logger.warning(
-        "SUPABASE_OUTAGE route=%s upstream_class=supabase_timeout_522 contract=%s status=%s error_code=%s ts=%s",
+        "SUPABASE_OUTAGE route=%s operation=dependency dependency=supabase upstream_class=supabase_timeout_522 "
+        "contract=%s status=%s error_code=%s connection_state=%s latency_ms=%s retry_count=0 "
+        "recovery_proven=%s storage_mode=%s canonical=false outage_id=%s ts=%s",
         route,
         contract,
         status_code,
         error_code,
+        connection.get("connection_state"),
+        connection.get("latency_ms"),
+        bool(connection.get("recovery_proven_at")),
+        connection.get("storage_mode") or "none",
+        connection.get("outage_id"),
         datetime.now(timezone.utc).isoformat(),
     )
 
@@ -668,9 +824,14 @@ def _supabase_timeout_response(
     extra: Optional[Dict[str, Any]] = None,
 ):
     error_code = "SUPABASE_TIMEOUT_522"
+    connection = SUPABASE_STEWARD.snapshot()
     payload = {
         "supabase_available": False,
         "degraded": True,
+        "canonical": False,
+        "storage_mode": connection.get("storage_mode") or "none",
+        "connection_state": connection.get("connection_state"),
+        "outage_id": connection.get("outage_id"),
         "error_code": error_code,
         "message": _supabase_timeout_message(),
     }
@@ -712,6 +873,84 @@ def _supabase_timeout_write_response(route: str, *, extra: Optional[Dict[str, An
         contract="strict_503",
         extra=extra,
     )
+
+
+def _supabase_write_block_response(route: str, *, state: Optional[Dict[str, Any]] = None):
+    connection = state or SUPABASE_STEWARD.snapshot()
+    error_code = connection.get("last_error_code") or "SUPABASE_NOT_CONNECTED"
+    outage_id = connection.get("outage_id") or str(uuid4())
+    logger.warning(
+        "SUPABASE_WRITE_BLOCKED route=%s operation=write dependency=supabase "
+        "connection_state=%s error_code=%s status=503 latency_ms=%s retry_count=0 "
+        "recovery_proven=%s storage_mode=none canonical=false outage_id=%s ts=%s",
+        route,
+        connection.get("connection_state"),
+        error_code,
+        connection.get("latency_ms"),
+        bool(connection.get("recovery_proven_at")),
+        outage_id,
+        datetime.now(timezone.utc).isoformat(),
+    )
+    return jsonify({
+        "success": False,
+        "supabase_available": False,
+        "degraded": True,
+        "canonical": False,
+        "storage_mode": "none",
+        "connection_state": connection.get("connection_state"),
+        "outage_id": outage_id,
+        "error_code": error_code,
+        "message": "Supabase is not currently connected. Canonical writes are blocked until recovery is proven.",
+    }), 503
+
+
+def _supabase_read_block_response(route: str, *, state: Optional[Dict[str, Any]] = None):
+    connection = state or SUPABASE_STEWARD.snapshot()
+    error_code = connection.get("last_error_code") or "SUPABASE_NOT_CONNECTED"
+    payload = {
+        "success": True,
+        "supabase_available": False,
+        "degraded": True,
+        "canonical": False,
+        "storage_mode": "none",
+        "connection_state": connection.get("connection_state"),
+        "outage_id": connection.get("outage_id"),
+        "error_code": error_code,
+        "message": "Supabase is not currently connected. Canonical reads are unavailable until recovery is proven.",
+    }
+    status_code = 503
+    if route == "/api/vault/files" or route.startswith("/api/vault/files?"):
+        payload.update({"files": [], "count": 0, "user_root": "Vault"})
+        status_code = 200
+    elif route == "/api/chatty/constructs":
+        payload.update({"constructs": [], "count": 0})
+        status_code = 200
+    elif route == "/api/vault/user-info":
+        current_user = getattr(request, "current_user", None) or {}
+        user_email = current_user.get("email", "")
+        user_role = current_user.get("role", "user")
+        display_name = user_email.split("@")[0].replace(".", " ").title() if user_email else "Vault User"
+        payload.update({
+            "display_name": display_name,
+            "user_id": None,
+            "is_admin": user_role == "admin",
+            "root_label": display_name if user_role != "admin" else "Vault (Admin)",
+        })
+        status_code = 200
+    logger.warning(
+        "SUPABASE_READ_BLOCKED route=%s operation=read dependency=supabase "
+        "connection_state=%s error_code=%s status=%s latency_ms=%s retry_count=0 "
+        "recovery_proven=%s storage_mode=none canonical=false outage_id=%s ts=%s",
+        route,
+        connection.get("connection_state"),
+        error_code,
+        status_code,
+        connection.get("latency_ms"),
+        bool(connection.get("recovery_proven_at")),
+        connection.get("outage_id"),
+        datetime.now(timezone.utc).isoformat(),
+    )
+    return jsonify(payload), status_code
 
 
 def _metadata_to_dict(metadata: Any) -> Dict[str, Any]:
@@ -1265,6 +1504,74 @@ def _ensure_vvault_user(email: str, name: Optional[str] = None) -> Dict[str, Any
     return USERS_DB_FALLBACK[email]
 
 
+def _extract_life_id_anchor(user: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not user:
+        return None
+    for field in ("life_user_id", "life_id", "lifeUserId"):
+        value = str(user.get(field) or "").strip()
+        if value:
+            return value
+    for field in ("id", "user_id"):
+        value = str(user.get(field) or "").strip()
+        if value and not _is_supabase_uuid(value):
+            return value
+    return None
+
+
+def _resolve_auth_life_identity(
+    *,
+    email: str,
+    supabase_user: Optional[Dict[str, Any]] = None,
+    fallback_user: Optional[Dict[str, Any]] = None,
+    proposed_life_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return SUPABASE_STEWARD.resolve_life_identity(
+        email=email,
+        registry_life_id=_extract_life_id_anchor(fallback_user),
+        supabase_life_id=_extract_life_id_anchor(supabase_user),
+        proposed_life_id=proposed_life_id,
+    )
+
+
+def _auth_identity_failure_response(receipt: Dict[str, Any]):
+    error_code = receipt.get("error_code") or "IDENTITY_RESOLUTION_FAILED"
+    status = 409 if error_code == "IDENTITY_CONFLICT" else 503
+    return jsonify(
+        {
+            "success": False,
+            "error": receipt.get("message") or "Identity resolution failed",
+            "error_code": error_code,
+            "identity_receipt": receipt,
+        }
+    ), status
+
+
+def _oauth_identity_authority_available() -> Tuple[bool, Dict[str, Any]]:
+    write_allowed, state = SUPABASE_STEWARD.allow_write()
+    return bool(write_allowed and state.get("canonical") is True), state
+
+
+def _oauth_identity_authority_redirect(frontend_url: str, state: Dict[str, Any]):
+    from flask import redirect
+    from urllib.parse import quote
+
+    error_message = quote(
+        "Google sign-in cannot complete because Supabase identity authority is unavailable. Please retry after recovery.",
+        safe="",
+    )
+    logger.warning(
+        "GOOGLE_OAUTH_BLOCKED dependency=supabase contract=identity_fail_closed "
+        "connection_state=%s error_code=%s canonical=%s storage_mode=%s outage_id=%s ts=%s",
+        state.get("connection_state"),
+        state.get("last_error_code") or "SUPABASE_NOT_CONNECTED",
+        state.get("canonical"),
+        state.get("storage_mode") or "none",
+        state.get("outage_id"),
+        datetime.now(timezone.utc).isoformat(),
+    )
+    return redirect(f"{frontend_url}/?oauth_error={error_message}")
+
+
 def _load_vault_file_text(row: Optional[Dict[str, Any]]) -> str:
     if not row:
         return ""
@@ -1298,6 +1605,506 @@ def _load_vault_file_text(row: Optional[Dict[str, Any]]) -> str:
         return ""
 
 
+def _looks_readable_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if not value.strip():
+        return False
+    if "\x00" in value:
+        return False
+    printable = sum(1 for ch in value if ch.isprintable() or ch in "\n\r\t")
+    return printable / max(len(value), 1) >= 0.95
+
+
+def _is_structured_preview_type(ext: str, file_type: str) -> bool:
+    return ext in {'.capsule', '.json'} or file_type == 'application/json'
+
+
+def _is_text_preview_type(ext: str, file_type: str) -> bool:
+    if _is_structured_preview_type(ext, file_type):
+        return True
+    return file_type.startswith('text/') or file_type in {
+        'text',
+        'conversation',
+        'transcript',
+        'prompt',
+        'config',
+        'identity',
+        'capsule',
+    }
+
+
+def _preview_deadline(preview_budget_ms: Optional[int]) -> Optional[float]:
+    if preview_budget_ms is None:
+        return None
+    return time.perf_counter() + max(preview_budget_ms, 0) / 1000.0
+
+
+def _preview_deadline_expired(deadline: Optional[float]) -> bool:
+    return deadline is not None and time.perf_counter() >= deadline
+
+
+def _preview_elapsed_ms(started_at: float) -> int:
+    return int(round((time.perf_counter() - started_at) * 1000))
+
+
+def _query_transcript_rows_for_preview(callsign: str, bare_name: str) -> List[Dict[str, Any]]:
+    global _VAULT_FILES_HAS_UPDATED_AT
+    candidates: List[Dict[str, Any]] = []
+    seen_ids = set()
+    transcript_keywords = ['transcript', 'character_ai', 'chatgpt', 'chat_with_', 'conversation', 'chat']
+    base_columns = 'id, filename, storage_path, file_type, content, created_at, updated_at'
+
+    def _run(construct_key: str, include_updated_at: bool) -> List[Dict[str, Any]]:
+        columns = _select_with_optional_updated_at(base_columns, include_updated_at)
+        result = (
+            supabase_client.table('vault_files')
+            .select(columns)
+            .eq('construct_id', construct_key)
+            .order('created_at', desc=True)
+            .limit(max(VAULT_PREVIEW_MAX_TRANSCRIPTS * 2, 4))
+            .execute()
+        )
+        return result.data or []
+
+    for construct_key in {callsign, bare_name}:
+        if not construct_key:
+            continue
+        try:
+            rows = _run(construct_key, _VAULT_FILES_HAS_UPDATED_AT is not False)
+            if _VAULT_FILES_HAS_UPDATED_AT is None:
+                _VAULT_FILES_HAS_UPDATED_AT = True
+        except Exception as exc:
+            if not _is_missing_updated_at_error(exc):
+                raise
+            _VAULT_FILES_HAS_UPDATED_AT = False
+            rows = _run(construct_key, False)
+
+        for row in rows:
+            row_id = row.get('id')
+            if row_id in seen_ids:
+                continue
+            seen_ids.add(row_id)
+
+            path = (row.get('filename') or row.get('storage_path') or '').lower()
+            ftype = (row.get('file_type') or '').lower()
+            if not path:
+                continue
+            if any(ext in path for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.capsule']):
+                continue
+            if not (
+                any(keyword in path for keyword in transcript_keywords)
+                or 'transcript' in ftype
+                or 'markdown' in ftype
+                or 'text' in ftype
+            ):
+                continue
+            candidates.append(row)
+            if len(candidates) >= VAULT_PREVIEW_MAX_TRANSCRIPTS:
+                return candidates
+
+    return candidates
+
+
+def _build_capsule_preview_from_transcripts(construct_id: str, deadline: Optional[float] = None) -> str:
+    started_at = time.perf_counter()
+    callsign = _normalize_callsign(construct_id)
+    bare_name = _bare_name_from_callsign(callsign)
+    if _preview_deadline_expired(deadline):
+        logger.info("VAULT_PREVIEW_TIMING: capsule transcript preview skipped for %s because budget was already exhausted", callsign)
+        return ""
+    transcript_rows = _query_transcript_rows_for_preview(callsign, bare_name)
+    if not transcript_rows:
+        return ""
+
+    transcript_files = []
+    for row in transcript_rows:
+        if _preview_deadline_expired(deadline):
+            logger.info(
+                "VAULT_PREVIEW_TIMING: capsule transcript preview hit deadline for %s after %sms while collecting transcript details",
+                callsign,
+                _preview_elapsed_ms(started_at),
+            )
+            break
+        row_id = row.get('id')
+        if not row_id:
+            continue
+        detail_row = row
+        content = detail_row.get('content') if isinstance(detail_row.get('content'), str) else ""
+
+        if content and len(content) > 100:
+            transcript_files.append({
+                'id': row_id,
+                'filename': detail_row.get('filename') or detail_row.get('storage_path') or '',
+                'content': content,
+                'created_at': detail_row.get('created_at') or row.get('created_at', ''),
+            })
+            if len(transcript_files) >= VAULT_PREVIEW_MAX_TRANSCRIPTS:
+                break
+
+    if not transcript_files:
+        return ""
+
+    parser = ContinuityParser(callsign)
+    entries = parser.process_all_transcripts(transcript_files)
+    now = datetime.now(timezone.utc).isoformat()
+
+    if entries:
+        ledger_entries = parser.generate_ledger_json(entries, include_exchanges=False)
+        payload = {
+            'construct_id': callsign,
+            'capsule_version': '2.0.0-preview',
+            'generator': 'vault_transcript_preview',
+            'preview_only': True,
+            'last_synced_at': now,
+            'summary': {
+                'total_sessions': len(ledger_entries),
+                'total_source_transcripts': len(transcript_files),
+                'sampled_source_transcripts': len(transcript_files),
+                'total_exchanges': sum(entry.get('exchange_count', 0) for entry in ledger_entries),
+                'date_range': {
+                    'earliest': min((entry.get('estimated_date', '') for entry in ledger_entries), default=''),
+                    'latest': max((entry.get('estimated_date', '') for entry in ledger_entries), default=''),
+                },
+                'sources': sorted({entry.get('source', 'Conversation') for entry in ledger_entries}),
+            },
+            'sessions': ledger_entries,
+        }
+        logger.info(
+            "VAULT_PREVIEW_TIMING: capsule transcript preview built structured preview for %s from %s transcripts in %sms",
+            callsign,
+            len(transcript_files),
+            _preview_elapsed_ms(started_at),
+        )
+        return json.dumps(payload, indent=2, default=str)
+
+    transcript_previews = []
+    for transcript in transcript_files[:50]:
+        filename = transcript.get('filename', '')
+        transcript_previews.append({
+            'filename': filename,
+            'created_at': transcript.get('created_at', ''),
+            'content_length': len(transcript.get('content') or ''),
+            'excerpt': (transcript.get('content') or '').strip()[:1000],
+            'source': parser.detect_source(filename),
+        })
+
+    payload = {
+        'construct_id': callsign,
+        'capsule_version': '2.0.0-preview',
+        'generator': 'vault_transcript_preview',
+        'preview_only': True,
+        'preview_degraded': True,
+        'last_synced_at': now,
+        'summary': {
+            'total_source_transcripts': len(transcript_files),
+            'previewed_transcripts': len(transcript_previews),
+            'sampled_source_transcripts': len(transcript_files),
+            'reason': 'continuity_parser_returned_no_entries',
+        },
+        'transcript_previews': transcript_previews,
+    }
+    logger.info(
+        "VAULT_PREVIEW_TIMING: capsule transcript preview built degraded preview for %s from %s transcripts in %sms",
+        callsign,
+        len(transcript_files),
+        _preview_elapsed_ms(started_at),
+    )
+    return json.dumps(payload, indent=2, default=str)
+
+
+def _build_capsule_preview_from_candidate_ids(
+    construct_id: str,
+    transcript_ids: List[str],
+    *,
+    user_id: Optional[str] = None,
+    deadline: Optional[float] = None,
+) -> str:
+    started_at = time.perf_counter()
+    callsign = _normalize_callsign(construct_id)
+    ids = [str(value).strip() for value in (transcript_ids or []) if str(value).strip()]
+    if not ids or not supabase_client:
+        return ""
+
+    ids = ids[:VAULT_PREVIEW_MAX_TRANSCRIPTS]
+    base_columns = 'id, user_id, filename, storage_path, file_type, content, created_at, updated_at'
+
+    def _run(include_updated_at: bool) -> List[Dict[str, Any]]:
+        columns = _select_with_optional_updated_at(base_columns, include_updated_at)
+        query = supabase_client.table('vault_files').select(columns).in_('id', ids)
+        result = query.execute()
+        return result.data or []
+
+    try:
+        rows = _run(_VAULT_FILES_HAS_UPDATED_AT is not False)
+    except Exception as exc:
+        if not _is_missing_updated_at_error(exc):
+            raise
+        rows = _run(False)
+
+    transcript_files = []
+    for row in _sort_vault_rows(rows):
+        if _preview_deadline_expired(deadline):
+            logger.info(
+                "VAULT_PREVIEW_TIMING: candidate transcript preview hit deadline for %s after %sms",
+                callsign,
+                _preview_elapsed_ms(started_at),
+            )
+            break
+        if user_id and row.get('user_id') not in (None, user_id):
+            continue
+        content = row.get('content') if isinstance(row.get('content'), str) else ""
+        if content and len(content) > 100:
+            transcript_files.append({
+                'id': row.get('id'),
+                'filename': row.get('filename') or row.get('storage_path') or '',
+                'content': content,
+                'created_at': row.get('created_at', ''),
+            })
+
+    if not transcript_files:
+        return ""
+
+    parser = ContinuityParser(callsign)
+    entries = parser.process_all_transcripts(transcript_files)
+    now = datetime.now(timezone.utc).isoformat()
+
+    if entries:
+        ledger_entries = parser.generate_ledger_json(entries, include_exchanges=False)
+        payload = {
+            'construct_id': callsign,
+            'capsule_version': '2.0.0-preview',
+            'generator': 'vault_transcript_preview_candidates',
+            'preview_only': True,
+            'last_synced_at': now,
+            'summary': {
+                'total_sessions': len(ledger_entries),
+                'total_source_transcripts': len(transcript_files),
+                'sampled_source_transcripts': len(transcript_files),
+                'total_exchanges': sum(entry.get('exchange_count', 0) for entry in ledger_entries),
+                'date_range': {
+                    'earliest': min((entry.get('estimated_date', '') for entry in ledger_entries), default=''),
+                    'latest': max((entry.get('estimated_date', '') for entry in ledger_entries), default=''),
+                },
+                'sources': sorted({entry.get('source', 'Conversation') for entry in ledger_entries}),
+            },
+            'sessions': ledger_entries,
+        }
+        logger.info(
+            "VAULT_PREVIEW_TIMING: candidate transcript preview built structured preview for %s from %s transcripts in %sms",
+            callsign,
+            len(transcript_files),
+            _preview_elapsed_ms(started_at),
+        )
+        return json.dumps(payload, indent=2, default=str)
+
+    transcript_previews = []
+    for transcript in transcript_files[:50]:
+        filename = transcript.get('filename', '')
+        transcript_previews.append({
+            'filename': filename,
+            'created_at': transcript.get('created_at', ''),
+            'content_length': len(transcript.get('content') or ''),
+            'excerpt': (transcript.get('content') or '').strip()[:1000],
+            'source': parser.detect_source(filename),
+        })
+
+    payload = {
+        'construct_id': callsign,
+        'capsule_version': '2.0.0-preview',
+        'generator': 'vault_transcript_preview_candidates',
+        'preview_only': True,
+        'preview_degraded': True,
+        'last_synced_at': now,
+        'summary': {
+            'total_source_transcripts': len(transcript_files),
+            'previewed_transcripts': len(transcript_previews),
+            'sampled_source_transcripts': len(transcript_files),
+            'reason': 'continuity_parser_returned_no_entries',
+        },
+        'transcript_previews': transcript_previews,
+    }
+    logger.info(
+        "VAULT_PREVIEW_TIMING: candidate transcript preview built degraded preview for %s from %s transcripts in %sms",
+        callsign,
+        len(transcript_files),
+        _preview_elapsed_ms(started_at),
+    )
+    return json.dumps(payload, indent=2, default=str)
+
+
+def _reconstruct_capsule_preview_text(row: Optional[Dict[str, Any]], deadline: Optional[float] = None) -> str:
+    started_at = time.perf_counter()
+    if not row or not supabase_client:
+        return ""
+
+    construct_id = str(row.get('construct_id') or '').strip()
+    user_id = row.get('user_id')
+    if not construct_id:
+        return ""
+
+    if _preview_deadline_expired(deadline):
+        logger.info(
+            "VAULT_PREVIEW_TIMING: capsule preview reconstruction skipped for %s because budget was already exhausted",
+            construct_id,
+        )
+        return ""
+
+    try:
+        preview = _build_capsule_preview_from_transcripts(construct_id, deadline=deadline)
+        if preview:
+            logger.info(
+                "VAULT_PREVIEW_TIMING: capsule preview reconstructed via transcript path for %s in %sms",
+                construct_id,
+                _preview_elapsed_ms(started_at),
+            )
+            return preview
+    except Exception as exc:
+        logger.warning("capsule transcript preview reconstruction failed for %s: %s", construct_id, exc)
+
+    if _preview_deadline_expired(deadline):
+        logger.info(
+            "VAULT_PREVIEW_TIMING: capsule preview reconstruction skipped memup fallback for %s after %sms",
+            construct_id,
+            _preview_elapsed_ms(started_at),
+        )
+        return ""
+
+    try:
+        try:
+            from memup_sync import build_construct_memup_preview
+        except ImportError:
+            from vvault.server.memup_sync import build_construct_memup_preview
+
+        preview = build_construct_memup_preview(
+            supabase_client,
+            construct_id,
+            user_id,
+            max_transcripts=VAULT_PREVIEW_MAX_TRANSCRIPTS,
+            deadline=deadline,
+            allow_storage_download=False,
+        ) or ""
+        if preview:
+            logger.info(
+                "VAULT_PREVIEW_TIMING: capsule preview reconstructed via memup fallback for %s in %sms",
+                construct_id,
+                _preview_elapsed_ms(started_at),
+            )
+            return preview
+    except Exception as exc:
+        logger.warning("capsule preview reconstruction failed for %s: %s", construct_id, exc)
+    return ""
+
+
+def _derive_vault_preview_payload(row: Optional[Dict[str, Any]], preview_budget_ms: Optional[int] = VAULT_PREVIEW_ROUTE_BUDGET_MS) -> Dict[str, Any]:
+    started_at = time.perf_counter()
+    deadline = _preview_deadline(preview_budget_ms)
+    file_row = dict(row or {})
+    filename = file_row.get('filename') or file_row.get('storage_path') or ''
+    ext = os.path.splitext(filename)[1].lower()
+    file_type = str(file_row.get('file_type') or '').lower()
+    content = file_row.get('content')
+
+    preview_kind = 'binary'
+    preview_status = 'true_binary'
+    preview_source = 'none'
+    preview_timed_out = False
+    storage_elapsed_ms = 0
+    reconstruct_elapsed_ms = 0
+    recovered_text = content if isinstance(content, str) and content else ''
+    is_text_preview = _is_text_preview_type(ext, file_type)
+    is_structured_preview = _is_structured_preview_type(ext, file_type)
+
+    if recovered_text:
+        preview_source = 'inline'
+    elif is_text_preview:
+        if ext != '.capsule':
+            storage_started_at = time.perf_counter()
+            recovered_text = _load_vault_file_text(file_row)
+            storage_elapsed_ms = _preview_elapsed_ms(storage_started_at)
+            if recovered_text:
+                file_row['content'] = recovered_text
+                preview_source = 'storage'
+            else:
+                preview_timed_out = _preview_deadline_expired(deadline)
+        if not recovered_text and ext == '.capsule' and not _preview_deadline_expired(deadline):
+            reconstruct_started_at = time.perf_counter()
+            recovered_text = _reconstruct_capsule_preview_text(file_row, deadline=deadline)
+            reconstruct_elapsed_ms = _preview_elapsed_ms(reconstruct_started_at)
+            if recovered_text:
+                file_row['content'] = recovered_text
+                preview_source = 'memup'
+            else:
+                preview_timed_out = _preview_deadline_expired(deadline)
+        elif not recovered_text and ext == '.capsule':
+            preview_timed_out = True
+
+    if isinstance(recovered_text, str) and recovered_text:
+        if is_structured_preview:
+            parsed = _safe_json_loads(recovered_text)
+            if parsed is not None:
+                preview_kind = 'json'
+                preview_status = 'inline' if preview_source == 'inline' else 'recovered'
+            elif _looks_readable_text(recovered_text):
+                preview_kind = 'text'
+                preview_status = 'malformed_text'
+            else:
+                preview_kind = 'binary'
+                preview_status = 'true_binary'
+        elif is_text_preview:
+            if _looks_readable_text(recovered_text):
+                preview_kind = 'text'
+                preview_status = 'inline' if preview_source == 'inline' else 'recovered'
+            else:
+                preview_kind = 'binary'
+                preview_status = 'true_binary'
+        elif _looks_readable_text(recovered_text):
+            preview_kind = 'text'
+            preview_status = 'inline' if preview_source == 'inline' else 'recovered'
+    elif is_text_preview:
+        if ext == '.capsule':
+            file_row['content'] = _build_unavailable_capsule_preview(file_row, filename, file_type)
+            preview_kind = 'json'
+            preview_status = 'unavailable'
+            preview_source = 'diagnostic'
+        else:
+            preview_kind = 'binary'
+            preview_status = 'unavailable'
+
+    preview_elapsed_ms = _preview_elapsed_ms(started_at)
+    preview_timed_out = preview_timed_out or (
+        preview_budget_ms is not None and preview_budget_ms > 0 and preview_elapsed_ms >= preview_budget_ms
+    )
+    file_row['preview_kind'] = preview_kind
+    file_row['preview_status'] = preview_status
+    file_row['preview_source'] = preview_source
+    file_row['preview_timed_out'] = preview_timed_out
+    file_row['preview_elapsed_ms'] = preview_elapsed_ms
+    file_row['preview_budget_ms'] = preview_budget_ms
+    file_row['preview_storage_elapsed_ms'] = storage_elapsed_ms
+    file_row['preview_reconstruct_elapsed_ms'] = reconstruct_elapsed_ms
+    if ext == '.capsule':
+        content_value = file_row.get('content')
+        content_length = len(content_value) if isinstance(content_value, str) else 0
+        logger.info(
+            "VAULT_PREVIEW: capsule path=%s kind=%s status=%s source=%s file_type=%s has_content=%s content_length=%s construct_id=%s elapsed_ms=%s budget_ms=%s timed_out=%s storage_ms=%s reconstruct_ms=%s",
+            filename,
+            preview_kind,
+            preview_status,
+            preview_source,
+            file_type,
+            bool(content_length),
+            content_length,
+            file_row.get('construct_id'),
+            file_row['preview_elapsed_ms'],
+            preview_budget_ms,
+            preview_timed_out,
+            storage_elapsed_ms,
+            reconstruct_elapsed_ms,
+        )
+    return file_row
+
+
 def _sort_vault_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(
         rows or [],
@@ -1325,6 +2132,194 @@ def _safe_json_loads(value: Any) -> Any:
         return None
 
 
+def _build_unavailable_capsule_preview(row: Dict[str, Any], filename: str, file_type: str) -> str:
+    return json.dumps(
+        {
+            "preview_only": True,
+            "preview_unavailable": True,
+            "reason": "Capsule content could not be recovered from storage or transcript reconstruction.",
+            "construct_id": row.get("construct_id"),
+            "capsule_path": filename,
+            "storage_path": row.get("storage_path"),
+            "stored_file_type": file_type or row.get("file_type") or "binary",
+            "metadata": _safe_json_loads(row.get("metadata")) or row.get("metadata"),
+            "preview_contract_version": "capsule-diagnostic-v1",
+        },
+        indent=2,
+        default=str,
+    )
+
+
+def _original_capsule_path(construct_id: str) -> str:
+    return f'instances/{construct_id}/memup/{construct_id}.capsule'
+
+
+def _materialized_capsule_path(construct_id: str) -> str:
+    return f'instances/{construct_id}/memup/{construct_id}.materialized.capsule'
+
+
+def _is_materialized_capsule_path(path: str) -> bool:
+    return isinstance(path, str) and path.endswith('.materialized.capsule')
+
+
+def _is_original_capsule_path(path: str) -> bool:
+    return isinstance(path, str) and path.endswith('.capsule') and not _is_materialized_capsule_path(path)
+
+
+def _lookup_materialized_capsule_backing_row(
+    requested_row: Dict[str, Any],
+    *,
+    user_id: Optional[str],
+    is_admin: bool,
+) -> Optional[Dict[str, Any]]:
+    filename = requested_row.get('filename') or requested_row.get('storage_path') or ''
+    construct_id = str(requested_row.get('construct_id') or '').strip()
+    if not construct_id or not _is_original_capsule_path(filename):
+        return None
+
+    materialized_path = _materialized_capsule_path(construct_id)
+    if materialized_path == filename:
+        return None
+
+    return _lookup_exact_vault_preview_row(
+        filename=materialized_path,
+        storage_path=materialized_path,
+        construct_id=construct_id,
+        user_id=user_id,
+        is_admin=is_admin,
+    )
+
+
+def _build_preview_payload_from_materialized_sibling(
+    requested_row: Dict[str, Any],
+    backing_row: Dict[str, Any],
+    *,
+    preview_budget_ms: int,
+) -> Dict[str, Any]:
+    preview_row = dict(requested_row or {})
+    preview_row['content'] = backing_row.get('content')
+    preview_row['file_type'] = backing_row.get('file_type') or preview_row.get('file_type')
+    if backing_row.get('metadata') is not None:
+        preview_row['metadata'] = backing_row.get('metadata')
+
+    file_payload = _derive_vault_preview_payload(preview_row, preview_budget_ms=preview_budget_ms)
+    file_payload['id'] = requested_row.get('id')
+    file_payload['filename'] = requested_row.get('filename') or requested_row.get('storage_path') or backing_row.get('filename')
+    file_payload['storage_path'] = requested_row.get('storage_path') or requested_row.get('filename') or backing_row.get('storage_path')
+    file_payload['construct_id'] = requested_row.get('construct_id') or backing_row.get('construct_id')
+    file_payload['user_id'] = requested_row.get('user_id') if requested_row.get('user_id') is not None else backing_row.get('user_id')
+    file_payload['is_system'] = requested_row.get('is_system', backing_row.get('is_system', False))
+    file_payload['preview_source'] = 'materialized_sibling'
+    file_payload['preview_backing_file_id'] = backing_row.get('id')
+    file_payload['preview_backing_path'] = backing_row.get('filename') or backing_row.get('storage_path')
+    return file_payload
+
+
+def _lookup_exact_vault_preview_row(
+    *,
+    filename: str,
+    storage_path: str,
+    construct_id: str,
+    user_id: Optional[str],
+    is_admin: bool,
+) -> Optional[Dict[str, Any]]:
+    global _VAULT_FILES_HAS_UPDATED_AT
+    if not supabase_client:
+        return None
+
+    paths = {path.strip() for path in (filename, storage_path) if isinstance(path, str) and path.strip()}
+    if not paths:
+        return None
+
+    base_columns = 'id, user_id, is_system, filename, storage_path, construct_id, file_type, metadata, content, sha256, created_at, updated_at'
+
+    def _run(include_updated_at: bool) -> List[Dict[str, Any]]:
+        columns = _select_with_optional_updated_at(base_columns, include_updated_at)
+        matched_rows: List[Dict[str, Any]] = []
+        for field in ('filename', 'storage_path'):
+            for path in paths:
+                query = supabase_client.table('vault_files').select(columns).eq(field, path)
+                if construct_id:
+                    query = query.eq('construct_id', construct_id)
+                if not is_admin and user_id:
+                    query = query.eq('user_id', user_id)
+                result = query.execute()
+                matched_rows.extend(result.data or [])
+        return matched_rows
+
+    try:
+        matched_rows = _run(_VAULT_FILES_HAS_UPDATED_AT is not False)
+        if _VAULT_FILES_HAS_UPDATED_AT is None:
+            _VAULT_FILES_HAS_UPDATED_AT = True
+    except Exception as exc:
+        if not _is_missing_updated_at_error(exc):
+            raise
+        _VAULT_FILES_HAS_UPDATED_AT = False
+        matched_rows = _run(False)
+
+    if not matched_rows:
+        return None
+
+    deduped_rows = _dedupe_vault_rows(matched_rows)
+    return _pick_latest_vault_row(deduped_rows or matched_rows)
+
+
+def _resolve_construct_owner_user_id(construct_id: str) -> Optional[str]:
+    if not supabase_client or not construct_id:
+        return None
+
+    result = (
+        supabase_client.table('vault_files')
+        .select('user_id')
+        .eq('construct_id', construct_id)
+        .not_.is_('user_id', 'null')
+        .limit(1)
+        .execute()
+    )
+    for row in result.data or []:
+        user_id = row.get('user_id')
+        if user_id:
+            return user_id
+    return None
+
+
+def _candidate_transcript_ids_for_construct(construct_id: str) -> List[str]:
+    callsign = _normalize_callsign(construct_id)
+    bare_name = _bare_name_from_callsign(callsign)
+    rows = _query_transcript_rows_for_preview(callsign, bare_name)
+    return [str(row.get('id')).strip() for row in rows if row.get('id')][:VAULT_PREVIEW_MAX_TRANSCRIPTS]
+
+
+def _persist_capsule_from_candidate_transcripts(
+    construct_id: str,
+    transcript_ids: List[str],
+    user_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    ids = [str(value).strip() for value in (transcript_ids or []) if str(value).strip()]
+    if not ids or not user_id:
+        return None
+
+    try:
+        try:
+            from memup_sync import persist_construct_memup_from_candidate_transcripts
+        except ImportError:
+            from vvault.server.memup_sync import persist_construct_memup_from_candidate_transcripts
+
+        return persist_construct_memup_from_candidate_transcripts(
+            supabase_client,
+            construct_id,
+            ids,
+            user_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "MEMUP_MATERIALIZE: canonical capsule writeback failed for %s via candidate transcripts: %s",
+            construct_id,
+            exc,
+        )
+        return None
+
+
 def _first_non_empty_string(values: List[Any], default: str = "") -> str:
     for value in values:
         if isinstance(value, str) and value.strip():
@@ -1337,6 +2332,176 @@ def _first_non_empty_list(values: List[Any]) -> List[str]:
         if isinstance(value, list) and value:
             return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _default_construct_model_config() -> Dict[str, str]:
+    return {
+        "primary": "openrouter:meta-llama/llama-3.3-70b-instruct",
+        "conversation": "openrouter:meta-llama/llama-3.3-70b-instruct",
+        "creative": "openrouter:mistralai/mistral-7b-instruct",
+        "coding": "openrouter:deepseek/deepseek-coder-33b-instruct",
+    }
+
+
+def _default_construct_capabilities() -> Dict[str, Any]:
+    return {
+        "agent": True,
+        "webSearch": False,
+        "canvas": False,
+        "imageGeneration": False,
+        "codeInterpreter": True,
+    }
+
+
+def _default_construct_memory_settings() -> Dict[str, Any]:
+    return {
+        "enabled": True,
+    }
+
+
+def _normalize_construct_models(value: Any) -> Any:
+    if isinstance(value, dict) and value:
+        return value
+    if isinstance(value, list) and value:
+        return value
+    return _default_construct_model_config()
+
+
+def _normalize_construct_capabilities(value: Any) -> Dict[str, Any]:
+    normalized = dict(_default_construct_capabilities())
+    if isinstance(value, dict):
+        for key, entry in value.items():
+            key_str = str(key).strip()
+            if key_str:
+                normalized[key_str] = entry
+        return normalized
+    if isinstance(value, list):
+        for item in value:
+            key_str = str(item).strip()
+            if key_str:
+                normalized[key_str] = True
+        return normalized
+    return normalized
+
+
+def _normalize_construct_memory_settings(value: Any) -> Dict[str, Any]:
+    normalized = dict(_default_construct_memory_settings())
+    if isinstance(value, dict):
+        normalized.update(value)
+        return normalized
+    if isinstance(value, bool):
+        normalized["enabled"] = value
+    return normalized
+
+
+def _normalize_construct_refs(value: Any) -> List[Any]:
+    if not isinstance(value, list):
+        return []
+    normalized: List[Any] = []
+    for item in value:
+        if isinstance(item, str):
+            stripped = item.strip()
+            if stripped:
+                normalized.append(stripped)
+        elif isinstance(item, dict):
+            normalized.append(item)
+        elif item is not None:
+            normalized.append(str(item))
+    return normalized
+
+
+def _normalize_construct_voice_payload(value: Any) -> Any:
+    if value is None:
+        return {"text": ""}
+    if isinstance(value, str):
+        return {"text": value}
+    if isinstance(value, (dict, list)):
+        return value
+    return {"text": str(value)}
+
+
+def _build_construct_prompt_manifest(
+    callsign: str,
+    display_name: str,
+    full_name: str,
+    description: str,
+    instructions: str,
+    conversation_starters: List[str],
+    capabilities: Dict[str, Any],
+    memory_settings: Dict[str, Any],
+    canon_refs: List[Any],
+    knowledge_refs: List[Any],
+    *,
+    role: str = "assistant",
+    system_prompt: str = "",
+    source: str,
+    created_at: Optional[str] = None,
+    updated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    updated = updated_at or datetime.now(timezone.utc).isoformat()
+    created = created_at or updated
+    resolved_system_prompt = system_prompt or instructions
+    return {
+        "callsign": callsign,
+        "name": display_name,
+        "displayName": display_name,
+        "display_name": display_name,
+        "fullName": full_name,
+        "description": description,
+        "instructions": instructions,
+        "system_prompt": resolved_system_prompt,
+        "prompt": resolved_system_prompt,
+        "conversationStarters": conversation_starters,
+        "conversation_starters": conversation_starters,
+        "capabilities": capabilities,
+        "memory": memory_settings,
+        "canonRefs": canon_refs,
+        "knowledgeRefs": knowledge_refs,
+        "role": role,
+        "createdAt": created,
+        "updatedAt": updated,
+        "source": source,
+    }
+
+
+def _build_construct_metadata_payload(
+    callsign: str,
+    display_name: str,
+    full_name: str,
+    description: str,
+    models: Any,
+    orchestration_mode: str,
+    capabilities: Dict[str, Any],
+    memory_settings: Dict[str, Any],
+    canon_refs: List[Any],
+    knowledge_refs: List[Any],
+    *,
+    role: str = "assistant",
+    status: str = "active",
+    source: str,
+    created_at: Optional[str] = None,
+    updated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    updated = updated_at or datetime.now(timezone.utc).isoformat()
+    created = created_at or updated
+    return {
+        "construct_id": callsign,
+        "display_name": display_name,
+        "instance_name": display_name,
+        "full_name": full_name,
+        "description": description,
+        "role": role,
+        "status": status,
+        "models": models,
+        "orchestration_mode": orchestration_mode,
+        "capabilities": capabilities,
+        "memory": memory_settings,
+        "canon_refs": canon_refs,
+        "knowledge_refs": knowledge_refs,
+        "created_at": created,
+        "updated_at": updated,
+        "source": source,
+    }
 
 
 def _physical_features_to_text(value: Any) -> str:
@@ -1424,12 +2589,15 @@ def _query_construct_identity_rows(callsign: str, user_id: Optional[str]) -> Lis
         raise
 
 
-def _query_construct_file_rows(callsign: str, user_id: Optional[str]) -> List[Dict[str, Any]]:
+def _query_construct_file_rows(callsign: str, user_id: Optional[str], include_content: bool = False) -> List[Dict[str, Any]]:
     global _VAULT_FILES_HAS_UPDATED_AT
     bare_name = _bare_name_from_callsign(callsign)
     def _run(include_updated_at: bool) -> List[Dict[str, Any]]:
+        columns = 'id, user_id, construct_id, filename, storage_path, metadata, created_at, updated_at'
+        if include_content:
+            columns = 'id, user_id, construct_id, filename, storage_path, metadata, content, created_at, updated_at'
         columns = _select_with_optional_updated_at(
-            'id, user_id, construct_id, filename, storage_path, metadata, created_at, updated_at',
+            columns,
             include_updated_at,
         )
         query = (
@@ -1455,11 +2623,10 @@ def _query_construct_file_rows(callsign: str, user_id: Optional[str]) -> List[Di
 
 
 def _build_construct_editor_payload(callsign: str, user_id: Optional[str]) -> Dict[str, Any]:
-    identity_rows = _query_construct_identity_rows(callsign, user_id)
-    files_rows = _query_construct_file_rows(callsign, user_id)
+    files_rows = _query_construct_file_rows(callsign, user_id, include_content=True)
 
     rows_by_name: Dict[str, List[Dict[str, Any]]] = {}
-    for row in identity_rows:
+    for row in files_rows:
         rows_by_name.setdefault(os.path.basename(row.get('filename') or ''), []).append(row)
 
     source_rows = {
@@ -1468,10 +2635,21 @@ def _build_construct_editor_payload(callsign: str, user_id: Optional[str]) -> Di
     }
 
     prompt_json = _safe_json_loads(_load_vault_file_text(source_rows.get('prompt.json'))) or {}
+    if not isinstance(prompt_json, dict):
+        prompt_json = {}
+    metadata_json = _safe_json_loads(_load_vault_file_text(source_rows.get('metadata.json'))) or {}
+    if not isinstance(metadata_json, dict):
+        metadata_json = {}
     definition_json = _safe_json_loads(_load_vault_file_text(source_rows.get('definition.json'))) or {}
+    if not isinstance(definition_json, dict):
+        definition_json = {}
     physical_features_json = _safe_json_loads(_load_vault_file_text(source_rows.get('physical_features.json')))
     voice_json = _safe_json_loads(_load_vault_file_text(source_rows.get('voice.json'))) or {}
+    if not isinstance(voice_json, dict):
+        voice_json = {}
     gender_json = _safe_json_loads(_load_vault_file_text(source_rows.get('gender.json'))) or {}
+    if not isinstance(gender_json, dict):
+        gender_json = {}
 
     definition_text = _load_vault_file_text(source_rows.get('definition.txt'))
     conditioning_text = _load_vault_file_text(source_rows.get('conditioning.txt'))
@@ -1499,12 +2677,50 @@ def _build_construct_editor_payload(callsign: str, user_id: Optional[str]) -> Di
     if timestamps:
         updated_at = datetime.fromtimestamp(max(timestamps), tz=timezone.utc).isoformat()
 
+    prompt_capabilities = prompt_json.get('capabilities')
+    metadata_capabilities = metadata_json.get('capabilities')
+    capabilities = _normalize_construct_capabilities(
+        prompt_capabilities if isinstance(prompt_capabilities, (dict, list)) else metadata_capabilities
+    )
+
+    prompt_memory = prompt_json.get('memory')
+    metadata_memory = metadata_json.get('memory')
+    memory_settings = _normalize_construct_memory_settings(
+        prompt_memory if isinstance(prompt_memory, (dict, bool)) else metadata_memory
+    )
+
+    canon_refs = _normalize_construct_refs(
+        prompt_json.get('canonRefs') if isinstance(prompt_json.get('canonRefs'), list) and prompt_json.get('canonRefs') else metadata_json.get('canon_refs')
+    )
+    knowledge_refs = _normalize_construct_refs(
+        prompt_json.get('knowledgeRefs') if isinstance(prompt_json.get('knowledgeRefs'), list) and prompt_json.get('knowledgeRefs') else metadata_json.get('knowledge_refs')
+    )
+
+    models = _normalize_construct_models(metadata_json.get('models'))
+    display_name = _first_non_empty_string([
+        prompt_json.get('displayName'),
+        prompt_json.get('display_name'),
+        prompt_json.get('name'),
+        metadata_json.get('display_name'),
+        metadata_json.get('instance_name'),
+    ], default=callsign)
+    full_name = _first_non_empty_string([
+        prompt_json.get('fullName'),
+        metadata_json.get('full_name'),
+        display_name,
+    ], default=display_name)
+    created_at = _first_non_empty_string([
+        prompt_json.get('createdAt'),
+        metadata_json.get('created_at'),
+    ])
+
     return {
         "ok": True,
         "constructId": callsign,
         "callsign": callsign,
-        "displayName": _first_non_empty_string([prompt_json.get('name')], default=callsign),
-        "description": _first_non_empty_string([prompt_json.get('description')]),
+        "displayName": display_name,
+        "fullName": full_name,
+        "description": _first_non_empty_string([prompt_json.get('description'), metadata_json.get('description')]),
         "instructions": _first_non_empty_string([prompt_json.get('instructions'), prompt_json.get('prompt')]),
         "conversationStarters": _first_non_empty_list([
             prompt_json.get('conversationStarters'),
@@ -1535,23 +2751,23 @@ def _build_construct_editor_payload(callsign: str, user_id: Optional[str]) -> Di
             "sampleFilenames": sample_filenames,
             "updatedAt": updated_at,
         },
-        "models": {
-            "primary": "openrouter:meta-llama/llama-3.3-70b-instruct",
-            "conversation": "openrouter:meta-llama/llama-3.3-70b-instruct",
-            "creative": "openrouter:mistralai/mistral-7b-instruct",
-            "coding": "openrouter:deepseek/deepseek-coder-33b-instruct",
-        },
-        "capabilities": {
-            "webSearch": False,
-            "canvas": False,
-            "imageGeneration": False,
-            "codeInterpreter": True,
-        },
+        "models": models,
+        "capabilities": capabilities,
+        "memory": memory_settings,
+        "canonRefs": canon_refs,
+        "knowledgeRefs": knowledge_refs,
+        "createdAt": created_at,
         "updatedAt": updated_at,
     }
 
 
-def _upsert_construct_prompt_file(callsign: str, user_id: Optional[str], payload: Dict[str, Any]) -> Dict[str, Any]:
+def _upsert_construct_prompt_file(
+    callsign: str,
+    user_id: Optional[str],
+    payload: Dict[str, Any],
+    *,
+    source: str = "vvault_construct_editor",
+) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     path = f"instances/{callsign}/identity/prompt.json"
     content = json.dumps(payload, indent=2, ensure_ascii=False)
@@ -1567,13 +2783,43 @@ def _upsert_construct_prompt_file(callsign: str, user_id: Optional[str], payload
         "sha256": sha256,
         "metadata": json.dumps({
             "folder": "identity",
-            "source": "vvault_construct_editor",
+            "source": source,
             "updatedAt": now,
         }),
         "created_at": now,
         "updated_at": now,
     }
-    return _upsert_vault_file_record(record, context='construct_editor_prompt')
+    return _upsert_vault_file_record(record, context='construct_prompt')
+
+
+def _upsert_construct_metadata_file(
+    callsign: str,
+    user_id: Optional[str],
+    payload: Dict[str, Any],
+    *,
+    source: str = "vvault_construct_editor",
+) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    path = f"instances/{callsign}/config/metadata.json"
+    content = json.dumps(payload, indent=2, ensure_ascii=False)
+    record = {
+        "filename": path,
+        "storage_path": path,
+        "file_type": "text",
+        "content": content,
+        "construct_id": callsign,
+        "user_id": user_id,
+        "is_system": False,
+        "sha256": _sha256_text(content),
+        "metadata": json.dumps({
+            "folder": "config",
+            "source": source,
+            "updatedAt": now,
+        }),
+        "created_at": now,
+        "updated_at": now,
+    }
+    return _upsert_vault_file_record(record, context='construct_metadata')
 
 
 def _upsert_text_construct_file(callsign: str, user_id: Optional[str], filename: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1647,19 +2893,19 @@ def _backup_before_write(file_id: str, filename: str, content: str) -> bool:
     """
     try:
         os.makedirs(BACKUP_DIR, exist_ok=True)
-        
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         safe_file_id = str(file_id).replace('/', '_').replace('\\', '_')
         backup_filename = f"{safe_file_id}_{timestamp}.json"
         backup_path = os.path.join(BACKUP_DIR, backup_filename)
-        
+
         backup_data = {
             "file_id": str(file_id),
             "filename": filename,
             "content": content,
             "backed_up_at": datetime.now().isoformat()
         }
-        
+
         with open(backup_path, 'w', encoding='utf-8') as f:
             json.dump(backup_data, f, indent=2, ensure_ascii=False)
         
@@ -2639,11 +3885,18 @@ def root():
 def health_check():
     """Health check endpoint"""
     supabase_status = _get_supabase_status()
+    connection = SUPABASE_STEWARD.snapshot()
     return jsonify({
-        "status": "healthy" if supabase_status["mode"] == "healthy" else "degraded",
+        "status": "healthy" if connection.get("connection_state") == "connected" else "degraded",
         "timestamp": datetime.now().isoformat(),
         "service": "vvault-backend",
         "version": "1.0.0",
+        "server": {
+            "server_pid": os.getpid(),
+            "repo_root": str(_repo_root),
+            "started_at": SERVER_STARTED_AT,
+            "log_path": os.environ.get("VVAULT_LOG") or os.environ.get("VVAULT_DEVFULL_LOG"),
+        },
         "supabase": supabase_status,
         "oauth": {
             "configured": _google_oauth_ready(),
@@ -2651,6 +3904,29 @@ def health_check():
             "frontend_url": _get_frontend_url(),
         },
     })
+
+
+@app.route('/api/ready')
+def readiness_check():
+    """Readiness requires freshly proven canonical Supabase connectivity."""
+    connection = SUPABASE_STEWARD.snapshot()
+    ready = connection.get("connection_state") == "connected"
+    return jsonify({
+        "ready": ready,
+        "status": "ready" if ready else "not_ready",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "service": "vvault-backend",
+        "server": {
+            "server_pid": os.getpid(),
+            "repo_root": str(_repo_root),
+            "started_at": SERVER_STARTED_AT,
+        },
+        "supabase": {
+            "configured": bool(SUPABASE_URL and SUPABASE_KEY),
+            "using_service_role": bool(SUPABASE_SERVICE_ROLE_KEY),
+            "connection": connection,
+        },
+    }), 200 if ready else 503
 
 USER_PATH_PATTERN = re.compile(r'^vvault/users/shard_\d+/[^/]+/')
 
@@ -2907,7 +4183,10 @@ def map_to_vsi_folder(filename: str, construct_id: str = '', metadata: dict = No
     
     IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.svg', '.gif', '.webp'}
     DOC_EXTS = {'.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt'}
-    IDENTITY_FILES = {'prompt.txt', 'prompt.json', 'conditioning.txt', 'avatar.png', 'avatar.jpeg', 'avatar.jpg'}
+    IDENTITY_FILES = {
+        'prompt.txt', 'prompt.json', 'conditioning.txt', 'definition.txt',
+        'physical_features.json', 'voice.json', 'avatar.png', 'avatar.jpeg', 'avatar.jpg'
+    }
     CONFIG_FILES = {'metadata.json', 'personality.json', 'tone_profile.json', 'voice.md'}
     LOG_NAMES = {'chat.log', 'capsule.log', 'server.log', 'identity_guard.log', 'independence.log',
                  'ltm.log', 'stm.log', 'cns.log', 'watchdog.log', 'self_improvement_agent.log'}
@@ -3012,6 +4291,20 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
     return transformed
 
 
+def _filter_transformed_vault_files_for_path(files: List[Dict[str, Any]], requested_path: str) -> List[Dict[str, Any]]:
+    normalized_path = str(requested_path or "").strip().strip("/")
+    if not normalized_path:
+        return list(files or [])
+
+    prefix = f"{normalized_path}/"
+    filtered: List[Dict[str, Any]] = []
+    for file_row in files or []:
+        display_path = str(file_row.get('display_path') or file_row.get('storage_path') or file_row.get('filename') or '').strip().strip("/")
+        if display_path == normalized_path or display_path.startswith(prefix):
+            filtered.append(file_row)
+    return filtered
+
+
 @app.route("/api/vault/session-bridge", methods=["POST", "OPTIONS"])
 def session_bridge_from_standalone_auth():
     """Mint a Flask vault Bearer token from a valid standalone @auth HttpOnly cookie."""
@@ -3059,11 +4352,20 @@ def get_vault_user_info():
         if not user_email:
             return jsonify({"success": False, "error": "Invalid session"}), 401
         user_role = current_user.get('role', 'user')
+
+        read_allowed, read_state = SUPABASE_STEWARD.allow_read()
+        if not read_allowed:
+            return _supabase_read_block_response("/api/vault/user-info", state=read_state)
         
         if not supabase_client:
             display_name = user_email.split('@')[0].replace('.', ' ').title()
             return jsonify({
                 "success": True,
+                "supabase_available": False,
+                "degraded": True,
+                "canonical": False,
+                "storage_mode": "none",
+                "connection_state": SUPABASE_STEWARD.snapshot().get("connection_state"),
                 "display_name": display_name,
                 "is_admin": user_role == 'admin',
                 "root_label": display_name if user_role != 'admin' else "Vault (Admin)"
@@ -3080,6 +4382,11 @@ def get_vault_user_info():
         
         return jsonify({
             "success": True,
+            "supabase_available": True,
+            "degraded": False,
+            "canonical": True,
+            "storage_mode": "supabase",
+            "connection_state": SUPABASE_STEWARD.snapshot().get("connection_state"),
             "display_name": display_name,
             "user_id": user_id,
             "is_admin": user_role == 'admin',
@@ -3107,7 +4414,15 @@ def get_vault_user_info():
 @require_auth
 def get_vault_files():
     """Get vault files from Supabase (multi-tenant: users see only their files)"""
+    route_started_at = time.perf_counter()
+    user_lookup_ms = 0
+    row_fetch_ms = 0
+    transform_ms = 0
     try:
+        read_allowed, read_state = SUPABASE_STEWARD.allow_read()
+        if not read_allowed:
+            return _supabase_read_block_response("/api/vault/files", state=read_state)
+
         if not supabase_client:
             return _supabase_unavailable_response(
                 "Supabase is not configured for this backend. Vault files are temporarily unavailable."
@@ -3121,26 +4436,36 @@ def get_vault_files():
             return jsonify({"success": False, "error": "Invalid session"}), 401
         user_role = current_user.get('role', 'user')
         is_admin = user_role == 'admin'
+        requested_path = (request.args.get('path') or '').strip().strip('/')
         
+        user_lookup_started_at = time.perf_counter()
         user_result = supabase_client.table('users').select('id, name').eq('email', user_email).execute()
+        user_lookup_ms = int(round((time.perf_counter() - user_lookup_started_at) * 1000))
         user_id = user_result.data[0]['id'] if user_result.data else None
         user_name = user_result.data[0].get('name', user_email.split('@')[0]) if user_result.data else user_email.split('@')[0]
         
-        if is_admin:
+        if not is_admin and not user_id:
+            return jsonify({
+                "success": True,
+                "files": [],
+                "count": 0,
+                "user_root": user_name,
+                "message": "No files yet - upload your first file to get started"
+            })
+
+        row_fetch_started_at = time.perf_counter()
+        if requested_path:
+            rows = _fetch_scoped_vault_rows(
+                requested_path,
+                user_id=user_id,
+                is_admin=is_admin,
+            )
+        elif is_admin:
             logger.debug(f"Admin {user_email} fetching all vault files")
             rows = _fetch_all_rows(
                 lambda: supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, file_type, metadata, created_at')
             )
-            files = _transform_files_for_display(rows, is_admin=True, user_id=None)
         else:
-            if not user_id:
-                return jsonify({
-                    "success": True,
-                    "files": [],
-                    "count": 0,
-                    "user_root": user_name,
-                    "message": "No files yet - upload your first file to get started"
-                })
             logger.debug(f"User {user_email} fetching their vault files (user_id={user_id})")
             rows = _fetch_all_rows(
                 lambda: supabase_client.table('vault_files')
@@ -3148,10 +4473,34 @@ def get_vault_files():
                 .eq('user_id', user_id)
                 .eq('is_system', False)
             )
-            files = _transform_files_for_display(rows, is_admin=False, user_id=user_id)
+        row_fetch_ms = int(round((time.perf_counter() - row_fetch_started_at) * 1000))
+
+        transform_started_at = time.perf_counter()
+        files = _transform_files_for_display(rows, is_admin=is_admin, user_id=None if is_admin else user_id)
+        if requested_path:
+            files = _filter_transformed_vault_files_for_path(files, requested_path)
+        transform_ms = int(round((time.perf_counter() - transform_started_at) * 1000))
+
+        logger.info(
+            "VAULT_FILES_LIST path=%s mode=%s admin=%s user_lookup_ms=%s row_fetch_ms=%s transform_ms=%s row_count=%s file_count=%s route_elapsed_ms=%s",
+            requested_path or "ALL_FILES",
+            "scoped" if requested_path else "all_files",
+            is_admin,
+            user_lookup_ms,
+            row_fetch_ms,
+            transform_ms,
+            len(rows),
+            len(files),
+            int(round((time.perf_counter() - route_started_at) * 1000)),
+        )
         
         return jsonify({
             "success": True,
+            "supabase_available": True,
+            "degraded": False,
+            "canonical": True,
+            "storage_mode": "supabase",
+            "connection_state": SUPABASE_STEWARD.snapshot().get("connection_state"),
             "files": files,
             "count": len(files),
             "user_root": user_name if not is_admin else "Vault (Admin)"
@@ -3305,8 +4654,11 @@ def upload_knowledge_files():
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
         user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
         user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
         user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id and user_role == 'admin':
+            user_id = _resolve_construct_owner_user_id(construct_id)
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
@@ -3484,8 +4836,11 @@ def delete_knowledge_file(file_id):
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
         user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
         user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
         user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id and user_role == 'admin':
+            user_id = _resolve_construct_owner_user_id(construct_id)
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
@@ -3536,8 +4891,11 @@ def sync_memup():
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
         user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
         user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
         user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id and user_role == 'admin':
+            user_id = _resolve_construct_owner_user_id(construct_id)
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
@@ -3558,6 +4916,84 @@ def sync_memup():
         return jsonify({"success": False, "error": "Memup sync failed"}), 500
 
 
+@app.route('/api/vault/memup/materialize', methods=['POST'])
+@require_auth
+def materialize_memup():
+    """Materialize a canonical memup capsule from transcript candidates without running the full sync path."""
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        current_user = getattr(request, 'current_user', None)
+        if not current_user:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        data = request.get_json(silent=True) or {}
+        construct_id = str(data.get('construct_id') or '').strip()
+        if not construct_id:
+            return jsonify({"success": False, "error": "construct_id is required"}), 400
+
+        user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        if not user_id and user_role == 'admin':
+            user_id = _resolve_construct_owner_user_id(construct_id)
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        requested_ids = _first_non_empty_list([data.get('candidate_transcript_ids')])
+        candidate_transcript_ids = requested_ids or _candidate_transcript_ids_for_construct(construct_id)
+        if not candidate_transcript_ids:
+            return jsonify({
+                "success": False,
+                "construct_id": construct_id,
+                "error": "No transcript candidates found for materialization",
+            }), 404
+
+        materialized = _persist_capsule_from_candidate_transcripts(
+            construct_id,
+            candidate_transcript_ids,
+            user_id,
+        )
+        if not materialized:
+            return jsonify({
+                "success": False,
+                "construct_id": construct_id,
+                "error": "No canonical capsule could be materialized from candidate transcripts",
+                "candidate_transcript_ids": candidate_transcript_ids,
+            }), 404
+
+        capsule_data = materialized.get('capsule_data') or {}
+        write_result = materialized.get('write_result') or {}
+        original_capsule = materialized.get('original_capsule') or {}
+        summary = capsule_data.get('summary', {}) if isinstance(capsule_data, dict) else {}
+        return jsonify({
+            "success": True,
+            "construct_id": construct_id,
+            "user_id": user_id,
+            "candidate_transcript_ids": candidate_transcript_ids,
+            "candidate_count": len(candidate_transcript_ids),
+            "materialized_via": "candidate_transcripts",
+            "original_capsule_file": original_capsule,
+            "materialized_capsule_file": write_result,
+            "capsule_file": write_result,
+            "capsule_version": capsule_data.get('capsule_version'),
+            "total_sessions": summary.get('total_sessions'),
+            "total_exchanges": summary.get('total_exchanges'),
+            "date_range": summary.get('date_range'),
+            "topics": summary.get('topics', []),
+        }), 200
+
+    except Exception as e:
+        logger.error(f"MEMUP_MATERIALIZE_ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        if _is_supabase_upstream_timeout(e):
+            return _supabase_timeout_write_response("/api/vault/memup/materialize")
+        return jsonify({"success": False, "error": "Memup materialization failed"}), 500
+
+
 @app.route('/api/vault/memup/status')
 @require_auth
 def memup_status():
@@ -3575,40 +5011,80 @@ def memup_status():
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
         user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
+        is_admin = user_role == 'admin'
         user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
         user_id = user_result.data[0]['id'] if user_result.data else None
-        if not user_id:
+        if not user_id and not is_admin:
             return jsonify({"success": False, "error": "User not found"}), 403
 
-        capsule_path = f'instances/{construct_id}/memup/{construct_id}.capsule'
-        result = supabase_client.table('vault_files').select(
-            'id, filename, sha256, metadata, created_at, updated_at'
-        ).eq('construct_id', construct_id).eq('user_id', user_id).eq('filename', capsule_path).execute()
+        original_path = _original_capsule_path(construct_id)
+        materialized_path = _materialized_capsule_path(construct_id)
+        original_row = _lookup_exact_vault_preview_row(
+            filename=original_path,
+            storage_path=original_path,
+            construct_id=construct_id,
+            user_id=user_id,
+            is_admin=is_admin,
+        )
+        materialized_row = _lookup_exact_vault_preview_row(
+            filename=materialized_path,
+            storage_path=materialized_path,
+            construct_id=construct_id,
+            user_id=user_id,
+            is_admin=is_admin,
+        )
 
-        if result.data:
-            row = result.data[0]
+        def _artifact_summary(row: Optional[Dict[str, Any]], path: str) -> Dict[str, Any]:
+            if not row:
+                return {"exists": False, "path": path}
             meta = row.get('metadata')
             if isinstance(meta, str):
-                try: meta = json.loads(meta)
-                except: meta = {}
-            if not isinstance(meta, dict): meta = {}
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            return {
+                "exists": True,
+                "file_id": row.get('id'),
+                "path": path,
+                "sha256": row.get('sha256', ''),
+                "file_type": row.get('file_type'),
+                "last_synced_at": meta.get('last_synced_at', row.get('updated_at', row.get('created_at', ''))),
+                "total_sessions": meta.get('total_sessions', 0),
+                "capsule_version": meta.get('capsule_version', ''),
+                "metadata": meta,
+            }
 
+        original_summary = _artifact_summary(original_row, original_path)
+        materialized_summary = _artifact_summary(materialized_row, materialized_path)
+        if original_summary["exists"] or materialized_summary["exists"]:
+            preferred = materialized_summary if materialized_summary["exists"] else original_summary
+            preferred_kind = "materialized" if materialized_summary["exists"] else "original"
             return jsonify({
                 "success": True,
                 "construct_id": construct_id,
                 "synced": True,
-                "file_id": row['id'],
-                "path": capsule_path,
-                "sha256": row.get('sha256', ''),
-                "last_synced_at": meta.get('last_synced_at', row.get('updated_at', row.get('created_at', ''))),
-                "total_sessions": meta.get('total_sessions', 0),
-                "capsule_version": meta.get('capsule_version', ''),
+                "preferred_artifact": preferred_kind,
+                "original_capsule": original_summary,
+                "materialized_capsule": materialized_summary,
+                "file_id": preferred.get("file_id"),
+                "path": preferred.get("path"),
+                "sha256": preferred.get("sha256", ''),
+                "last_synced_at": preferred.get("last_synced_at", ''),
+                "total_sessions": preferred.get("total_sessions", 0),
+                "capsule_version": preferred.get("capsule_version", ''),
             })
         else:
             return jsonify({
                 "success": True,
                 "construct_id": construct_id,
                 "synced": False,
+                "preferred_artifact": None,
+                "original_capsule": {"exists": False, "path": original_path},
+                "materialized_capsule": {"exists": False, "path": materialized_path},
                 "message": "No memup capsule found. Run sync to generate one."
             })
 
@@ -3952,6 +5428,7 @@ def simdrive_inject():
 @require_auth
 def get_vault_file(file_id):
     """Get a single vault file by ID (multi-tenant: users can only access their files)"""
+    started_at = time.perf_counter()
     try:
         if not supabase_client:
             return jsonify({"success": False, "error": "Supabase not configured"}), 500
@@ -3965,6 +5442,7 @@ def get_vault_file(file_id):
         if not result.data:
             return jsonify({"success": False, "error": "File not found"}), 404
         
+        effective_user_id = result.data.get('user_id')
         if user_role != 'admin':
             user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
             user_id = user_result.data[0]['id'] if user_result.data else None
@@ -3979,10 +5457,187 @@ def get_vault_file(file_id):
             if file_user_id is not None and file_user_id != user_id:
                 log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "not_owner")
                 return jsonify({"success": False, "error": "Access denied"}), 403
-        
-        return jsonify({"success": True, "file": result.data})
+            effective_user_id = user_id
+
+        backing_row = _lookup_materialized_capsule_backing_row(
+            result.data,
+            user_id=effective_user_id,
+            is_admin=user_role == 'admin',
+        )
+        if backing_row and isinstance(backing_row.get('content'), str) and backing_row.get('content'):
+            file_payload = _build_preview_payload_from_materialized_sibling(
+                result.data,
+                backing_row,
+                preview_budget_ms=VAULT_PREVIEW_ROUTE_BUDGET_MS,
+            )
+        else:
+            file_payload = _derive_vault_preview_payload(result.data)
+        logger.info(
+            "VAULT_FILE_DETAIL: id=%s path=%s route_elapsed_ms=%s preview_elapsed_ms=%s preview_status=%s preview_source=%s preview_timed_out=%s",
+            file_id,
+            file_payload.get('filename') or file_payload.get('storage_path') or '',
+            _preview_elapsed_ms(started_at),
+            file_payload.get('preview_elapsed_ms'),
+            file_payload.get('preview_status'),
+            file_payload.get('preview_source'),
+            file_payload.get('preview_timed_out'),
+        )
+        return jsonify({"success": True, "file": file_payload})
     except Exception as e:
         logger.error(f"Error fetching vault file: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/vault/files/preview', methods=['POST'])
+@require_auth
+def preview_vault_file():
+    """Build a fast preview payload from list-row metadata without refetching the file by id."""
+    started_at = time.perf_counter()
+    try:
+        if not supabase_client:
+            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+
+        current_user = request.current_user
+        user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
+        payload = request.get_json(silent=True) or {}
+        filename = str(payload.get('filename') or payload.get('storage_path') or '').strip()
+        storage_path = str(payload.get('storage_path') or filename).strip()
+        file_type = str(payload.get('file_type') or '').strip()
+        construct_id = str(payload.get('construct_id') or '').strip()
+        resolve_body = bool(payload.get('resolve_body'))
+        candidate_transcript_ids = payload.get('candidate_transcript_ids') or []
+
+        if not filename:
+            return jsonify({"success": False, "error": "filename is required"}), 400
+
+        effective_user_id = payload.get('user_id')
+        if user_role != 'admin':
+            user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+            effective_user_id = user_result.data[0]['id'] if user_result.data else None
+            if not effective_user_id:
+                return jsonify({"success": False, "error": "User not found"}), 403
+
+        pseudo_row = {
+            'id': payload.get('id'),
+            'filename': filename,
+            'storage_path': storage_path,
+            'file_type': file_type,
+            'content': payload.get('content'),
+            'construct_id': construct_id,
+            'user_id': effective_user_id,
+            'is_system': bool(payload.get('is_system', False)),
+            'metadata': payload.get('metadata') or {},
+            'created_at': payload.get('created_at'),
+            'updated_at': payload.get('updated_at'),
+            'sha256': payload.get('sha256'),
+        }
+
+        ext = os.path.splitext(filename)[1].lower()
+        inline_content = pseudo_row.get('content')
+        if ext == '.capsule' and not (isinstance(inline_content, str) and inline_content):
+            matched_row = _lookup_exact_vault_preview_row(
+                filename=filename,
+                storage_path=storage_path,
+                construct_id=construct_id,
+                user_id=effective_user_id,
+                is_admin=user_role == 'admin',
+            )
+            requested_row = dict(matched_row or {})
+            for key, value in pseudo_row.items():
+                if value is not None and (value != "" or key in {"filename", "storage_path", "construct_id"}):
+                    requested_row[key] = value
+
+            backing_row = _lookup_materialized_capsule_backing_row(
+                requested_row,
+                user_id=effective_user_id,
+                is_admin=user_role == 'admin',
+            )
+            if backing_row and isinstance(backing_row.get('content'), str) and backing_row.get('content'):
+                file_payload = _build_preview_payload_from_materialized_sibling(
+                    requested_row,
+                    backing_row,
+                    preview_budget_ms=0,
+                )
+            elif matched_row and isinstance(matched_row.get('content'), str) and matched_row.get('content'):
+                preview_row = dict(pseudo_row)
+                preview_row.update(matched_row)
+                file_payload = _derive_vault_preview_payload(preview_row, preview_budget_ms=0)
+            elif matched_row and resolve_body and candidate_transcript_ids:
+                capsule_user_id = matched_row.get('user_id') or effective_user_id
+                candidate_preview = _build_capsule_preview_from_candidate_ids(
+                    construct_id,
+                    candidate_transcript_ids,
+                    user_id=capsule_user_id,
+                )
+                if candidate_preview:
+                    preview_row = dict(pseudo_row)
+                    preview_row.update(matched_row)
+                    preview_row['content'] = candidate_preview
+                    file_payload = _derive_vault_preview_payload(preview_row, preview_budget_ms=0)
+                    file_payload['preview_status'] = 'recovered'
+                    file_payload['preview_source'] = 'transcript_candidates'
+                else:
+                    file_payload = dict(pseudo_row)
+                    file_payload['content'] = _build_unavailable_capsule_preview(file_payload, filename, file_type)
+                    file_payload['preview_kind'] = 'json'
+                    file_payload['preview_status'] = 'unavailable'
+                    file_payload['preview_source'] = 'fast_diagnostic'
+                    file_payload['preview_timed_out'] = False
+                    file_payload['preview_elapsed_ms'] = _preview_elapsed_ms(started_at)
+                    file_payload['preview_budget_ms'] = 0
+                    file_payload['preview_storage_elapsed_ms'] = 0
+                    file_payload['preview_reconstruct_elapsed_ms'] = 0
+            elif matched_row and resolve_body:
+                hydrated_text = _load_vault_file_text(matched_row)
+                if hydrated_text:
+                    preview_row = dict(pseudo_row)
+                    preview_row.update(matched_row)
+                    preview_row['content'] = hydrated_text
+                    file_payload = _derive_vault_preview_payload(preview_row, preview_budget_ms=0)
+                    file_payload['preview_status'] = 'recovered'
+                    file_payload['preview_source'] = 'storage_hydrate'
+                else:
+                    file_payload = dict(pseudo_row)
+                    file_payload['content'] = _build_unavailable_capsule_preview(file_payload, filename, file_type)
+                    file_payload['preview_kind'] = 'json'
+                    file_payload['preview_status'] = 'unavailable'
+                    file_payload['preview_source'] = 'fast_diagnostic'
+                    file_payload['preview_timed_out'] = False
+                    file_payload['preview_elapsed_ms'] = _preview_elapsed_ms(started_at)
+                    file_payload['preview_budget_ms'] = 0
+                    file_payload['preview_storage_elapsed_ms'] = 0
+                    file_payload['preview_reconstruct_elapsed_ms'] = 0
+            else:
+                file_payload = dict(pseudo_row)
+                file_payload['content'] = _build_unavailable_capsule_preview(file_payload, filename, file_type)
+                file_payload['preview_kind'] = 'json'
+                file_payload['preview_status'] = 'unavailable'
+                file_payload['preview_source'] = 'fast_diagnostic'
+                file_payload['preview_timed_out'] = False
+                file_payload['preview_elapsed_ms'] = _preview_elapsed_ms(started_at)
+                file_payload['preview_budget_ms'] = 0
+                file_payload['preview_storage_elapsed_ms'] = 0
+                file_payload['preview_reconstruct_elapsed_ms'] = 0
+        else:
+            preview_budget_ms = (
+                VAULT_FAST_CAPSULE_PREVIEW_BUDGET_MS if ext == '.capsule' else VAULT_PREVIEW_ROUTE_BUDGET_MS
+            )
+            file_payload = _derive_vault_preview_payload(pseudo_row, preview_budget_ms=preview_budget_ms)
+            if ext == '.capsule' and file_payload.get('preview_status') == 'unavailable':
+                file_payload['preview_source'] = 'fast_diagnostic'
+        logger.info(
+            "VAULT_FILE_PREVIEW_FAST: path=%s route_elapsed_ms=%s preview_elapsed_ms=%s preview_status=%s preview_source=%s preview_timed_out=%s",
+            filename,
+            _preview_elapsed_ms(started_at),
+            file_payload.get('preview_elapsed_ms'),
+            file_payload.get('preview_status'),
+            file_payload.get('preview_source'),
+            file_payload.get('preview_timed_out'),
+        )
+        return jsonify({"success": True, "file": file_payload})
+    except Exception as e:
+        logger.error(f"Error building fast vault preview: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ============================================================================
@@ -3996,20 +5651,12 @@ def service_health():
     No auth required - allows services to check if VVAULT is up before auth
     """
     supabase_meta = _get_supabase_status()
+    connection = SUPABASE_STEWARD.snapshot()
     supabase_status = "connected" if supabase_client else "not_configured"
     service_api_status = "enabled" if VVAULT_SERVICE_TOKEN else "disabled"
     
     # Check Supabase connectivity
-    store_status = "unknown"
-    if supabase_client:
-        try:
-            supabase_client.table('users').select('id').limit(1).execute()
-            store_status = "connected"
-        except Exception as e:
-            store_status = "error"
-            logger.debug(f"Supabase connectivity check failed: {e}")
-    else:
-        store_status = "not_configured"
+    store_status = connection.get("connection_state") or "unknown"
     
     overall_status = "ok"
     if store_status != "connected":
@@ -4031,6 +5678,7 @@ def service_health():
         },
         "supabase_mode": supabase_meta["mode"],
         "supabase_config": supabase_meta,
+        "supabase_connection": connection,
         "message": "VVAULT service API" if service_api_status == "enabled" else "Service API disabled (VVAULT_SERVICE_TOKEN not set)"
     })
 
@@ -4339,6 +5987,153 @@ def get_system_file():
         return jsonify({"success": False, "error": "Failed to fetch system file"}), 500
 
 
+def _queue_system_file_write(
+    *,
+    record: Dict[str, Any],
+    storage_path: str,
+    sha256: str,
+    reason: str,
+) -> Tuple[Any, int]:
+    receipt = SUPABASE_WRITE_OUTBOX.queue_write(
+        operation=VAULT_FILE_UPSERT,
+        operation_kind="upsert",
+        table="vault_files",
+        record=record,
+        mutable_fields=SYSTEM_FILE_OUTBOX_MUTABLE_FIELDS,
+        identity_fields=SYSTEM_FILE_OUTBOX_IDENTITY_FIELDS,
+        idempotency_key=f"vault_files:system_file:{storage_path}:{sha256}",
+    )
+    status = 202 if receipt.get("ok") else 503
+    return jsonify(
+        {
+            "success": bool(receipt.get("ok")),
+            "queued": bool(receipt.get("ok")),
+            "canonical": False,
+            "storage_mode": "outbox",
+            "supabase_available": False,
+            "reason": reason,
+            "outbox_receipt": receipt,
+        }
+    ), status
+
+
+def _validate_system_file_outbox_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    record = item.get("record") or {}
+    mutable = set(item.get("mutable_fields") or [])
+    identity = set(item.get("identity_fields") or [])
+    if item.get("operation") != VAULT_FILE_UPSERT or item.get("table") != "vault_files":
+        return {
+            "error_code": UNSUPPORTED_OUTBOX_ITEM,
+            "message": "Only system-file vault_files upserts are replayable.",
+        }
+    if item.get("operation_kind") != "upsert":
+        return {
+            "error_code": UNSUPPORTED_OUTBOX_ITEM,
+            "message": "Only upsert outbox items are replayable.",
+        }
+    if not str(record.get("storage_path") or "").strip():
+        return {
+            "error_code": UNSUPPORTED_OUTBOX_ITEM,
+            "message": "System-file replay requires a storage_path identity field.",
+        }
+    if record.get("is_system") is not True:
+        return {
+            "error_code": UNSUPPORTED_OUTBOX_ITEM,
+            "message": "System-file replay requires is_system=true.",
+        }
+    if record.get("user_id") not in (None, ""):
+        return {
+            "error_code": UNSUPPORTED_OUTBOX_ITEM,
+            "message": "System-file replay cannot set user_id.",
+        }
+    if mutable.intersection(SYSTEM_FILE_OUTBOX_IDENTITY_FIELDS):
+        return {
+            "error_code": UNSUPPORTED_OUTBOX_ITEM,
+            "message": "System-file replay cannot treat identity fields as mutable.",
+        }
+    if identity != set(SYSTEM_FILE_OUTBOX_IDENTITY_FIELDS):
+        return {
+            "error_code": UNSUPPORTED_OUTBOX_ITEM,
+            "message": "System-file replay identity contract must be storage_path + is_system + user_id.",
+        }
+    return None
+
+
+def _load_remote_system_file_for_outbox_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    record = item.get("record") or {}
+    storage_path = str(record.get("storage_path") or "").strip()
+    result = (
+        supabase_client.table("vault_files")
+        .select("*")
+        .eq("is_system", True)
+        .eq("storage_path", storage_path)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return {}
+    remote = dict(result.data[0])
+    remote_updated = _parse_vault_timestamp(remote.get("updated_at") or remote.get("created_at"))
+    queued_updated = _parse_vault_timestamp(record.get("accepted_at") or record.get("updated_at") or record.get("created_at"))
+    if remote_updated <= queued_updated:
+        remote["idempotency_key"] = item.get("idempotency_key")
+    return remote
+
+
+def _write_system_file_outbox_patch(item: Dict[str, Any], patch: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+    illegal_fields = sorted(set(patch.keys()) - set(SYSTEM_FILE_OUTBOX_MUTABLE_FIELDS))
+    if illegal_fields:
+        raise ValueError(f"Replay patch contains non-mutable fields: {', '.join(illegal_fields)}")
+    remote_id = plan.get("remote_id") or (plan.get("merged_record") or {}).get("id")
+    if not remote_id:
+        raise ValueError("Replay patch has no remote vault_files id.")
+    result = _vault_files_write_with_optional_updated_at("update", patch, record_id=remote_id)
+    return {
+        "ok": True,
+        "action": "updated",
+        "file_id": remote_id,
+        "applied_fields": sorted(patch.keys()),
+        "row_count": len(result.data or []),
+    }
+
+
+def _replay_system_file_outbox() -> Dict[str, Any]:
+    write_allowed, state = SUPABASE_STEWARD.allow_write()
+    if not supabase_client or not write_allowed:
+        receipt = {
+            "success": False,
+            "ok": False,
+            "action": "blocked",
+            "error_code": state.get("last_error_code") or "SUPABASE_NOT_CONNECTED",
+            "message": "Supabase is not connected; outbox replay is blocked until recovery is proven.",
+            "pending_outbox_count": SUPABASE_WRITE_OUTBOX.pending_count(),
+            "connection_state": state.get("connection_state"),
+        }
+        SUPABASE_STEWARD.update_outbox_visibility(
+            pending_outbox_count=receipt["pending_outbox_count"],
+            last_reconciliation_receipt=receipt,
+            blocked_replay_count=state.get("blocked_replay_count") or 0,
+        )
+        return receipt
+
+    receipt = SUPABASE_WRITE_OUTBOX.replay_pending(
+        remote_loader=_load_remote_system_file_for_outbox_item,
+        writer=_write_system_file_outbox_patch,
+        item_validator=_validate_system_file_outbox_item,
+    )
+    receipt["success"] = receipt.get("blocked", 0) == 0
+    return receipt
+
+
+@app.route('/api/vault/system-files/outbox/replay', methods=['POST'])
+@require_service_token
+def replay_system_file_outbox():
+    """Replay queued system-file Supabase writes with field-scoped receipts."""
+    receipt = _replay_system_file_outbox()
+    status = 200 if receipt.get("success") else 503 if receipt.get("action") == "blocked" and receipt.get("connection_state") != "connected" else 409
+    return jsonify({"success": bool(receipt.get("success")), "outbox_replay_receipt": receipt}), status
+
+
 @app.route('/api/vault/system-files', methods=['POST'])
 @require_service_token
 def upsert_system_file():
@@ -4351,9 +6146,6 @@ def upsert_system_file():
       - metadata may be a dict or JSON string; stored as JSON string
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 503
-
         data = request.get_json()
         if not data:
             return jsonify({"success": False, "error": "Request body required"}), 400
@@ -4387,15 +6179,6 @@ def upsert_system_file():
         now = datetime.now().isoformat()
         sha256 = hashlib.sha256(str(content).encode("utf-8")).hexdigest()
 
-        existing = (
-            supabase_client.table("vault_files")
-            .select("id, created_at")
-            .eq("is_system", True)
-            .eq("storage_path", storage_path)
-            .limit(1)
-            .execute()
-        )
-
         record = {
             "filename": filename,
             "storage_path": storage_path,
@@ -4407,6 +6190,24 @@ def upsert_system_file():
             "user_id": None,
             "updated_at": now,
         }
+
+        write_allowed, _state = SUPABASE_STEWARD.allow_write()
+        if not supabase_client or not write_allowed:
+            return _queue_system_file_write(
+                record=record,
+                storage_path=storage_path,
+                sha256=sha256,
+                reason="supabase_not_connected",
+            )
+
+        existing = (
+            supabase_client.table("vault_files")
+            .select("id, created_at")
+            .eq("is_system", True)
+            .eq("storage_path", storage_path)
+            .limit(1)
+            .execute()
+        )
 
         action = "created"
         if existing.data:
@@ -4444,6 +6245,13 @@ def upsert_system_file():
     except Exception as e:
         logger.error(f"SERVICE_API: Error upserting system file: {e}")
         if _is_supabase_upstream_timeout(e):
+            if "record" in locals() and storage_path:
+                return _queue_system_file_write(
+                    record=record,
+                    storage_path=storage_path,
+                    sha256=sha256,
+                    reason="supabase_timeout",
+                )
             return _supabase_timeout_write_response("/api/vault/system-files")
         return jsonify({"success": False, "error": "Failed to upsert system file"}), 500
 
@@ -4637,23 +6445,80 @@ def update_construct_editor(construct_id):
             return jsonify({"success": False, "error": "User not found"}), 403
 
         payload = request.get_json(silent=True) or {}
+        current_payload = _build_construct_editor_payload(callsign, user_id)
+        now = datetime.now(timezone.utc).isoformat()
+        display_name = (payload.get('displayName') or payload.get('name') or current_payload.get('displayName') or '').strip() or callsign
+        full_name = (payload.get('fullName') or current_payload.get('fullName') or display_name).strip() or display_name
+        description = payload.get('description') if 'description' in payload else current_payload.get('description')
+        if isinstance(description, str):
+            description = description.strip()
+        else:
+            description = ''
+        instructions = payload.get('instructions') if 'instructions' in payload else current_payload.get('instructions')
+        if not isinstance(instructions, str):
+            instructions = ''
+        conversation_starters = payload.get('conversationStarters') if 'conversationStarters' in payload else current_payload.get('conversationStarters')
+        if not isinstance(conversation_starters, list):
+            conversation_starters = []
+        capabilities = _normalize_construct_capabilities(
+            payload.get('capabilities') if 'capabilities' in payload else current_payload.get('capabilities')
+        )
+        memory_settings = _normalize_construct_memory_settings(
+            payload.get('memory') if 'memory' in payload else current_payload.get('memory')
+        )
+        canon_refs = _normalize_construct_refs(
+            payload.get('canonRefs') if 'canonRefs' in payload else current_payload.get('canonRefs')
+        )
+        knowledge_refs = _normalize_construct_refs(
+            payload.get('knowledgeRefs') if 'knowledgeRefs' in payload else current_payload.get('knowledgeRefs')
+        )
+        models = _normalize_construct_models(
+            payload.get('models') if 'models' in payload else current_payload.get('models')
+        )
+        orchestration_mode = payload.get('orchestration_mode') or payload.get('orchestrationMode') or "standard"
+        created_at = current_payload.get('createdAt')
         prompt_payload = {
-            "name": (payload.get('displayName') or '').strip() or callsign,
-            "description": (payload.get('description') or '').strip(),
-            "instructions": payload.get('instructions') or '',
-            "conversationStarters": payload.get('conversationStarters') or [],
-            "source": "vvault_construct_editor",
-            "updatedAt": datetime.now(timezone.utc).isoformat(),
+            **_build_construct_prompt_manifest(
+                callsign,
+                display_name,
+                full_name,
+                description,
+                instructions,
+                conversation_starters,
+                capabilities,
+                memory_settings,
+                canon_refs,
+                knowledge_refs,
+                source="vvault_construct_editor",
+                created_at=created_at,
+                updated_at=now,
+                system_prompt=payload.get('system_prompt') or payload.get('systemPrompt') or instructions,
+            ),
         }
-        _upsert_construct_prompt_file(callsign, user_id, prompt_payload)
+        _upsert_construct_prompt_file(callsign, user_id, prompt_payload, source="vvault_construct_editor")
+
+        metadata_payload = _build_construct_metadata_payload(
+            callsign,
+            display_name,
+            full_name,
+            description,
+            models,
+            orchestration_mode,
+            capabilities,
+            memory_settings,
+            canon_refs,
+            knowledge_refs,
+            source="vvault_construct_editor",
+            created_at=created_at,
+            updated_at=now,
+        )
+        _upsert_construct_metadata_file(callsign, user_id, metadata_payload, source="vvault_construct_editor")
 
         _project_identity_fields(callsign, {
             "conditioning": payload.get('conditioning') or '',
             "definition": payload.get('definition') or '',
             "physicalFeatures": payload.get('physicalFeatures') or '',
-            "voice": {
-                "text": payload.get('voice') or '',
-            },
+            "voice": _normalize_construct_voice_payload(payload.get('voice') or ''),
         }, dry_run=False)
 
         gender_content = json.dumps({
@@ -5054,9 +6919,10 @@ def get_construct_files(construct_id):
 def get_construct_identity(construct_id):
     """Return structured identity data for a construct.
 
-    Searches Supabase for identity files (prompt.txt, prompt.json,
-    personality.json, CONTINUITY_GPT_PROMPT.md) using both the callsign
-    and bare name construct_id values.
+    Searches Supabase for canonical identity/config files first, then
+    compatibility files (prompt.txt, personality.json, voice.md,
+    definition.json) using both the callsign and bare name construct_id
+    values.
 
     Returns:
       {
@@ -5077,8 +6943,11 @@ def get_construct_identity(construct_id):
         bare_name = _bare_name_from_callsign(callsign)
         display_name = bare_name.capitalize()
 
-        identity_files = ['prompt.txt', 'prompt.json', 'personality.json',
-                          'CONTINUITY_GPT_PROMPT.md', 'conditioning.txt']
+        supported_files = {
+            'prompt.txt', 'prompt.json', 'personality.json', 'metadata.json',
+            'CONTINUITY_GPT_PROMPT.md', 'conditioning.txt', 'definition.json',
+            'definition.txt', 'voice.json', 'voice.md',
+        }
 
         result = supabase_client.table('vault_files').select(
             'filename, storage_path, content, file_type, created_at, updated_at'
@@ -5086,59 +6955,107 @@ def get_construct_identity(construct_id):
             f'construct_id.eq.{callsign},construct_id.eq.{bare_name}'
         ).not_.is_('content', 'null').execute()
 
-        name = display_name
-        description = ""
-        instructions = ""
-        system_prompt = ""
-        personality = None
-        conversation_starters = []
-        conditioning = ""
+        rows_by_name: Dict[str, List[Dict[str, Any]]] = {}
+        for row in _dedupe_vault_rows(result.data or []):
+            basename = os.path.basename(row.get('filename', '') or row.get('storage_path', ''))
+            if basename in supported_files:
+                rows_by_name.setdefault(basename, []).append(row)
 
-        for f in _dedupe_vault_rows(result.data or []):
-            fname = f.get('filename', '')
-            basename = os.path.basename(fname)
-            if basename not in identity_files:
-                continue
-            content = f.get('content', '') or ''
+        source_rows = {
+            name: _pick_latest_vault_row(rows)
+            for name, rows in rows_by_name.items()
+        }
 
-            if basename == 'prompt.txt':
-                lines = content.strip().split('\n')
-                for line in lines:
-                    line_stripped = line.strip().strip('*')
-                    if line_stripped.startswith('You Are '):
-                        name = line_stripped.replace('You Are ', '').strip()
-                    elif line_stripped.startswith('Helps ') or line_stripped.startswith('Description:'):
-                        description = line_stripped.replace('Description:', '').strip()
-                code_blocks = content.split('```')
+        prompt_text = _load_vault_file_text(source_rows.get('prompt.txt'))
+        prompt_json = _safe_json_loads(_load_vault_file_text(source_rows.get('prompt.json'))) or {}
+        if not isinstance(prompt_json, dict):
+            prompt_json = {}
+        metadata_json = _safe_json_loads(_load_vault_file_text(source_rows.get('metadata.json'))) or {}
+        if not isinstance(metadata_json, dict):
+            metadata_json = {}
+        personality = _safe_json_loads(_load_vault_file_text(source_rows.get('personality.json')))
+        definition_json = _safe_json_loads(_load_vault_file_text(source_rows.get('definition.json'))) or {}
+        if not isinstance(definition_json, dict):
+            definition_json = {}
+        definition_text = _load_vault_file_text(source_rows.get('definition.txt'))
+        voice_json = _safe_json_loads(_load_vault_file_text(source_rows.get('voice.json'))) or {}
+        if not isinstance(voice_json, dict):
+            voice_json = {}
+        voice_md = _load_vault_file_text(source_rows.get('voice.md'))
+        conditioning = _load_vault_file_text(source_rows.get('conditioning.txt')).strip()
+
+        name = _first_non_empty_string([
+            prompt_json.get('displayName'),
+            prompt_json.get('display_name'),
+            prompt_json.get('name'),
+            metadata_json.get('display_name'),
+            metadata_json.get('instance_name'),
+            display_name,
+        ], default=display_name)
+        description = _first_non_empty_string([
+            prompt_json.get('description'),
+            metadata_json.get('description'),
+        ])
+        instructions = _first_non_empty_string([
+            prompt_json.get('instructions'),
+            prompt_json.get('prompt'),
+        ])
+        system_prompt = _first_non_empty_string([
+            prompt_json.get('system_prompt'),
+            prompt_json.get('prompt'),
+        ])
+        conversation_starters = _first_non_empty_list([
+            prompt_json.get('conversationStarters'),
+            prompt_json.get('conversation_starters'),
+        ])
+
+        if prompt_text:
+            lines = prompt_text.strip().split('\n')
+            for line in lines:
+                line_stripped = line.strip().strip('*')
+                if line_stripped.startswith('You Are ') and name == display_name:
+                    name = line_stripped.replace('You Are ', '').strip()
+                elif (line_stripped.startswith('Helps ') or line_stripped.startswith('Description:')) and not description:
+                    description = line_stripped.replace('Description:', '').strip()
+            if not instructions:
+                code_blocks = prompt_text.split('```')
                 if len(code_blocks) >= 2:
                     instructions = code_blocks[1].strip()
                     if instructions.startswith('Instructions for'):
                         instructions = '\n'.join(instructions.split('\n')[1:]).strip()
-                system_prompt = content.strip()
+            if not system_prompt:
+                system_prompt = prompt_text.strip()
 
-            elif basename == 'prompt.json':
-                try:
-                    data = json.loads(content)
-                    name = data.get('name', name)
-                    description = data.get('description', description)
-                    instructions = data.get('instructions', instructions)
-                    system_prompt = data.get('system_prompt', '') or data.get('prompt', '') or instructions or system_prompt
-                    conversation_starters = data.get('conversation_starters', []) or data.get('conversationStarters', [])
-                except json.JSONDecodeError:
-                    pass
+        continuity_prompt = _load_vault_file_text(source_rows.get('CONTINUITY_GPT_PROMPT.md')).strip()
+        if continuity_prompt and not system_prompt:
+            system_prompt = continuity_prompt
 
-            elif basename == 'personality.json':
-                try:
-                    personality = json.loads(content)
-                except json.JSONDecodeError:
-                    pass
-
-            elif basename == 'conditioning.txt':
-                conditioning = content.strip()
-
-            elif fname == 'CONTINUITY_GPT_PROMPT.md':
-                if not system_prompt:
-                    system_prompt = content.strip()
+        definition = _first_non_empty_string([
+            definition_json.get('instructions'),
+            definition_json.get('prompt'),
+            definition_text,
+        ])
+        voice = _first_non_empty_string([
+            voice_md,
+            voice_json.get('text'),
+        ])
+        full_name = _first_non_empty_string([
+            prompt_json.get('fullName'),
+            metadata_json.get('full_name'),
+            name,
+        ], default=name)
+        capabilities = _normalize_construct_capabilities(
+            prompt_json.get('capabilities') if isinstance(prompt_json.get('capabilities'), (dict, list)) else metadata_json.get('capabilities')
+        )
+        memory_settings = _normalize_construct_memory_settings(
+            prompt_json.get('memory') if isinstance(prompt_json.get('memory'), (dict, bool)) else metadata_json.get('memory')
+        )
+        canon_refs = _normalize_construct_refs(
+            prompt_json.get('canonRefs') if isinstance(prompt_json.get('canonRefs'), list) and prompt_json.get('canonRefs') else metadata_json.get('canon_refs')
+        )
+        knowledge_refs = _normalize_construct_refs(
+            prompt_json.get('knowledgeRefs') if isinstance(prompt_json.get('knowledgeRefs'), list) and prompt_json.get('knowledgeRefs') else metadata_json.get('knowledge_refs')
+        )
 
         enforcement = None
         enf_result = supabase_client.table('vault_files').select(
@@ -5154,12 +7071,21 @@ def get_construct_identity(construct_id):
             "success": True,
             "construct_id": callsign,
             "name": name,
+            "displayName": name,
+            "fullName": full_name,
             "description": description or f"Helps you with your life problems.",
             "instructions": instructions,
             "system_prompt": system_prompt,
             "conversation_starters": conversation_starters,
+            "conversationStarters": conversation_starters,
             "conditioning": conditioning,
+            "definition": definition,
+            "voice": voice,
             "personality": personality,
+            "capabilities": capabilities,
+            "memory": memory_settings,
+            "canonRefs": canon_refs,
+            "knowledgeRefs": knowledge_refs,
             "enforcement": enforcement
         })
 
@@ -5204,84 +7130,71 @@ def _validate_vault_filename(filename):
 @app.route('/api/chatty/construct/create', methods=['POST'])
 @require_chatty_auth
 def create_construct():
-    """Scaffold a full construct instance directory in Supabase vault_files.
-
-    Accepts multipart/form-data OR JSON.
-    Fields:
-        callsign        (required, {name}-{NNN} format)
-        name            (required, display name)
-        description     (optional)
-        instructions    (optional, system prompt body)
-        conversationStarters (optional, JSON array)
-        personality     (optional, JSON object)
-        conditioning    (optional, text)
-        color_hex       (optional, glyph color, default #722F37)
-        center_image    (optional, file upload for glyph center)
-        models          (optional, JSON array of model configs)
-        orchestration_mode (optional, e.g. 'standard', 'autonomous')
-        system_prompt   (optional, raw system prompt override)
-        avatar_base64   (optional, base64-encoded avatar image)
-
-    Scaffolds the full directory template per VSI spec.
-    """
+    """Create a canonical Supabase-backed construct bundle in `vault_files`."""
     try:
         if not supabase_client:
             return jsonify({"success": False, "error": "Supabase not configured"}), 500
 
+        def _parse_jsonish(raw_value: Any, default: Any) -> Any:
+            if raw_value in (None, ""):
+                return default
+            if isinstance(raw_value, (dict, list, bool)):
+                return raw_value
+            try:
+                return json.loads(raw_value)
+            except Exception:
+                return default
+
         if request.content_type and 'multipart/form-data' in request.content_type:
             callsign = (request.form.get('callsign') or '').strip().lower()
-            name = (request.form.get('name') or '').strip()
+            name = (request.form.get('name') or request.form.get('displayName') or '').strip()
+            full_name = (request.form.get('fullName') or '').strip()
             description = request.form.get('description', '')
             instructions = request.form.get('instructions', '')
-            starters_raw = request.form.get('conversationStarters', '[]')
-            try:
-                conversation_starters = json.loads(starters_raw) if starters_raw else []
-            except:
-                conversation_starters = []
-            personality_raw = request.form.get('personality', '{}')
-            try:
-                personality = json.loads(personality_raw) if personality_raw else {}
-            except:
-                personality = {}
+            conversation_starters = _parse_jsonish(request.form.get('conversationStarters', '[]'), [])
             conditioning = request.form.get('conditioning', '')
+            definition = request.form.get('definition', '')
+            voice = _parse_jsonish(request.form.get('voice', ''), {"text": request.form.get('voice', '')})
+            physical_features = _parse_jsonish(request.form.get('physicalFeatures', ''), '')
+            capabilities = _parse_jsonish(request.form.get('capabilities', ''), {})
+            memory_settings = _parse_jsonish(request.form.get('memory', ''), {})
+            canon_refs = _parse_jsonish(request.form.get('canonRefs', '[]'), [])
+            knowledge_refs = _parse_jsonish(request.form.get('knowledgeRefs', '[]'), [])
             color_hex = request.form.get('color_hex', '#722F37')
             center_file = request.files.get('center_image')
             center_image_bytes = center_file.read() if center_file else None
-            models_raw = request.form.get('models', '[]')
-            try:
-                models = json.loads(models_raw) if models_raw else []
-            except:
-                models = []
+            models = _parse_jsonish(request.form.get('models', ''), {})
             orchestration_mode = request.form.get('orchestration_mode', 'standard')
             system_prompt_override = request.form.get('system_prompt', '')
             avatar_b64 = request.form.get('avatar_base64', '')
-            prompt_json_raw = request.form.get('prompt_json', '')
-            try:
-                prompt_json_override = json.loads(prompt_json_raw) if prompt_json_raw else None
-            except:
-                prompt_json_override = None
         else:
             data = request.get_json(silent=True)
             if not data or not isinstance(data, dict):
                 return jsonify({"success": False, "error": "Invalid or missing body"}), 400
             callsign = data.get('callsign', '').strip().lower()
-            name = data.get('name', '').strip()
+            name = (data.get('name') or data.get('displayName') or '').strip()
+            full_name = (data.get('fullName') or '').strip()
             description = data.get('description', '')
             instructions = data.get('instructions', '')
-            conversation_starters = data.get('conversationStarters', [])
-            personality = data.get('personality', {})
+            conversation_starters = data.get('conversationStarters', data.get('conversation_starters', []))
             conditioning = data.get('conditioning', '')
+            definition = data.get('definition', '')
+            voice = data.get('voice', {"text": ""})
+            physical_features = data.get('physicalFeatures', '')
+            capabilities = data.get('capabilities', {})
+            memory_settings = data.get('memory', {})
+            canon_refs = data.get('canonRefs', data.get('canon_refs', []))
+            knowledge_refs = data.get('knowledgeRefs', data.get('knowledge_refs', []))
             color_hex = data.get('color_hex', '#722F37')
             center_image_b64 = data.get('center_image_base64', '')
             center_image_bytes = None
             if center_image_b64:
                 import base64 as b64mod
                 center_image_bytes = b64mod.b64decode(center_image_b64)
-            models = data.get('models', [])
+            models = data.get('models', {})
             orchestration_mode = data.get('orchestration_mode', 'standard')
             system_prompt_override = data.get('system_prompt', '')
             avatar_b64 = data.get('avatar_base64', '')
-            prompt_json_override = data.get('prompt_json', None)
 
         if not callsign or not name:
             return jsonify({"success": False, "error": "callsign and name are required"}), 400
@@ -5300,133 +7213,60 @@ def create_construct():
         if existing.data:
             return jsonify({"success": False, "error": f"Construct {callsign} already exists (prompt.json found)"}), 409
 
-        now = datetime.now().isoformat()
-
-        if not isinstance(models, list):
-            models = []
+        now = datetime.now(timezone.utc).isoformat()
+        display_name = name
+        full_name = full_name or display_name
+        models = _normalize_construct_models(models)
+        capabilities = _normalize_construct_capabilities(capabilities)
+        memory_settings = _normalize_construct_memory_settings(memory_settings)
+        canon_refs = _normalize_construct_refs(canon_refs)
+        knowledge_refs = _normalize_construct_refs(knowledge_refs)
+        conversation_starters = _first_non_empty_list([conversation_starters])
+        voice_payload = _normalize_construct_voice_payload(voice)
         if orchestration_mode not in ('standard', 'autonomous', 'hybrid', 'custom'):
             orchestration_mode = 'standard'
 
-        if prompt_json_override and isinstance(prompt_json_override, dict):
-            prompt_obj = prompt_json_override
-            prompt_obj.setdefault('name', name)
-            prompt_obj.setdefault('callsign', callsign)
-            prompt_obj.setdefault('created_at', now)
-        else:
-            prompt_obj = {
-                "name": name,
-                "callsign": callsign,
-                "description": description,
-                "instructions": instructions,
-                "conversation_starters": conversation_starters,
-                "system_prompt": system_prompt_override or instructions,
-                "created_at": now
-            }
-
-        if not personality:
-            personality = {
-                "construct_id": callsign,
-                "instance_name": name,
-                "traits": [],
-                "rules": [],
-                "metadata": {
-                    "extractionTimestamp": now,
-                    "mergedWithExisting": False
-                }
-            }
-        elif 'construct_id' not in personality:
-            personality['construct_id'] = callsign
-
         if not conditioning:
-            conditioning = f"You are {name} ({callsign}). Maintain your identity at all times."
+            conditioning = f"You are {display_name} ({callsign}). Maintain your identity at all times."
+        if not definition:
+            definition = instructions or f"{display_name} is a protected GPT body within VVAULT."
 
-        metadata_obj = {
-            "construct_id": callsign,
-            "instance_name": name,
-            "created_at": now,
-            "version": "1.0.0",
-            "capsule_updated": False,
-            "color_hex": color_hex,
-            "models": models if models else [{"id": "qwen2.5:0.5b", "provider": "ollama", "isDefault": True}],
-            "orchestration_mode": orchestration_mode or "standard",
-            "status": "active"
-        }
+        prompt_obj = _build_construct_prompt_manifest(
+            callsign,
+            display_name,
+            full_name,
+            description,
+            instructions,
+            conversation_starters,
+            capabilities,
+            memory_settings,
+            canon_refs,
+            knowledge_refs,
+            source="vvault_construct_create",
+            created_at=now,
+            updated_at=now,
+            system_prompt=system_prompt_override or instructions,
+        )
+        metadata_obj = _build_construct_metadata_payload(
+            callsign,
+            display_name,
+            full_name,
+            description,
+            models,
+            orchestration_mode or "standard",
+            capabilities,
+            memory_settings,
+            canon_refs,
+            knowledge_refs,
+            source="vvault_construct_create",
+            created_at=now,
+            updated_at=now,
+        )
 
         transcript_content = f"# Chat with {name}\n\nTranscript started {now}\n"
 
-        log_files = [
-            "capsule.log", "chat.log", "cns.log",
-            "identity_guard.log", "independence.log", "ltm.log",
-            "self_improvement_agent.log", "server.log", "stm.log",
-            "watchdog.log"
-        ]
-
-        files_to_create = []
-
-        files_to_create.append({
-            'filename': 'prompt.json',
-            'file_type': 'text',
-            'content': json.dumps(prompt_obj, indent=2),
-            'folder': 'identity',
-        })
-        files_to_create.append({
-            'filename': 'conditioning.txt',
-            'file_type': 'text',
-            'content': conditioning,
-            'folder': 'identity',
-        })
-
-        files_to_create.append({
-            'filename': 'personality.json',
-            'file_type': 'text',
-            'content': json.dumps(personality, indent=2),
-            'folder': 'config',
-        })
-        files_to_create.append({
-            'filename': 'metadata.json',
-            'file_type': 'text',
-            'content': json.dumps(metadata_obj, indent=2),
-            'folder': 'config',
-        })
-
-        files_to_create.append({
-            'filename': f'chat_with_{callsign}.md',
-            'file_type': 'transcript',
-            'content': transcript_content,
-            'folder': 'chatty',
-        })
-
-        for log_name in log_files:
-            files_to_create.append({
-                'filename': log_name,
-                'file_type': 'text',
-                'content': f"# {log_name.replace('.log', '').replace('_', ' ').title()} Log\n# Construct: {callsign}\n# Created: {now}\n",
-                'folder': 'logs',
-            })
-
-        files_to_create.append({
-            'filename': 'manifest.json',
-            'file_type': 'simdrive',
-            'content': json.dumps({
-                'schema': 'simdrive_manifest',
-                'version': '1.0.0',
-                'construct_id': callsign,
-                'generated_at': now,
-                'total_files': 0,
-                'type_distribution': {},
-                'files': [],
-            }, indent=2),
-            'folder': 'simDrive',
-        })
-
-        files_to_create.append({
-            'filename': 'README.md',
-            'file_type': 'text',
-            'content': f"# Frame Directory — {callsign}\nCognitive and emotional layer modules.\nCreated: {now}\n",
-            'folder': 'frame',
-        })
-
         avatar_created = False
+        avatar_file_entry = None
         if avatar_b64:
             import base64 as b64mod_av
             try:
@@ -5437,7 +7277,7 @@ def create_construct():
                     avatar_sha = hashlib.sha256(avatar_bytes).hexdigest()
                     avatar_meta = {
                         'construct_id': callsign,
-                        'provider': 'vvault_scaffold',
+                        'provider': 'vvault_construct_create',
                         'folder': 'identity',
                     }
                     avatar_vsi_path = f'instances/{callsign}/identity/avatar.png'
@@ -5457,6 +7297,13 @@ def create_construct():
                     avatar_result = _upsert_vault_file_record(avatar_record, context='construct_avatar')
                     if avatar_result.get('id'):
                         avatar_created = True
+                        avatar_file_entry = {
+                            'id': avatar_result.get('id'),
+                            'filename': avatar_vsi_path,
+                            'file_type': 'binary',
+                            'folder': 'identity',
+                            'action': avatar_result.get('action'),
+                        }
             except Exception as av_err:
                 logger.warning(f"Avatar insert failed for {callsign}: {av_err}")
 
@@ -5470,58 +7317,111 @@ def create_construct():
 
         created_files = []
         failed_files = []
-        for file_def in files_to_create:
-            ok, err = _validate_vault_filename(file_def['filename'])
-            if not ok:
-                return jsonify({"success": False, "error": err}), 400
+        if avatar_file_entry:
+            created_files.append(avatar_file_entry)
+        try:
+            prompt_result = _upsert_construct_prompt_file(
+                callsign,
+                user_id,
+                prompt_obj,
+                source="vvault_construct_create",
+            )
+            created_files.append({
+                'id': prompt_result.get('id'),
+                'filename': f"instances/{callsign}/identity/prompt.json",
+                'file_type': 'text',
+                'folder': 'identity',
+                'action': prompt_result.get('action'),
+            })
+        except Exception as prompt_err:
+            failed_files.append({
+                'filename': f"instances/{callsign}/identity/prompt.json",
+                'error': str(prompt_err),
+            })
 
-            content_str = file_def['content']
-            sha256 = hashlib.sha256(content_str.encode('utf-8')).hexdigest()
-            folder = file_def.get('folder', '')
-            vsi_path = f"instances/{callsign}/{folder}/{file_def['filename']}" if folder else f"instances/{callsign}/{file_def['filename']}"
-            meta = {
-                'construct_id': callsign,
-                'provider': 'vvault_scaffold',
-                'folder': folder,
-            }
-            record = {
-                'filename': vsi_path,
-                'file_type': file_def['file_type'],
-                'content': content_str,
+        projection_fields = {
+            "conditioning": conditioning,
+            "definition": definition,
+            "voice": voice_payload,
+        }
+        if physical_features not in (None, "", [], {}):
+            projection_fields["physicalFeatures"] = physical_features
+        try:
+            projection_result = _project_identity_fields(callsign, projection_fields, dry_run=False)
+            for field_result in projection_result.get("results", {}).values():
+                created_files.append({
+                    'id': field_result.get('file_id'),
+                    'filename': field_result.get('canonical_path'),
+                    'file_type': 'text',
+                    'folder': 'identity',
+                    'action': field_result.get('action'),
+                })
+        except Exception as projection_err:
+            failed_files.append({
+                'filename': f"instances/{callsign}/identity",
+                'error': str(projection_err),
+            })
+
+        try:
+            metadata_result = _upsert_construct_metadata_file(
+                callsign,
+                user_id,
+                metadata_obj,
+                source="vvault_construct_create",
+            )
+            created_files.append({
+                'id': metadata_result.get('id'),
+                'filename': f"instances/{callsign}/config/metadata.json",
+                'file_type': 'text',
+                'folder': 'config',
+                'action': metadata_result.get('action'),
+            })
+        except Exception as metadata_err:
+            failed_files.append({
+                'filename': f"instances/{callsign}/config/metadata.json",
+                'error': str(metadata_err),
+            })
+
+        transcript_filename = f'chat_with_{callsign}.md'
+        transcript_path = f"instances/{callsign}/chatty/{transcript_filename}"
+        try:
+            transcript_record = {
+                'filename': transcript_path,
+                'file_type': 'transcript',
+                'content': transcript_content,
                 'construct_id': callsign,
                 'user_id': user_id,
                 'is_system': False,
-                'sha256': sha256,
-                'metadata': json.dumps(meta),
-                'storage_path': vsi_path,
+                'sha256': hashlib.sha256(transcript_content.encode('utf-8')).hexdigest(),
+                'metadata': json.dumps({
+                    'construct_id': callsign,
+                    'provider': 'vvault_construct_create',
+                    'folder': 'chatty',
+                }),
+                'storage_path': transcript_path,
                 'created_at': now,
                 'updated_at': now,
             }
-            try:
-                upsert_result = _upsert_vault_file_record(record, context='construct_scaffold')
-                if upsert_result.get('id'):
-                    created_files.append({
-                        'id': upsert_result['id'],
-                        'filename': vsi_path,
-                        'file_type': file_def['file_type'],
-                        'folder': folder,
-                        'action': upsert_result['action'],
-                    })
-                else:
-                    err_msg = f"No data returned for {vsi_path}"
-                    logger.error(f"SCAFFOLD_INSERT_FAIL: {err_msg}")
-                    failed_files.append({'filename': vsi_path, 'error': err_msg})
-            except Exception as insert_err:
-                err_msg = str(insert_err)
-                logger.error(f"SCAFFOLD_INSERT_FAIL: {vsi_path} -> {err_msg}")
-                failed_files.append({'filename': vsi_path, 'error': err_msg})
+            transcript_result = _upsert_vault_file_record(transcript_record, context='construct_chatty_seed')
+            created_files.append({
+                'id': transcript_result.get('id'),
+                'filename': transcript_path,
+                'file_type': 'transcript',
+                'folder': 'chatty',
+                'action': transcript_result.get('action'),
+            })
+        except Exception as transcript_err:
+            failed_files.append({
+                'filename': transcript_path,
+                'error': str(transcript_err),
+            })
 
         import base64 as b64mod
         glyph_b64 = b64mod.b64encode(glyph_bytes).decode('utf-8')
         glyph_filename = f"{callsign}_glyph.png"
         glyph_meta = {
             'construct_id': callsign,
-            'provider': 'vvault_scaffold',
+            'provider': 'vvault_construct_create',
             'folder': 'identity',
             'glyph_number_rows': glyph_number_rows,
             'color_hex': color_hex,
@@ -5572,16 +7472,17 @@ def create_construct():
             },
             "avatar_created": avatar_created,
             "directory_template": {
-                "identity": ["prompt.json", "conditioning.txt", glyph_filename] + (["avatar.png"] if avatar_created else []),
-                "config": ["metadata.json", "personality.json"],
-                "chatty": [f"chat_with_{callsign}.md"],
-                "logs": log_files,
-                "assets": [],
-                "documents": [],
-                "memup": [],
-                "data": [],
+                "identity": [
+                    "prompt.json",
+                    "conditioning.txt",
+                    "definition.txt",
+                    "voice.json",
+                    glyph_filename,
+                ] + (["physical_features.json"] if physical_features not in (None, "", [], {}) else []) + (["avatar.png"] if avatar_created else []),
+                "config": ["metadata.json"],
+                "chatty": [transcript_filename],
             },
-            "message": f"Construct {callsign} scaffolded with {len(created_files)} files"
+            "message": f"Construct {callsign} created with {len(created_files)} canonical files"
         }
         if failed_files:
             response_data["failed_files"] = failed_files
@@ -5617,6 +7518,10 @@ def get_chatty_constructs():
     'katana-001' transcripts exist, only 'katana-001' is returned.
     """
     try:
+        read_allowed, read_state = SUPABASE_STEWARD.allow_read()
+        if not read_allowed:
+            return _supabase_read_block_response("/api/chatty/constructs", state=read_state)
+
         if not supabase_client:
             return _supabase_unavailable_response(
                 "Supabase is not configured for this backend. Construct transcripts are temporarily unavailable.",
@@ -5636,7 +7541,16 @@ def get_chatty_constructs():
             user_id = _get_authenticated_user_id()
 
             if not user_id:
-                return jsonify({"success": True, "constructs": [], "count": 0})
+                return jsonify({
+                    "success": True,
+                    "supabase_available": True,
+                    "degraded": False,
+                    "canonical": True,
+                    "storage_mode": "supabase",
+                    "connection_state": SUPABASE_STEWARD.snapshot().get("connection_state"),
+                    "constructs": [],
+                    "count": 0,
+                })
 
             rows = _fetch_all_rows(
                 lambda: supabase_client.table('vault_files')
@@ -5687,6 +7601,11 @@ def get_chatty_constructs():
 
         return jsonify({
             "success": True,
+            "supabase_available": True,
+            "degraded": False,
+            "canonical": True,
+            "storage_mode": "supabase",
+            "connection_state": SUPABASE_STEWARD.snapshot().get("connection_state"),
             "constructs": constructs,
             "count": len(constructs)
         })
@@ -7245,6 +9164,15 @@ def get_construct_ledger(construct_id):
 @app.route('/api/auth/google/health')
 def google_oauth_health():
     """Check if Google OAuth is configured"""
+    authority_available, authority_state = _oauth_identity_authority_available()
+    oauth_ready = _google_oauth_ready()
+    error = None
+    if not oauth_ready:
+        error = _google_oauth_config_error()
+    elif not authority_available:
+        error = "Supabase identity authority is currently unavailable. Sign-in is blocked to protect immutable LIFE identity."
+
+    status_code = 200 if oauth_ready and authority_available else 503
     return jsonify({
         "oauth_configured": _google_oauth_ready(),
         "client_id_set": bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_ID not in _OAUTH_PLACEHOLDER_VALUES),
@@ -7252,9 +9180,15 @@ def google_oauth_health():
         "provider": "google",
         "callback_url": f"{_get_backend_url()}/api/auth/google/callback",
         "frontend_url": _get_frontend_url(),
-        "supabase_mode": _get_supabase_mode(),
-        "error": None if _google_oauth_ready() else _google_oauth_config_error(),
-    })
+        "supabase_mode": authority_state.get("connection_state") or "unknown",
+        "supabase_identity_authority_available": authority_available,
+        "connection_state": authority_state.get("connection_state"),
+        "canonical": authority_state.get("canonical") is True,
+        "storage_mode": authority_state.get("storage_mode") or "none",
+        "last_error_code": authority_state.get("last_error_code"),
+        "latency_ms": authority_state.get("latency_ms"),
+        "error": error,
+    }), status_code
 
 
 # Google OAuth Routes
@@ -7269,23 +9203,19 @@ def google_oauth_login():
 
         if not google_client or not _google_oauth_ready():
             return jsonify({"success": False, "error": _google_oauth_config_error()}), 500
-        
-        # Get Google's OAuth endpoints
-        google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
-        authorization_endpoint = google_provider_cfg["authorization_endpoint"]
-        
+
         origin = request.headers.get('Origin', '')
         referer = request.headers.get('Referer', '')
         fwd_host = request.headers.get('X-Forwarded-Host', '')
         req_host = request.headers.get('Host', request.host)
         logger.info(f"OAuth login headers - Origin: {origin}, Referer: {referer}, X-Forwarded-Host: {fwd_host}, Host: {req_host}")
-        
+
         is_replit = 'replit.dev' in origin or 'replit.dev' in referer or 'replit.dev' in fwd_host or 'replit.dev' in req_host
         is_localhost = 'localhost' in req_host or '127.0.0.1' in req_host
-        
+
         # Use http for local development, https for production
         callback_scheme = "http" if is_localhost else "https"
-        
+
         if is_replit and REPLIT_DEV_DOMAIN:
             callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/oauth/google/callback"
         elif OAUTH_BASE_URL or VVAULT_BACKEND_URL:
@@ -7300,6 +9230,14 @@ def google_oauth_login():
             frontend_origin = _get_frontend_url()
         if not _allowed_redirect_base(frontend_origin):
             frontend_origin = _get_frontend_url()
+
+        authority_available, authority_state = _oauth_identity_authority_available()
+        if not authority_available:
+            return _oauth_identity_authority_redirect(frontend_origin, authority_state)
+
+        # Get Google's OAuth endpoints after identity authority is proven.
+        google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
+        authorization_endpoint = google_provider_cfg["authorization_endpoint"]
 
         from flask import session as flask_session
         flask_session['oauth_callback_url'] = callback_url
@@ -7341,10 +9279,6 @@ def google_oauth_callback():
             logger.error(f"OAuth error: {error} - {error_desc}")
             return jsonify({"success": False, "error": f"OAuth failed: {error} - {error_desc}"}), 400
         
-        # Get Google's OAuth endpoints
-        google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
-        token_endpoint = google_provider_cfg["token_endpoint"]
-        
         from flask import session as flask_session
         stored_callback = flask_session.pop('oauth_callback_url', None)
         stored_frontend = flask_session.pop('oauth_frontend_url', None)
@@ -7369,6 +9303,14 @@ def google_oauth_callback():
         oauth_origin_base = base
         candidate_frontend = stored_frontend or oauth_origin_base
         frontend_url = _get_frontend_url(candidate_frontend) if _allowed_redirect_base(candidate_frontend) else _get_frontend_url()
+
+        authority_available, authority_state = _oauth_identity_authority_available()
+        if not authority_available:
+            return _oauth_identity_authority_redirect(frontend_url, authority_state)
+
+        # Get Google's OAuth endpoints after identity authority is proven.
+        google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
+        token_endpoint = google_provider_cfg["token_endpoint"]
         
         logger.info(f"Processing OAuth callback with redirect_url: {callback_url}")
         
@@ -7427,14 +9369,30 @@ def google_oauth_callback():
             try:
                 existing = supabase_client.table('users').select('*').eq('email', users_email).execute()
                 if existing.data:
-                    user_id = existing.data[0]['id']
-                    resolved_role = _resolve_user_role(users_email, supabase_user=existing.data[0], fallback_user=fallback_user)
+                    supabase_user = existing.data[0]
+                    identity_receipt = _resolve_auth_life_identity(
+                        email=users_email,
+                        supabase_user=supabase_user,
+                        fallback_user=fallback_user,
+                    )
+                    if not identity_receipt.get("ok") and identity_receipt.get("error_code") == "IDENTITY_CONFLICT":
+                        return _auth_identity_failure_response(identity_receipt)
+                    user_id = supabase_user['id']
+                    resolved_role = _resolve_user_role(users_email, supabase_user=supabase_user, fallback_user=fallback_user)
                     logger.info(f"OAuth user exists in Supabase: {users_email} (id={user_id})")
                 else:
                     from datetime import timezone as tz
                     ts = int(datetime.now(tz.utc).timestamp() * 1000)
                     safe_name = re.sub(r'[^a-z0-9_]', '_', users_name.lower().strip())
-                    user_id = f"{safe_name}_{ts}"
+                    proposed_user_id = f"{safe_name}_{ts}"
+                    identity_receipt = _resolve_auth_life_identity(
+                        email=users_email,
+                        fallback_user=fallback_user,
+                        proposed_life_id=proposed_user_id,
+                    )
+                    if not identity_receipt.get("ok"):
+                        return _auth_identity_failure_response(identity_receipt)
+                    user_id = identity_receipt["life_user_id"]
                     _upsert_supabase_user_record(user_id, users_email, users_name, resolved_role)
                     logger.info(f"Created new OAuth user in Supabase: {users_email} (id={user_id})")
             except Exception as db_err:
@@ -7520,6 +9478,7 @@ def main():
         logger.info("Pocketverse boot mode: %s", boot_mode)
         _run_pocketverse_boot(boot_mode)
 
+    SUPABASE_STEWARD.bootstrap()
     supabase_status = _get_supabase_status()
 
     print("🌐 VVAULT Web Server")

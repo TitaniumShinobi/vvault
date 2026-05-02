@@ -1,5 +1,7 @@
 # 🏺 VVAULT System Rubric
 
+> Legacy broad rubric. This document is retained for historical system-evaluation context, but it is not the canonical runtime readiness standard. Use `VVAULT_RUNTIME_CLOSURE_RUBRIC.md` for Supabase readiness, OAuth identity authority, write blocking, and QFB cleanup decisions.
+
 **Voice & Vaulted Autonomy for Unfragmented Long-Term Tethering**
 
 Last Updated: November 10, 2025; 01:12:00EST
@@ -626,7 +628,7 @@ This is **NOT a personal project**. All architecture decisions must account for:
 
 ## 📋 Overview
 
-This rubric evaluates the VVAULT system across multiple dimensions including functionality, security, performance, integration, and maintainability. VVAULT serves as the primary memory vault system for AI constructs, providing capsule storage, retrieval, and management capabilities. **VVAULT operates as a multi-user, distributed platform** with complete user isolation and data privacy.
+This rubric evaluates the VVAULT system across multiple dimensions including functionality, security, performance, integration, and maintainability. VVAULT serves as a Vectored Anatomy vault/drive for protected, identity-bearing directory bodies. The current AI/VSI anatomy implementation provides construct-compatible capsule storage, retrieval, and management capabilities. **VVAULT operates as a multi-user, distributed platform** with complete user isolation and data privacy.
 
 ---
 
@@ -871,4 +873,4 @@ Total Score = (Functionality Score × 0.45) +
 
 ---
 
-**This rubric provides a comprehensive framework for evaluating the VVAULT system across all critical dimensions, ensuring continuous improvement and system reliability.** 
+**This rubric provides a comprehensive framework for evaluating the VVAULT system across all critical dimensions, ensuring continuous improvement and system reliability.**

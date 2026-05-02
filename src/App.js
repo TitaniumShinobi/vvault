@@ -7,8 +7,24 @@ import Blockchain from './components/Blockchain';
 import Settings from './components/Settings';
 import CreateConstruct from './components/CreateConstruct';
 import CinematicLogin from './components/CinematicLogin';
-import { validateSession, SESSION_EXPIRED_EVENT } from './utils/authFetch';
+import { validateSession, SESSION_EXPIRED_EVENT, SUPABASE_CONNECTION_EVENT, finalizeAuthServiceLogin, markSessionActive, refreshSupabaseConnectionState } from './utils/authFetch';
 import './App.css';
+
+const STARTUP_AUTH_TIMEOUT_MS = 2500;
+const STARTUP_STATUS_TIMEOUT_MS = 2500;
+const SUPABASE_STATUS_CONNECTED_POLL_MS = 15000;
+const SUPABASE_STATUS_DEGRADED_POLL_MS = 60000;
+
+async function fetchJsonWithTimeout(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    return response.json();
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
 
 // Navigation component
 const Navigation = ({ user, onLogout }) => {
@@ -69,23 +85,34 @@ const Navigation = ({ user, onLogout }) => {
 
 // Status indicator component
 const StatusIndicator = () => {
-  const [status, setStatus] = useState({ online: false, loading: true });
+  const [status, setStatus] = useState({ online: false, loading: true, connection_state: 'unknown' });
   
   useEffect(() => {
+    let timeoutId = null;
     const checkStatus = async () => {
+      let nextDelay = SUPABASE_STATUS_DEGRADED_POLL_MS;
       try {
-        const response = await fetch('/api/health');
-        const data = await response.json();
-        setStatus({ online: response.ok, loading: false, data });
+        const connection = await refreshSupabaseConnectionState();
+        setStatus({ online: connection.connected, loading: false, ...connection });
+        nextDelay = connection.connected ? SUPABASE_STATUS_CONNECTED_POLL_MS : SUPABASE_STATUS_DEGRADED_POLL_MS;
       } catch (error) {
-        setStatus({ online: false, loading: false, error: error.message });
+        setStatus({ online: false, loading: false, connection_state: 'blocked', error: error.message });
+      } finally {
+        timeoutId = setTimeout(checkStatus, nextDelay);
       }
     };
+    const onConnection = (event) => {
+      const connection = event.detail || {};
+      setStatus({ online: connection.connected === true, loading: false, ...connection });
+    };
     
+    window.addEventListener(SUPABASE_CONNECTION_EVENT, onConnection);
     checkStatus();
-    const interval = setInterval(checkStatus, 30000); // Check every 30 seconds
     
-    return () => clearInterval(interval);
+    return () => {
+      window.removeEventListener(SUPABASE_CONNECTION_EVENT, onConnection);
+      clearTimeout(timeoutId);
+    };
   }, []);
   
   if (status.loading) {
@@ -100,7 +127,7 @@ const StatusIndicator = () => {
   return (
     <div className={`status-indicator ${status.online ? 'status-success' : 'status-error'}`}>
       <span className="status-dot"></span>
-      <span>{status.online ? 'Online' : 'Offline'}</span>
+      <span>{status.online ? 'Supabase connected' : `Supabase ${status.connection_state || 'blocked'}`}</span>
     </div>
   );
 };
@@ -110,13 +137,24 @@ function App() {
   const [user, setUser] = useState(null);
   const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [authResolved, setAuthResolved] = useState(false);
+  const [authError, setAuthError] = useState('');
   
   useEffect(() => {
+    let mounted = true;
+
+    const resolveAuth = () => {
+      if (mounted) {
+        setAuthResolved(true);
+      }
+    };
+
     // Check for OAuth callback params in URL
     const urlParams = new URLSearchParams(window.location.search);
     const token = urlParams.get('token');
     const email = urlParams.get('email');
     const name = urlParams.get('name');
+    const oauthError = urlParams.get('oauth_error');
     
     if (token && email) {
       // OAuth successful - save user session
@@ -127,47 +165,89 @@ function App() {
       };
       localStorage.setItem('vvault_user', JSON.stringify(userData));
       localStorage.setItem('vvault_token', token);
-      setUser(userData);
+      markSessionActive();
+      if (mounted) {
+        setUser(userData);
+      }
       
       // Clean up URL
       window.history.replaceState({}, document.title, window.location.pathname);
       console.log('OAuth login successful:', userData.email);
-    } else {
-      const savedUser = localStorage.getItem('vvault_user');
-      if (savedUser) {
-        try {
-          const parsed = JSON.parse(savedUser);
-          setUser(parsed);
-          validateSession().then(valid => {
-            if (!valid) {
-              console.warn('Stored session is no longer valid — clearing');
-              localStorage.removeItem('vvault_user');
-              localStorage.removeItem('vvault_token');
-              setUser(null);
-            }
-          });
-        } catch (error) {
-          console.error('Failed to parse saved user:', error);
-          localStorage.removeItem('vvault_user');
-          localStorage.removeItem('vvault_token');
-        }
+      resolveAuth();
+    } else if (oauthError) {
+      if (mounted) {
+        setAuthError(decodeURIComponent(oauthError));
       }
+      window.history.replaceState({}, document.title, window.location.pathname);
+      resolveAuth();
+    } else {
+      const flowError = urlParams.get('error');
+      if (flowError) {
+        if (mounted) {
+          setAuthError(decodeURIComponent(flowError));
+        }
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+      (async () => {
+        try {
+          const existingToken = localStorage.getItem('vvault_token');
+          if (existingToken) {
+            const savedUser = localStorage.getItem('vvault_user');
+            if (savedUser) {
+              try {
+                const parsed = JSON.parse(savedUser);
+                const valid = await validateSession({ timeoutMs: STARTUP_AUTH_TIMEOUT_MS });
+                if (valid) {
+                  markSessionActive();
+                  if (mounted) {
+                    setUser(parsed);
+                  }
+                } else {
+                  console.warn('Stored session is no longer valid — clearing');
+                  localStorage.removeItem('vvault_user');
+                  localStorage.removeItem('vvault_token');
+                  if (mounted) {
+                    setUser(null);
+                  }
+                }
+              } catch (error) {
+                console.error('Failed to parse saved user:', error);
+                localStorage.removeItem('vvault_user');
+                localStorage.removeItem('vvault_token');
+              }
+            }
+          } else {
+            const bridged = await finalizeAuthServiceLogin({ readyTimeoutMs: STARTUP_AUTH_TIMEOUT_MS });
+            if (bridged && mounted) {
+              setUser(bridged);
+            }
+          }
+        } finally {
+          resolveAuth();
+        }
+      })();
     }
     
     // Load system info
     const loadSystemInfo = async () => {
       try {
-        const response = await fetch('/api/status');
-        const data = await response.json();
-        setSystemInfo(data);
+        const data = await fetchJsonWithTimeout('/api/status', STARTUP_STATUS_TIMEOUT_MS);
+        if (mounted) {
+          setSystemInfo(data);
+        }
       } catch (error) {
         console.error('Failed to load system info:', error);
       } finally {
-        setLoading(false);
+        if (mounted) {
+          setLoading(false);
+        }
       }
     };
     
     loadSystemInfo();
+    return () => {
+      mounted = false;
+    };
   }, []);
   
   const handleLogin = (userData) => {
@@ -178,6 +258,7 @@ function App() {
     localStorage.removeItem('vvault_user');
     localStorage.removeItem('vvault_token');
     setUser(null);
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -189,13 +270,13 @@ function App() {
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
   }, []);
   
-  if (loading) {
+  if (loading || !authResolved) {
     return (
       <div className="app-loading">
         <div className="loading-content">
           <div className="loading-spinner"></div>
           <h2>Loading VVAULT...</h2>
-          <p>Initializing AI construct memory vault...</p>
+          <p>Initializing vectored anatomy vault...</p>
         </div>
       </div>
     );
@@ -203,11 +284,11 @@ function App() {
   
   // Show cinematic login screen if user is not authenticated
   if (!user) {
-    return <CinematicLogin onLogin={handleLogin} />;
+    return <CinematicLogin onLogin={handleLogin} initialError={authError} />;
   }
   
   return (
-    <Router>
+    <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <div className="app">
         <Navigation user={user} onLogout={handleLogout} />
         
@@ -225,7 +306,7 @@ function App() {
         <footer className="footer">
           <div className="footer-content">
             <div className="footer-section">
-              <span>© 2025 VVAULT - AI Construct Memory Vault</span>
+              <span>© 2025 VVAULT - Vectored Anatomy Vault</span>
             </div>
             <div className="footer-section">
               <span>Backend: localhost:8000</span>
