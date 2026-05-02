@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { finalizeAuthServiceLogin, getResponseErrorMessage, readResponsePayload, markSessionActive } from '../utils/authFetch';
 import './CinematicLogin.css';
 
-const CinematicLogin = ({ onLogin }) => {
+const CinematicLogin = ({ onLogin, initialError = '' }) => {
   const [isSignInMode, setIsSignInMode] = useState(true);
   const [signupStep, setSignupStep] = useState(1);
   const [isTrustedDevice, setIsTrustedDevice] = useState(false);
@@ -30,16 +31,28 @@ const CinematicLogin = ({ onLogin }) => {
   const previewDebounceRef = useRef(null);
 
   useEffect(() => {
+    if (initialError) {
+      setError(initialError);
+    }
+  }, [initialError]);
+
+  useEffect(() => {
+    const turnstileScriptSrc = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
     const loadTurnstile = () => {
       if (window.turnstile) return;
       if (!turnstileSiteKey) {
         setTurnstileError('Human verification is temporarily unavailable. Please contact support.');
         return;
       }
+      const existingScript = document.querySelector(`script[src="${turnstileScriptSrc}"]`);
+      if (existingScript) return;
       const script = document.createElement('script');
-      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+      script.src = turnstileScriptSrc;
       script.async = true;
       script.defer = true;
+      script.onerror = () => {
+        setTurnstileError('Human verification failed to load. Please refresh and try again.');
+      };
       document.head.appendChild(script);
     };
     loadTurnstile();
@@ -217,16 +230,26 @@ const CinematicLogin = ({ onLogin }) => {
         const response = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({
             email: formData.email,
             password: formData.password,
           })
         });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'Login failed');
-        localStorage.setItem('vvault_user', JSON.stringify(result.user));
-        localStorage.setItem('vvault_token', result.token);
-        onLogin(result.user);
+        const result = await readResponsePayload(response, 'Login failed');
+        if (!response.ok) throw new Error(getResponseErrorMessage(response, result, 'Login failed'));
+        if (result.token) {
+          localStorage.setItem('vvault_user', JSON.stringify(result.user));
+          localStorage.setItem('vvault_token', result.token);
+          markSessionActive();
+          onLogin(result.user);
+        } else if (result.ok === true && result.user) {
+          const user = await finalizeAuthServiceLogin();
+          if (!user) throw new Error('Could not start vault session. Is AUTH_SESSION_SECRET set on Flask?');
+          onLogin(user);
+        } else {
+          throw new Error(getResponseErrorMessage(response, result, 'Login failed'));
+        }
       } else {
         const fd = new FormData();
         fd.append('name', formData.name);
@@ -241,10 +264,11 @@ const CinematicLogin = ({ onLogin }) => {
           method: 'POST',
           body: fd
         });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'Registration failed');
+        const result = await readResponsePayload(response, 'Registration failed');
+        if (!response.ok) throw new Error(getResponseErrorMessage(response, result, 'Registration failed'));
         localStorage.setItem('vvault_user', JSON.stringify(result.user));
         localStorage.setItem('vvault_token', result.token);
+        markSessionActive();
         onLogin(result.user);
       }
     } catch (err) {
@@ -254,11 +278,38 @@ const CinematicLogin = ({ onLogin }) => {
     }
   };
 
-  const handleOAuth = (provider) => {
-    if (provider === 'Google') {
-      window.location.href = '/api/auth/google';
-    } else {
+  const handleOAuth = async (provider) => {
+    if (provider !== 'Google') {
       console.log(`${provider} OAuth not yet implemented`);
+      return;
+    }
+
+    setError('');
+    setIsLoading(true);
+
+    try {
+      const healthResponse = await fetch('/api/auth/google/health');
+      const health = await healthResponse.json();
+
+      if (!health.oauth_configured) {
+        throw new Error(health.error || 'Google OAuth is not configured');
+      }
+
+      if (!health.supabase_identity_authority_available) {
+        throw new Error(
+          health.error ||
+          'Google OAuth is configured, but Supabase identity authority is currently unavailable. Sign-in is blocked to protect immutable LIFE identity.'
+        );
+      }
+
+      if (!healthResponse.ok) {
+        throw new Error(health.error || 'Google sign-in is unavailable right now.');
+      }
+
+      window.location.href = '/api/auth/google';
+    } catch (err) {
+      setError(err.message || 'Google sign-in is unavailable right now.');
+      setIsLoading(false);
     }
   };
 
@@ -350,7 +401,7 @@ const CinematicLogin = ({ onLogin }) => {
     <>
       <div className="glyph-step-header">
         <p className="glyph-step-desc">
-          Your Codex Glyph is your unique visual identity in VVAULT. Choose a color and optionally upload a center image.
+          Your Codex Glyph is your unique identity mark in VVAULT. Choose a color and optionally upload a center image.
         </p>
       </div>
 
@@ -523,8 +574,8 @@ const CinematicLogin = ({ onLogin }) => {
               {isSignInMode
                 ? 'VVAULT still protects your data.'
                 : signupStep === 2
-                  ? 'Every VVAULT member receives a unique Codex Glyph — a cryptographic seal that represents your identity in the system. Customize it to make it yours.'
-                  : 'Secure, immutable memory system that serves as a digital sanctuary for truth — preserving data, identity, and history with absolute integrity beyond manipulation or decay.'
+                  ? 'Every VVAULT member receives a unique Codex Glyph, a cryptographic seal that represents your identity-bearing anatomy in the system. Customize it to make it yours.'
+                  : 'Secure vault/drive for protected anatomies, preserving data, identity, witness history, and recovery material with integrity.'
               }
             </p>
             <p className="welcome-description">

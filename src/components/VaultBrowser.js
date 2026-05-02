@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { authFetch } from '../utils/authFetch';
+import { authFetch, SESSION_EXPIRED_EVENT, SUPABASE_OUTAGE_EVENT } from '../utils/authFetch';
 import './VaultBrowser.css';
 
 const CONSTRUCT_COLORS = {
@@ -50,13 +50,153 @@ const getLogicalPath = (file) => {
   return path || filename;
 };
 
+const TEXT_FILE_TYPES = new Set([
+  'text',
+  'text/plain',
+  'text/markdown',
+  'conversation',
+  'transcript',
+  'prompt',
+  'config',
+  'identity',
+  'capsule',
+  'application/json',
+]);
+
+const PREVIEW_FETCH_TIMEOUT_MS = 2200;
+const PREVIEW_BODY_HYDRATE_TIMEOUT_MS = 30000;
+const DEFAULT_HOME_PATH = ['instances'];
+
+const getPreviewPath = (file) => file?.display_path || file?.storage_path || file?.filename || '';
+
+const isCapsuleFile = (file) => getPreviewPath(file).toLowerCase().endsWith('.capsule');
+
+const isJsonFile = (file) => {
+  const path = getPreviewPath(file).toLowerCase();
+  const fileType = (file?.file_type || '').toLowerCase();
+  return path.endsWith('.json') || fileType === 'application/json';
+};
+
+const looksReadableText = (value) => {
+  if (typeof value !== 'string' || !value) return false;
+  if (value.includes('\x00')) return false;
+  const printable = Array.from(value).filter((ch) => ch === '\n' || ch === '\r' || ch === '\t' || ch >= ' ').length;
+  return printable / value.length >= 0.95;
+};
+
+const isPreviewableTextFile = (file) => {
+  if (!file) return false;
+  if (isCapsuleFile(file)) return true;
+  const fileType = (file.file_type || '').toLowerCase();
+  return !fileType || TEXT_FILE_TYPES.has(fileType) || fileType.startsWith('text/');
+};
+
+const isTranscriptCandidateFile = (file) => {
+  if (!file) return false;
+  const path = getPreviewPath(file).toLowerCase();
+  const fileType = (file?.file_type || '').toLowerCase();
+  if (path.endsWith('.capsule')) return false;
+  return (
+    fileType === 'transcript' ||
+    fileType === 'conversation' ||
+    path.includes('/chatgpt/') ||
+    path.includes('/chatty/') ||
+    path.includes('/character.ai/') ||
+    path.includes('chat_with_') ||
+    path.includes('conversation') ||
+    path.includes('transcript')
+  );
+};
+
+const shouldLogPreviewDebug = (file, previewMeta = {}) => {
+  if (!file) return false;
+  return isCapsuleFile(file) || previewMeta?.preview_status === 'unavailable';
+};
+
+const logPreviewDebug = (stage, file, previewMeta = {}, preview = null) => {
+  if (!shouldLogPreviewDebug(file, previewMeta)) return;
+
+  const content = typeof previewMeta?.content === 'string' ? previewMeta.content : '';
+  const path = getPreviewPath(file);
+  const summary = {
+    path,
+    fileType: previewMeta?.file_type || file?.file_type || null,
+    serverPreviewKind: previewMeta?.preview_kind || null,
+    serverPreviewStatus: previewMeta?.preview_status || null,
+    serverPreviewSource: previewMeta?.preview_source || null,
+    serverPreviewElapsedMs: previewMeta?.preview_elapsed_ms ?? null,
+    serverPreviewBudgetMs: previewMeta?.preview_budget_ms ?? null,
+    serverPreviewTimedOut: Boolean(previewMeta?.preview_timed_out),
+    hasContent: Boolean(content),
+    contentLength: content.length,
+    derivedPreviewKind: preview?.kind || null,
+    derivedHasContent: Boolean(preview?.content),
+  };
+
+  console.groupCollapsed(`[VVAULT preview] ${stage} ${path}`);
+  console.log('summary', summary);
+  console.log('file', file);
+  console.log('previewMeta', previewMeta);
+  if (preview) {
+    console.log('derivedPreview', preview);
+  }
+  if (previewMeta?.preview_status === 'unavailable' && content && preview?.kind === 'unavailable') {
+    console.warn('Preview status is unavailable even though the backend returned content.');
+  }
+  console.groupEnd();
+};
+
+const buildPreviewState = (file, rawContent, previewMeta = {}) => {
+  const content = typeof rawContent === 'string' ? rawContent : '';
+  const serverPreviewKind = previewMeta?.preview_kind || null;
+  const serverPreviewStatus = previewMeta?.preview_status || null;
+
+  if (serverPreviewStatus === 'unavailable' && !content) {
+    return { kind: 'unavailable', content: null };
+  }
+  if (!content) {
+    return { kind: isPreviewableTextFile(file) ? 'unavailable' : 'binary', content: null };
+  }
+  if (serverPreviewKind === 'binary' && !looksReadableText(content)) {
+    return { kind: 'binary', content: null };
+  }
+  if (serverPreviewKind === 'json' || isCapsuleFile(file) || isJsonFile(file)) {
+    try {
+      return { kind: 'json', content: JSON.stringify(JSON.parse(content), null, 2) };
+    } catch (err) {
+      // Fall through to raw text when the payload is readable but not valid JSON.
+    }
+  }
+  return { kind: 'text', content };
+};
+
+const buildFastPreviewRequest = (file, { resolveBody = false } = {}) => ({
+  id: file?.id || null,
+  filename: file?.filename || file?.display_path || null,
+  storage_path: file?.storage_path || file?.filename || null,
+  file_type: file?.file_type || null,
+  construct_id: file?.construct_id || file?.display_construct || null,
+  user_id: file?.user_id || null,
+  is_system: Boolean(file?.is_system),
+  metadata: file?.metadata || {},
+  created_at: file?.created_at || null,
+  updated_at: file?.updated_at || null,
+  sha256: file?.sha256 || null,
+  content: typeof file?.content === 'string' ? file.content : null,
+  resolve_body: resolveBody,
+  candidate_transcript_ids: Array.isArray(file?.candidateTranscriptIds) ? file.candidateTranscriptIds : [],
+});
+
 const VaultBrowser = ({ user }) => {
   const [files, setFiles] = useState([]);
-  const [currentPath, setCurrentPath] = useState([]);
+  const [currentPath, setCurrentPath] = useState(DEFAULT_HOME_PATH);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [fileContent, setFileContent] = useState(null);
+  const [previewKind, setPreviewKind] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [viewMode, setViewMode] = useState('list');
   const [constructs, setConstructs] = useState([]);
   const [userInfo, setUserInfo] = useState({ root_label: 'Vault', is_admin: false });
@@ -64,12 +204,49 @@ const VaultBrowser = ({ user }) => {
   const [syncResult, setSyncResult] = useState(null);
   const [uploadState, setUploadState] = useState({ active: false, progress: '', result: null });
   const [dragOver, setDragOver] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [degraded, setDegraded] = useState({ active: false, message: '', errorCode: '' });
+  const [sessionExpired, setSessionExpired] = useState(false);
   const fileInputRef = React.useRef(null);
 
+  const showSessionExpiredState = useCallback(() => {
+    setSessionExpired(true);
+    setLoading(false);
+    setRefreshing(false);
+    setError(null);
+    setNotice('Local session expired. Sign in again after Supabase identity authority recovers.');
+    setFiles([]);
+    setConstructs([]);
+  }, []);
+
+  const applyDegradedContract = useCallback((data) => {
+    if (!data || (data.supabase_available !== false && data.degraded !== true)) return false;
+    setDegraded({
+      active: true,
+      message: data.message || 'Supabase is temporarily unavailable. Some vault data may be missing.',
+      errorCode: data.error_code || 'SUPABASE_TIMEOUT_522',
+    });
+    return true;
+  }, []);
+
+  const clearDegradedIfHealthy = useCallback((data) => {
+    if (data && data.supabase_available === false) return;
+    setDegraded((prev) => (prev.active ? { active: false, message: '', errorCode: '' } : prev));
+  }, []);
+
   const fetchConstructs = useCallback(async () => {
+    if (sessionExpired) return false;
     try {
       const response = await authFetch('/api/chatty/constructs');
       const data = await response.json();
+      if (response.status === 401 || data?.error_code === 'SESSION_EXPIRED') {
+        showSessionExpiredState();
+        return false;
+      }
+      const isDegraded = applyDegradedContract(data);
+      if (!isDegraded && data.message) {
+        setNotice(data.message);
+      }
       if (data.success && data.constructs) {
         const formatted = data.constructs.map(c => ({
           id: c.construct_id,
@@ -78,54 +255,128 @@ const VaultBrowser = ({ user }) => {
           color: getConstructColor(c.construct_id)
         }));
         setConstructs(formatted);
+        clearDegradedIfHealthy(data);
+      } else if (isDegraded) {
+        setConstructs(data.constructs || []);
       }
+      return true;
     } catch (err) {
       console.error('Failed to fetch constructs:', err);
+      return false;
     }
-  }, []);
+  }, [applyDegradedContract, clearDegradedIfHealthy, sessionExpired, showSessionExpiredState]);
 
   const fetchUserInfo = useCallback(async () => {
+    if (sessionExpired) return false;
     try {
       const response = await authFetch('/api/vault/user-info');
       const data = await response.json();
+      if (response.status === 401 || data?.error_code === 'SESSION_EXPIRED') {
+        showSessionExpiredState();
+        return false;
+      }
+      const isDegraded = applyDegradedContract(data);
       if (data.success) {
         setUserInfo({
           root_label: data.root_label || 'Vault',
           display_name: data.display_name,
           is_admin: data.is_admin || false
         });
+        if (!isDegraded) {
+          clearDegradedIfHealthy(data);
+        }
       }
+      return true;
     } catch (err) {
       console.error('Failed to fetch user info:', err);
+      return false;
     }
-  }, []);
+  }, [applyDegradedContract, clearDegradedIfHealthy, sessionExpired, showSessionExpiredState]);
 
-  const fetchFiles = useCallback(async () => {
-    setLoading(true);
+  const fetchFiles = useCallback(async (isRefresh = false) => {
+    if (sessionExpired) return false;
+    const pathSegments = Array.isArray(currentPath) ? currentPath : [];
+    const pathValue = pathSegments.join('/');
+    if (!isRefresh) {
+      setLoading(true);
+    }
     setError(null);
     try {
-      const response = await authFetch('/api/vault/files');
+      if (pathSegments.length === 1 && pathSegments[0] === 'instances') {
+        setFiles([]);
+        setNotice(null);
+        clearDegradedIfHealthy({});
+        return;
+      }
+
+      const url = pathSegments.length === 0
+        ? '/api/vault/files'
+        : `/api/vault/files?path=${encodeURIComponent(pathValue)}`;
+      const response = await authFetch(url);
       const data = await response.json();
-      if (data.success) {
+      if (response.status === 401 || data?.error_code === 'SESSION_EXPIRED') {
+        showSessionExpiredState();
+        return false;
+      }
+      const isDegraded = applyDegradedContract(data);
+      if (data.success || isDegraded) {
         setFiles(data.files || []);
+        if (!isDegraded) {
+          setNotice(data.message || null);
+          clearDegradedIfHealthy(data);
+        }
         if (data.user_root) {
           setUserInfo(prev => ({ ...prev, root_label: data.user_root }));
         }
       } else {
         setError(data.error || 'Failed to load files');
       }
+      return true;
     } catch (err) {
       setError('Failed to connect to server');
+      return false;
     } finally {
-      setLoading(false);
+      if (!isRefresh) {
+        setLoading(false);
+      }
     }
+  }, [applyDegradedContract, clearDegradedIfHealthy, currentPath, sessionExpired, showSessionExpiredState]);
+
+  useEffect(() => {
+    if (sessionExpired) return;
+    let cancelled = false;
+    (async () => {
+      const userInfoOk = await fetchUserInfo();
+      if (cancelled || !userInfoOk) return;
+      await fetchFiles();
+      if (cancelled) return;
+      await fetchConstructs();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchUserInfo, fetchFiles, fetchConstructs, sessionExpired]);
+
+  useEffect(() => {
+    const onOutage = (event) => {
+      const detail = event?.detail || {};
+      setDegraded({
+        active: true,
+        message: detail.message || 'Supabase is temporarily unavailable. Some vault data may be missing.',
+        errorCode: detail.error_code || 'SUPABASE_TIMEOUT_522',
+      });
+    };
+    window.addEventListener(SUPABASE_OUTAGE_EVENT, onOutage);
+    return () => window.removeEventListener(SUPABASE_OUTAGE_EVENT, onOutage);
   }, []);
 
   useEffect(() => {
-    fetchUserInfo();
-    fetchFiles();
-    fetchConstructs();
-  }, [fetchUserInfo, fetchFiles, fetchConstructs]);
+    const onSessionExpired = () => {
+      showSessionExpiredState();
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+  }, [showSessionExpiredState]);
 
   const triggerMemupSync = async (constructId) => {
     setSyncingConstruct(constructId);
@@ -269,49 +520,207 @@ const VaultBrowser = ({ user }) => {
     setCurrentPath([...currentPath, folderName]);
     setSelectedFile(null);
     setFileContent(null);
+    setPreviewKind(null);
+    setPreviewLoading(false);
   };
 
   const navigateBack = () => {
     setCurrentPath(currentPath.slice(0, -1));
     setSelectedFile(null);
     setFileContent(null);
+    setPreviewKind(null);
+    setPreviewLoading(false);
   };
 
   const navigateHome = () => {
-    setCurrentPath([]);
+    setCurrentPath(DEFAULT_HOME_PATH);
     setSelectedFile(null);
     setFileContent(null);
+    setPreviewKind(null);
+    setPreviewLoading(false);
+  };
+
+  const handleRefresh = async () => {
+    if (sessionExpired) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      const userInfoOk = await fetchUserInfo();
+      if (!userInfoOk) return;
+      await fetchFiles(true);
+      await fetchConstructs();
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   const navigateToBreadcrumb = (index) => {
     setCurrentPath(currentPath.slice(0, index + 1));
     setSelectedFile(null);
     setFileContent(null);
+    setPreviewKind(null);
+    setPreviewLoading(false);
   };
 
   const selectFile = async (file) => {
-    setSelectedFile(file);
-    const textTypes = ['text', 'text/plain', 'text/markdown', 'conversation', 'transcript', 'prompt', 'config', 'identity'];
-    const isTextLike = !file.file_type || textTypes.includes(file.file_type) || file.file_type.startsWith('text/');
-    if (isTextLike) {
-      if (file.content) {
-        setFileContent(file.content);
-      } else {
-        try {
-          const response = await authFetch(`/api/vault/files/${file.id}`);
-          const data = await response.json();
-          if (data.success && data.file && data.file.content) {
-            setFileContent(data.file.content);
-          } else {
-            setFileContent(null);
-          }
-        } catch (err) {
-          console.error('Failed to fetch file content:', err);
-          setFileContent(null);
+    const previewStartedAt = performance.now();
+    const candidateTranscriptIds = isCapsuleFile(file)
+      ? files
+          .filter((candidate) => candidate?.construct_id === file?.construct_id && isTranscriptCandidateFile(candidate))
+          .sort((a, b) => {
+            const aDate = Date.parse(a?.display_date || a?.created_at || 0) || 0;
+            const bDate = Date.parse(b?.display_date || b?.created_at || 0) || 0;
+            return bDate - aDate;
+          })
+          .slice(0, 6)
+          .map((candidate) => candidate.id)
+          .filter(Boolean)
+      : [];
+    const fileWithPreviewContext = candidateTranscriptIds.length
+      ? { ...file, candidateTranscriptIds }
+      : file;
+    setSelectedFile(fileWithPreviewContext);
+    setFileContent(null);
+    setPreviewKind(null);
+    setPreviewLoading(true);
+
+    if (file.content && !isCapsuleFile(file) && isPreviewableTextFile(file)) {
+      const preview = buildPreviewState(fileWithPreviewContext, file.content, {
+        preview_kind: isJsonFile(file) ? 'json' : 'text',
+        preview_status: 'inline',
+      });
+      setFileContent(preview.content);
+      setPreviewKind(preview.kind);
+      setPreviewLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), PREVIEW_FETCH_TIMEOUT_MS);
+    console.info('[VVAULT preview] fetch-start', {
+      path: getPreviewPath(file),
+      fileId: file.id,
+      timeoutMs: PREVIEW_FETCH_TIMEOUT_MS,
+    });
+
+    try {
+      const isFastCapsulePreview = isCapsuleFile(file);
+      const response = isFastCapsulePreview
+        ? await authFetch('/api/vault/files/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildFastPreviewRequest(fileWithPreviewContext)),
+            signal: controller.signal,
+          })
+        : await authFetch(`/api/vault/files/${file.id}`, { signal: controller.signal });
+      const data = await response.json();
+      const elapsedMs = Math.round(performance.now() - previewStartedAt);
+      if (data.success && data.file) {
+        const preview = buildPreviewState(fileWithPreviewContext, data.file.content, data.file);
+        logPreviewDebug('detail-response', fileWithPreviewContext, data.file, preview);
+        console.info('[VVAULT preview] fetch-complete', {
+          path: getPreviewPath(fileWithPreviewContext),
+          elapsedMs,
+          responseStatus: response.status,
+          fastPath: isFastCapsulePreview,
+          previewKind: data.file.preview_kind || null,
+          previewStatus: data.file.preview_status || null,
+          previewSource: data.file.preview_source || null,
+          previewTimedOut: Boolean(data.file.preview_timed_out),
+          previewElapsedMs: data.file.preview_elapsed_ms ?? null,
+        });
+        setSelectedFile((current) => (current?.id === file.id ? { ...current, ...data.file } : current));
+        setFileContent(preview.content);
+        setPreviewKind(preview.kind);
+        if (
+          isFastCapsulePreview &&
+          data.file.preview_status === 'unavailable' &&
+          data.file.preview_source === 'fast_diagnostic'
+        ) {
+          const hydrateController = new AbortController();
+          const hydrateTimeoutId = window.setTimeout(() => hydrateController.abort(), PREVIEW_BODY_HYDRATE_TIMEOUT_MS);
+          console.info('[VVAULT preview] body-hydrate-start', {
+            path: getPreviewPath(file),
+            fileId: file.id,
+            timeoutMs: PREVIEW_BODY_HYDRATE_TIMEOUT_MS,
+          });
+          void authFetch('/api/vault/files/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildFastPreviewRequest(fileWithPreviewContext, { resolveBody: true })),
+            signal: hydrateController.signal,
+          })
+            .then(async (hydrateResponse) => {
+              const hydrateData = await hydrateResponse.json();
+              const hydrateElapsedMs = Math.round(performance.now() - previewStartedAt);
+              if (hydrateData.success && hydrateData.file) {
+                const hydratedPreview = buildPreviewState(fileWithPreviewContext, hydrateData.file.content, hydrateData.file);
+                logPreviewDebug('body-hydrate-response', fileWithPreviewContext, hydrateData.file, hydratedPreview);
+                console.info('[VVAULT preview] body-hydrate-complete', {
+                  path: getPreviewPath(fileWithPreviewContext),
+                  elapsedMs: hydrateElapsedMs,
+                  responseStatus: hydrateResponse.status,
+                  previewKind: hydrateData.file.preview_kind || null,
+                  previewStatus: hydrateData.file.preview_status || null,
+                  previewSource: hydrateData.file.preview_source || null,
+                  previewTimedOut: Boolean(hydrateData.file.preview_timed_out),
+                  previewElapsedMs: hydrateData.file.preview_elapsed_ms ?? null,
+                });
+                if (hydratedPreview.content) {
+                  setSelectedFile((current) => (current?.id === file.id ? { ...current, ...hydrateData.file } : current));
+                  setFileContent(hydratedPreview.content);
+                  setPreviewKind(hydratedPreview.kind);
+                }
+              }
+            })
+            .catch((hydrateErr) => {
+              const hydrateElapsedMs = Math.round(performance.now() - previewStartedAt);
+              if (hydrateErr?.name === 'AbortError') {
+                console.warn('[VVAULT preview] body-hydrate-timeout', {
+                  path: getPreviewPath(fileWithPreviewContext),
+                  elapsedMs: hydrateElapsedMs,
+                  timeoutMs: PREVIEW_BODY_HYDRATE_TIMEOUT_MS,
+                });
+              } else {
+                console.warn('[VVAULT preview] body-hydrate-failed', {
+                  path: getPreviewPath(fileWithPreviewContext),
+                  elapsedMs: hydrateElapsedMs,
+                  error: hydrateErr?.message || String(hydrateErr),
+                });
+              }
+            })
+            .finally(() => {
+              window.clearTimeout(hydrateTimeoutId);
+            });
         }
+      } else {
+        console.warn('[VVAULT preview] fetch-failed', {
+          path: getPreviewPath(fileWithPreviewContext),
+          elapsedMs,
+          responseStatus: response.status,
+          payload: data,
+        });
+        logPreviewDebug('detail-failed', fileWithPreviewContext, data?.file || data || {}, { kind: 'unavailable', content: null });
+        setFileContent(null);
+        setPreviewKind('unavailable');
       }
-    } else {
+    } catch (err) {
+      const elapsedMs = Math.round(performance.now() - previewStartedAt);
+      if (err?.name === 'AbortError') {
+        console.warn('[VVAULT preview] fetch-timeout', {
+          path: getPreviewPath(fileWithPreviewContext),
+          elapsedMs,
+          timeoutMs: PREVIEW_FETCH_TIMEOUT_MS,
+        });
+        setSelectedFile((current) => (current?.id === file.id ? { ...current, preview_status: 'timed_out' } : current));
+      } else {
+        console.error('Failed to fetch file content:', err);
+      }
       setFileContent(null);
+      setPreviewKind('unavailable');
+    } finally {
+      window.clearTimeout(timeoutId);
+      setPreviewLoading(false);
     }
   };
 
@@ -345,14 +754,29 @@ const VaultBrowser = ({ user }) => {
   };
 
   const formatSize = (bytes) => {
-    if (!bytes) return '-';
+    if (!bytes && bytes !== 0) return '-';
     const kb = bytes / 1024;
     if (kb < 1024) return `${kb.toFixed(1)} KB`;
     return `${(kb / 1024).toFixed(1)} MB`;
   };
 
   const currentFolder = getCurrentFolder();
-  const folderNames = Object.keys(currentFolder.folders).sort();
+  const isInstancesRoot = currentPath.length === 1 && currentPath[0] === 'instances';
+  const folderEntries = isInstancesRoot
+    ? [...constructs]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((construct) => ({
+          key: `construct-${construct.id}`,
+          name: construct.id,
+          displayName: construct.name,
+        }))
+    : Object.keys(currentFolder.folders)
+        .sort()
+        .map((folderName) => ({
+          key: `folder-${folderName}`,
+          name: folderName,
+          displayName: folderName,
+        }));
   const fileList = currentFolder.files.sort((a, b) => 
     (a.displayName || a.filename).localeCompare(b.displayName || b.filename)
   );
@@ -382,7 +806,7 @@ const VaultBrowser = ({ user }) => {
         <div className="vault-error">
           <span className="error-icon">⚠️</span>
           <p>{error}</p>
-          <button onClick={fetchFiles}>Retry</button>
+          <button onClick={handleRefresh}>Retry</button>
         </div>
       </div>
     );
@@ -440,19 +864,19 @@ const VaultBrowser = ({ user }) => {
                   <div className="construct-sublinks">
                     <div
                       className={`sublink ${isSimDriveActive ? 'active' : ''}`}
-                      onClick={() => { setCurrentPath(simDrivePath); setSelectedFile(null); setFileContent(null); }}
+                      onClick={() => { setCurrentPath(simDrivePath); setSelectedFile(null); setFileContent(null); setPreviewKind(null); setPreviewLoading(false); }}
                     >
                       ◈ SimDrive
                     </div>
                     <div
                       className={`sublink ${currentPath.join('/') === ['instances', construct.id, 'memup'].join('/') ? 'active' : ''}`}
-                      onClick={() => { setCurrentPath(['instances', construct.id, 'memup']); setSelectedFile(null); setFileContent(null); }}
+                      onClick={() => { setCurrentPath(['instances', construct.id, 'memup']); setSelectedFile(null); setFileContent(null); setPreviewKind(null); setPreviewLoading(false); }}
                     >
                       ◈ Memup
                     </div>
                     <div
                       className={`sublink ${currentPath.join('/') === ['instances', construct.id, 'identity'].join('/') ? 'active' : ''}`}
-                      onClick={() => { setCurrentPath(['instances', construct.id, 'identity']); setSelectedFile(null); setFileContent(null); }}
+                      onClick={() => { setCurrentPath(['instances', construct.id, 'identity']); setSelectedFile(null); setFileContent(null); setPreviewKind(null); setPreviewLoading(false); }}
                     >
                       ◈ Identity
                     </div>
@@ -466,6 +890,9 @@ const VaultBrowser = ({ user }) => {
               {syncResult.success
                 ? `Synced: ${syncResult.entries_added || 0} new, ${syncResult.total_sessions || 0} total sessions`
                 : (syncResult.error || 'Sync failed')}
+              {syncResult.touched_files?.length ? (
+                <div className="sync-files">Updated: {syncResult.touched_files.join(', ')}</div>
+              ) : null}
             </div>
           )}
         </div>
@@ -487,6 +914,14 @@ const VaultBrowser = ({ user }) => {
               disabled={currentPath.length === 0}
             >
               🏠
+            </button>
+            <button
+              className="nav-button"
+              onClick={handleRefresh}
+              disabled={refreshing || loading}
+              title="Refresh vault"
+            >
+              {refreshing ? <span className="upload-spinner" /> : '↻'}
             </button>
           </div>
           
@@ -572,6 +1007,28 @@ const VaultBrowser = ({ user }) => {
           </div>
         )}
 
+        {degraded.active && (
+          <div className="vault-notice vault-notice-outage">
+            <span className="vault-notice-icon">!</span>
+            <span>{degraded.message}</span>
+            <button
+              type="button"
+              className="vault-notice-retry"
+              onClick={handleRefresh}
+              disabled={refreshing || loading}
+            >
+              {refreshing ? 'Retrying...' : 'Retry'}
+            </button>
+          </div>
+        )}
+
+        {notice && !degraded.active && (
+          <div className="vault-notice">
+            <span className="vault-notice-icon">!</span>
+            <span>{notice}</span>
+          </div>
+        )}
+
         <div
           className={`vault-content ${viewMode} ${dragOver ? 'drag-over' : ''}`}
           onDrop={handleDrop}
@@ -589,60 +1046,55 @@ const VaultBrowser = ({ user }) => {
           <div className="file-list">
             <div className="file-list-header">
               <span className="col-name">NAME</span>
-              <span className="col-construct">CONSTRUCT</span>
               <span className="col-date">DATE MODIFIED</span>
               <span className="col-size">SIZE</span>
             </div>
             
-            {folderNames.map((folderName, idx) => (
+            {folderEntries.map((folderEntry, idx) => (
               <div 
-                key={`folder-${idx}`}
+                key={folderEntry.key || `folder-${idx}`}
                 className="file-row folder"
-                onDoubleClick={() => navigateToFolder(folderName)}
+                onDoubleClick={() => navigateToFolder(folderEntry.name)}
               >
                 <span className="col-name">
-                  <span className="file-icon">{getFileIcon(folderName, true)}</span>
-                  <span className="file-name">{folderName}</span>
+                  <span className="file-icon">{getFileIcon(folderEntry.displayName, true)}</span>
+                  <span className="file-name">{folderEntry.displayName}</span>
                 </span>
-                <span className="col-construct">-</span>
                 <span className="col-date">-</span>
                 <span className="col-size">-</span>
               </div>
             ))}
-            
+
             {fileList.map((file, idx) => {
               let metadata = file.metadata || {};
               if (typeof metadata === 'string') {
                 try { metadata = JSON.parse(metadata); } catch(e) { metadata = {}; }
               }
               if (typeof metadata !== 'object' || metadata === null) metadata = {};
-              
+
               return (
-                <div 
+                <div
                   key={`file-${idx}`}
                   className={`file-row ${selectedFile?.id === file.id ? 'selected' : ''}`}
                   onClick={() => selectFile(file)}
                 >
-                  <span className="col-name">
-                    <span className="file-icon">
-                      {getFileIcon(file.displayName || file.filename, false, file.file_type)}
-                    </span>
-                    <span className="file-name">{file.displayName || file.filename}</span>
+                <span className="col-name">
+                  <span className="file-icon">
+                    {getFileIcon(file.displayName || file.filename, false, file.file_type)}
                   </span>
-                  <span className="col-construct">
-                    {file.construct_id || '-'}
-                  </span>
-                  <span className="col-date">
-                    {formatDate(file.created_at || metadata.migrated_at)}
-                  </span>
-                  <span className="col-size">
-                    {formatSize(metadata.size)}
-                  </span>
-                </div>
-              );
-            })}
-            
-            {folderNames.length === 0 && fileList.length === 0 && (
+                  <span className="file-name">{file.displayName || file.filename}</span>
+                </span>
+                <span className="col-date">
+                  {formatDate(file.display_date || file.created_at || metadata.migrated_at)}
+                </span>
+                <span className="col-size">
+                  {formatSize(file.display_size || metadata.size)}
+                </span>
+              </div>
+            );
+          })}
+
+            {folderEntries.length === 0 && fileList.length === 0 && (
               <div className="empty-folder">
                 <span className="empty-icon">📭</span>
                 <p>This folder is empty</p>
@@ -658,11 +1110,28 @@ const VaultBrowser = ({ user }) => {
               <button onClick={() => setSelectedFile(null)}>×</button>
             </div>
             <div className="preview-content">
-              {selectedFile.file_type === 'binary' ? (
+              {previewLoading ? (
+                <div className="binary-preview">
+                  <span className="binary-icon">…</span>
+                  <p>Loading preview...</p>
+                </div>
+              ) : previewKind === 'unavailable' ? (
                 <div className="binary-preview">
                   <span className="binary-icon">📎</span>
-                  <p>Binary file - {selectedFile.filename}</p>
-                  <p className="binary-info">Stored in cloud storage</p>
+                  <p>{`Preview unavailable - ${selectedFile.filename}`}</p>
+                  <p className="binary-info">
+                    {selectedFile?.preview_status === 'unavailable'
+                      ? 'Content could not be recovered from storage.'
+                      : 'Preview content is not currently available.'}
+                  </p>
+                </div>
+              ) : previewKind === 'binary' ? (
+                <div className="binary-preview">
+                  <span className="binary-icon">📎</span>
+                  <p>{`Binary file - ${selectedFile.filename}`}</p>
+                  <p className="binary-info">
+                    {'Stored in cloud storage'}
+                  </p>
                 </div>
               ) : (
                 <pre>{fileContent || 'No content available'}</pre>

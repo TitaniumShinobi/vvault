@@ -1,5 +1,7 @@
 # VVAULT Supabase Schema: Current Overview & Future Options
 
+> Legacy schema snapshot. This document predates the current Supabase steward readiness contract and still references older `vvault_user` / `construct_shard` shapes. For active runtime readiness, use `docs/operations/RUNTIME_CLOSURE_SUPABASE_CHECKLIST.md`. For current pass/fail standards, use `docs/rubrics/VVAULT_RUNTIME_CLOSURE_RUBRIC.md`.
+
 ## ✅ Core Structure
 - **vvault_user table**: Stores user info.
 - **construct_shard table**: Main data unit for memory/logical shard.

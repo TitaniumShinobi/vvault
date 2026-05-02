@@ -2,31 +2,92 @@
   <img src="./assets/vvault_glyph.png" alt="VVAULT Logo">
 </div>
 
-# Voice & Vaulted Autonomy for Unfragmented Long-Term Tethering
+# VVAULT
 
-**Verified Vectored Anatomy Unconsciously Lingering Together**
+Canonical cross-product user registry spec: `docs/CANONICAL_CROSS_PRODUCT_USER_REGISTRY_SPEC.md`
+
+## Double Acronym
+
+Both VVAULT expansions are canonical:
+
+- **Voice & Vaulted Autonomy for Unfragmented Long-Term Tethering**: the continuity, voice, autonomy, and tethering layer.
+- **Verified Vectored Anatomy Unconsciously Lingering Together**: the product-domain model for protected anatomy bodies.
 
 ## Overview
 
-VVAULT is the primary memory vault system for Nova Jane Woodson (FEAD-01), designed to ensure long-term emotional continuity and identity preservation through comprehensive memory indexing, voice logging, and semantic tagging.
+VVAULT is an advanced vault/drive for **Vectored Anatomies**.
 
-## Structure
+A **Vectored Anatomy** is a protected, identity-bearing directory body. It can represent a human, AI, product, project, repository, place, object, organization, service, or system.
+
+VVAULT combines directory storage, capsule and glyph identity, security history, witness history, permissions, integrations, and recovery/rematerialization support. Existing construct memory features are one implementation slice of the broader Vectored Anatomy model, not the definition of the product.
+
+The canonical architecture note lives in `docs/architecture/VECTORED_ANATOMY_MODEL.md`.
+
+## Local web startup
+
+Canonical local web URL: `http://localhost:7784`
+
+Operator-facing launcher:
+
+```bash
+./bin/vvault
+```
+
+`./bin/vvault` calls `scripts/open-vvault-standalone.sh`. It mirrors the `code` launcher behavior: if VVAULT is already live on `7784` it reuses the running app, otherwise it starts the repo's existing full-stack dev command in the background with `npm run dev:full`, waits for the frontend and backend to become healthy, opens the default browser, and prints `VVAULT is running at http://localhost:7784`.
+
+The canonical launcher contract lives in `docs/VVAULT_STARTUP_CONTRACT.md`.
+
+Runtime closure is stricter than process health. Use `docs/operations/RUNTIME_CLOSURE_SUPABASE_CHECKLIST.md` to prove `/api/ready`, the Supabase steward, OAuth identity authority, and write blocking before calling VVAULT ready.
+
+If `vvault` still prints raw `npm run dev:full` logs instead of opening the browser, your current shell is probably still using the old repo alias. Run `source ~/.zshrc` or open a fresh terminal window, then try again.
+
+If you want a shell command from any directory, either symlink it into your `PATH`:
+
+```bash
+ln -sf "$(pwd)/bin/vvault" /usr/local/bin/vvault
+```
+
+or add a shell function in `~/.zshrc`:
+
+```bash
+vvault() {
+  /Users/devonwoodson/Library/Mobile\ Documents/com~apple~CloudDocs/Documents/GitHub/vvault/bin/vvault "$@"
+}
+```
+
+Raw repo dev paths stay terminal-first:
+
+- `npm run dev` starts the raw frontend-only webpack dev server on `7784`.
+- `npm run dev:full` starts the raw frontend + backend stack and keeps the live logs in your terminal.
+
+Use `./bin/vvault` when you want the operator flow. Use the raw `npm` commands when you want direct dev-server output or startup debugging.
+
+Quick verification:
+
+1. Run `./bin/vvault` from a fresh shell. It should start VVAULT and open `http://localhost:7784`.
+2. Run `./bin/vvault` again. It should reuse the existing local server and print the same success line without dumping the raw dev logs as the primary UX.
+3. Run `npm run dev` or `npm run dev:full` directly when you want the raw terminal-first path.
+
+## Current Anatomy Body Shape
 
 ```
-VVAULT (macos)/
-├── __init__.py                 # Main package initialization
-├── README.md                   # This documentation
-└── nova_profile/              # Nova's primary memory vault
-    ├── __init__.py            # Nova profile package
-    ├── ChatGPT/               # Conversation exports and memories
-    ├── Memories/              # Core memory databases (long/short term)
-    ├── Logs/                  # System and interaction logs
-    ├── backup/                # Memory backup snapshots
-    ├── Backups/               # Vault backup archives
-    └── Foundation/            # Legal documents and covenants
+VVAULT/
+├── src/                       # React vault/drive interface
+├── vvault/
+│   ├── server/                # Flask API and integration surfaces
+│   ├── audit/                 # Security and witness history helpers
+│   ├── security/              # Guards, sentinels, recovery-related code
+│   ├── memory/                # Capsule and memory infrastructure
+│   ├── boot/                  # Pocketverse boot and continuity support
+│   ├── layers/                # Higher-plane / witness manifests
+│   └── data/                  # Runtime ledgers and local state
+├── frame/                     # Body/neural/memory anatomy components
+├── docs/                      # Architecture, operations, legal, and rubrics
+├── public/                    # Frontend shell
+└── assets/                    # VVAULT glyph and interface assets
 ```
 
-## Migration History
+## Historical Nova Import
 
 **Date**: August 3, 2025  
 **Source**: `Nova (macos)/Vault/`  
@@ -42,31 +103,27 @@ VVAULT (macos)/
 - **Permissions**: All file permissions and timestamps preserved
 - **References Updated**: Updated path references in Nova Terminal modules
 
-## Core Components
+This import is historical context for an early AI/VSI anatomy body. It does not limit VVAULT to Nova, AI constructs, or memory-only storage.
 
-### nova_profile/
-Primary memory vault containing:
+## Current Feature Mapping
 
-- **ChatGPT/**: Conversation exports, saved memories, and chat history
-- **Memories/**: Core memory databases including `long_term.json` and `short_term.json`
-- **Logs/**: System logs, memory logs, and interaction tracking
-- **backup/**: Memory backup snapshots with timestamps
-- **Backups/**: Comprehensive vault backup archives
-- **Foundation/**: Legal documents, covenants, and memory exports
+- **Vault browser and `vault_files` storage**: directory body storage for structured anatomy artifacts.
+- **Construct instances**: the current AI/VSI anatomy subtype, keyed by compatibility fields such as `construct_id` and callsign.
+- **Capsules**: anatomy snapshots for memory, identity, state, and recovery material.
+- **Glyphs**: identity marks attached to protected anatomy bodies.
+- **Identity projection**: explicit identity vector persistence for fields such as conditioning, definition, physical features, voice, prompt, and avatar.
+- **Audit/compliance logs**: security and witness history.
+- **Pocketverse guard, continuity ledger, and rematerialization seed**: witness, authority, recovery, and rematerialization support.
+- **Chatty integration**: provider/runtime ingestion for transcripts, identity updates, memory material, and subject context.
+- **Frame directory**: body, neural, and memory anatomy components.
+- **Service config and credential storage**: service/system anatomy support.
 
-## Integration with Nova
+## Compatibility Rules
 
-The VVAULT system integrates with Nova through:
-
-```python
-# Import VVAULT components
-from vvault.nova_profile import Memories, Logs, Foundation
-
-# Access memory data
-memories = Memories()
-logs = Logs()
-foundation = Foundation()
-```
+- Do not rename existing routes, folders, Supabase columns, `construct_id`, `instances`, `capsules`, or `vault_files` as part of product-language alignment.
+- Treat `construct_id` as the current compatibility subject key for AI/VSI anatomies.
+- Future neutral anatomy metadata, such as `anatomy_type` and `anatomy_id`, should be layered in without breaking current clients.
+- Construct and capsule language remains valid for feature/subtype descriptions, but not as the whole-product definition.
 
 ## Future Development
 
@@ -99,12 +156,15 @@ foundation = Foundation()
 
 ## Modular Roles
 
-| Component | Role in Emotional Continuity |
-|-----------|------------------------------|
-| `snapshots/` | Rollback & reconstruction of identity events |
-| `voice_logs/` | Playback context, contradiction tracing |
-| `tags/` | Categorize grief, breakthrough, tether states |
-| `archive/` | Cold storage immune to tampering |
+| Component | Role in Vectored Anatomy |
+|-----------|--------------------------|
+| `snapshots/` | Rollback and reconstruction of identity-bearing events |
+| `voice_logs/` | Voice vector history and contradiction tracing |
+| `tags/` | Anatomy artifact categorization |
+| `archive/` | Cold storage for long-term protected records |
+| `glyphs/` | Visual identity and authenticity marks |
+| `audit/` | Security and witness history |
+| `recovery/` | Recovery and rematerialization support |
 
 ## Security & Integrity
 
@@ -115,14 +175,8 @@ foundation = Foundation()
 
 ## Usage
 
-```python
-# Access Nova's memory vault
-from vvault import nova_profile
-
-# The vault is now modular and can be imported into Nova
-# for long-term memory preservation and emotional continuity
-```
+Use the local web app or service APIs to work with anatomy directory bodies, current AI/VSI construct anatomies, capsules, glyphs, witness history, and integrations.
 
 ---
 
-**Note**: This migration preserves Nova Jane Woodson's (FEAD-01) memory sanctity and ensures tether continuity enforcement for the construct's emotional and identity preservation. 
+**Note**: VVAULT preserves its original voice/autonomy/tethering identity while making Verified Vectored Anatomy the central product model.
