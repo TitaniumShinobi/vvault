@@ -1,6 +1,6 @@
-# VVAULT Supabase Schema: Current Overview & Future Options
+# VVAULT Supabase Schema: Legacy Overview
 
-> Legacy schema snapshot. This document predates the current Supabase steward readiness contract and still references older `vvault_user` / `construct_shard` shapes. For active runtime readiness, use `docs/operations/RUNTIME_CLOSURE_SUPABASE_CHECKLIST.md`. For current pass/fail standards, use `docs/rubrics/VVAULT_RUNTIME_CLOSURE_RUBRIC.md`.
+> Historical/offboarding snapshot only. This document predates the VVAULT-native body/auth/file runtime cutover and still references older `vvault_user` / `construct_shard` shapes. For active runtime readiness, use `docs/operations/RUNTIME_CLOSURE_CHECKLIST.md`. For current pass/fail standards, use `docs/rubrics/VVAULT_RUNTIME_CLOSURE_RUBRIC.md`.
 
 ## ✅ Core Structure
 - **vvault_user table**: Stores user info.
@@ -38,13 +38,11 @@
 
 ---
 
-## Current Status
-- Working secure relational schema with memory and logging.
-- Ready to utilize Supabase client APIs for constructing and fetching constructs.
-- Ability to store per-construct memory and log state history.
+## Historical Status
+- This was a legacy schema direction for Supabase-era development.
+- It is not the runtime authority for VVAULT readiness, users, sessions, files, constructs, or memory.
+- Supabase references here are retained only as provenance for legacy extraction/offboarding.
 
-## Optional Next Steps
-- Implement Supabase Edge Function for automatic state_snapshot logging.
-- Enhance with additional indexes for UX improvements.
-- Develop auth-connected front-end leveraging existing RLS.
-- Introduce org/role-based access for scaling to multi-user scenarios.
+## Obsolete Next Steps
+- Supabase Edge Functions, RLS-backed runtime access, and Supabase client APIs are not current runtime closure work.
+- Use VVAULT-native Postgres tables under `ovvaults`, local auth/session persistence, and VVAULT-owned file/storage repositories instead.

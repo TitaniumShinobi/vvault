@@ -12,7 +12,7 @@ VVAULT preview behavior must be derived from what a file **actually is and what 
 
 Preview decisions must separate three different truths:
 
-1. **Storage truth**: what is actually stored in `vault_files` or Supabase object storage
+1. **Storage truth**: what is actually stored in `ovvaults.vault_files` or VVAULT-native object storage; legacy Supabase object references are provenance only
 2. **Classification truth**: what the backend can infer from extension, MIME/content type, inline content, and recoverability
 3. **Preview truth**: what the UI should honestly render for the user
 

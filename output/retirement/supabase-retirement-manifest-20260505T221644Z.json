@@ -1,0 +1,506 @@
+{
+  "generated_at": "2026-05-05T22:20:08.366111+00:00",
+  "run_id": "20260505T221644Z",
+  "supabase_env_gate": {
+    "SUPABASE_ANON_KEY_SET": true,
+    "SUPABASE_SERVICE_KEY_SET": true,
+    "SUPABASE_SERVICE_ROLE_KEY_SET": true,
+    "SUPABASE_URL_SET": true
+  },
+  "tables": [
+    {
+      "action": "discarded",
+      "aggregate_checksum_sha256": "1a06382d2fd27774406d2b39d1915425686280bb6e2b0871c3daed5e570f7284",
+      "archived_count": 0,
+      "blocker": null,
+      "discarded_count": 154,
+      "imported_count": 0,
+      "schema": [
+        {
+          "default_present": false,
+          "name": "created_at",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "email",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "expires_at",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "remember_me",
+          "nullable": false,
+          "type": "boolean"
+        },
+        {
+          "default_present": false,
+          "name": "token",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "user_id",
+          "nullable": true,
+          "type": "unknown"
+        }
+      ],
+      "source_row_count": 154,
+      "source_table": "user_sessions",
+      "target_owner": "none",
+      "target_store": "discarded_legacy_sessions"
+    },
+    {
+      "action": "imported",
+      "aggregate_checksum_sha256": "0e11dee687549be06c0c3731e39698d21d69616f239c773c09f775b68fd35f6d",
+      "archived_count": 0,
+      "blocker": null,
+      "discarded_count": 0,
+      "imported_count": 8,
+      "schema": [
+        {
+          "default_present": false,
+          "name": "created_at",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "encrypted_value",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "key",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "metadata",
+          "nullable": false,
+          "type": "object"
+        },
+        {
+          "default_present": false,
+          "name": "service",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "updated_at",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "source_row_count": 8,
+      "source_table": "service_credentials",
+      "target_owner": "ovvaults.vault_files",
+      "target_store": "system/credentials/legacy-supabase"
+    },
+    {
+      "action": "imported",
+      "aggregate_checksum_sha256": "320df07cfc5cb5ae42bd3c139cd3dac48a130b0c8d69d26a3a8cf3f99bd95c87",
+      "archived_count": 0,
+      "blocker": null,
+      "discarded_count": 0,
+      "imported_count": 1,
+      "schema": [
+        {
+          "default_present": false,
+          "name": "created_at",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "enabled",
+          "nullable": false,
+          "type": "boolean"
+        },
+        {
+          "default_present": false,
+          "name": "id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "params",
+          "nullable": false,
+          "type": "object"
+        },
+        {
+          "default_present": false,
+          "name": "risk_limits",
+          "nullable": false,
+          "type": "object"
+        },
+        {
+          "default_present": false,
+          "name": "service",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "strategy_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "symbols",
+          "nullable": false,
+          "type": "array"
+        },
+        {
+          "default_present": false,
+          "name": "updated_at",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "version",
+          "nullable": false,
+          "type": "integer"
+        }
+      ],
+      "source_row_count": 1,
+      "source_table": "strategy_configs",
+      "target_owner": "ovvaults.vault_files",
+      "target_store": "system/configs/legacy-supabase"
+    },
+    {
+      "action": "archived",
+      "aggregate_checksum_sha256": "48d8e85d98bb5e715f495f0167e42d37310459c9d1e63b836ee213fd7fe2dd29",
+      "archived_count": 28790,
+      "blocker": null,
+      "discarded_count": 0,
+      "imported_count": 0,
+      "schema": [
+        {
+          "default_present": false,
+          "name": "chunk_index",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "default_present": false,
+          "name": "construct_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "content",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "created_at",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "embedding",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "source_file",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "user_id",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "source_row_count": 28790,
+      "source_table": "memory_embeddings",
+      "target_owner": "ovvaults.supabase_residual_archives",
+      "target_store": "supabase_residual_archives"
+    },
+    {
+      "action": "archived",
+      "aggregate_checksum_sha256": "7f313a909d12ccb0d44c03661564f46c0f12f2c6ac9d778d746db69b7dbc985d",
+      "archived_count": 15048,
+      "blocker": null,
+      "discarded_count": 0,
+      "imported_count": 0,
+      "schema": [
+        {
+          "default_present": false,
+          "name": "created_at",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "instance_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "status",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "timestamp",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "source_row_count": 15048,
+      "source_table": "fxshinobi_health",
+      "target_owner": "ovvaults.supabase_residual_archives",
+      "target_store": "supabase_residual_archives"
+    },
+    {
+      "action": "archived",
+      "aggregate_checksum_sha256": "0c42aceb80caf1f699ec11ec97a292ff239e6b8183ffd55e9fcbb8e19d9f38b8",
+      "archived_count": 48,
+      "blocker": null,
+      "discarded_count": 0,
+      "imported_count": 0,
+      "schema": [
+        {
+          "default_present": false,
+          "name": "closed_at",
+          "nullable": true,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "created_at",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "entry_price",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "default_present": false,
+          "name": "exit_price",
+          "nullable": true,
+          "type": "number"
+        },
+        {
+          "default_present": false,
+          "name": "id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "metadata",
+          "nullable": false,
+          "type": "object"
+        },
+        {
+          "default_present": false,
+          "name": "opened_at",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "realized_pnl",
+          "nullable": true,
+          "type": "number"
+        },
+        {
+          "default_present": false,
+          "name": "side",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "size",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "default_present": false,
+          "name": "status",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "stop_loss",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "default_present": false,
+          "name": "strategy_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "symbol",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "take_profit",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "default_present": false,
+          "name": "updated_at",
+          "nullable": true,
+          "type": "string"
+        }
+      ],
+      "source_row_count": 48,
+      "source_table": "fxshinobi_trades",
+      "target_owner": "ovvaults.supabase_residual_archives",
+      "target_store": "supabase_residual_archives"
+    },
+    {
+      "action": "archived",
+      "aggregate_checksum_sha256": "7ba34b9b7bfc6023a7a3b87b10aaec5179e2fed772bd1d1f0373fc72e7de159d",
+      "archived_count": 1,
+      "blocker": null,
+      "discarded_count": 0,
+      "imported_count": 0,
+      "schema": [
+        {
+          "default_present": false,
+          "name": "account_balance",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "default_present": false,
+          "name": "created_at",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "kill_switch_active",
+          "nullable": false,
+          "type": "boolean"
+        },
+        {
+          "default_present": false,
+          "name": "last_signal",
+          "nullable": false,
+          "type": "object"
+        },
+        {
+          "default_present": false,
+          "name": "open_pnl",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "default_present": false,
+          "name": "open_positions",
+          "nullable": false,
+          "type": "array"
+        },
+        {
+          "default_present": false,
+          "name": "pnl_today",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "default_present": false,
+          "name": "risk_metrics",
+          "nullable": false,
+          "type": "object"
+        },
+        {
+          "default_present": false,
+          "name": "snapshot_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "state_machine_state",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "system_status",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "default_present": false,
+          "name": "trades_today",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "default_present": false,
+          "name": "updated_at",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "source_row_count": 1,
+      "source_table": "fxshinobi_snapshots",
+      "target_owner": "ovvaults.supabase_residual_archives",
+      "target_store": "supabase_residual_archives"
+    }
+  ]
+}

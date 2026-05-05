@@ -8,7 +8,7 @@
     "dev": "webpack-dev-server --mode development --no-watch-options-stdin",
     "dev:full": "concurrently \"npm run backend\" \"npm run frontend\"",
     "frontend": "webpack-dev-server --mode development --no-watch-options-stdin",
-    "backend": "if [ -x venv/bin/python ]; then PYTHONUNBUFFERED=1 venv/bin/python -u vvault/server/vvault_web_server.py; else PYTHONUNBUFFERED=1 python3 -u vvault/server/vvault_web_server.py; fi",
+    "backend": "if [ -x .venv/bin/python3 ]; then PYTHONUNBUFFERED=1 .venv/bin/python3 -u vvault/server/vvault_web_server.py; elif [ -x venv/bin/python ]; then PYTHONUNBUFFERED=1 venv/bin/python -u vvault/server/vvault_web_server.py; else PYTHONUNBUFFERED=1 python3 -u vvault/server/vvault_web_server.py; fi",
     "build": "webpack --mode production",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

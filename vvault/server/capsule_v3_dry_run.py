@@ -2,7 +2,7 @@
 Read-only CapsuleForge v3 dry-run helpers.
 
 Builds a Nova-style v3 capsule proposal from transcript-like vault rows and an
-optional legacy CapsuleForge transcript source without mutating Supabase.
+optional legacy CapsuleForge transcript source without mutating remote state.
 """
 
 import copy
@@ -32,31 +32,15 @@ except Exception:  # pragma: no cover - fallback keeps the dry-run helper bootab
             return f"instances/{construct_id}/memup/{construct_id}.materialized.capsule"
 
         @staticmethod
-        def _load_transcript_text(supabase, row: Dict[str, Any]) -> str:
+        def _load_transcript_text(vault_source, row: Dict[str, Any]) -> str:
             content = row.get("content")
             if isinstance(content, str) and content:
                 return content
-
-            storage_path = row.get("storage_path") or row.get("filename")
-            if not storage_path:
-                return ""
-
-            try:
-                data = supabase.storage.from_("vault-files").download(storage_path)
-                blob = data[0] if isinstance(data, tuple) else getattr(data, "data", None)
-                error = data[1] if isinstance(data, tuple) and len(data) > 1 else getattr(data, "error", None)
-                if error or not blob:
-                    return ""
-                raw = blob.read() if hasattr(blob, "read") else blob
-                if isinstance(raw, bytes):
-                    return raw.decode("utf-8", errors="ignore")
-                return str(raw)
-            except Exception:
-                return ""
+            return ""
 
         @staticmethod
         def _fetch_transcripts(
-            supabase,
+            vault_source,
             construct_id: str,
             user_id: str = None,
             max_transcripts: Optional[int] = None,
@@ -66,7 +50,7 @@ except Exception:  # pragma: no cover - fallback keeps the dry-run helper bootab
             del deadline  # unused in shim
 
             def _build_query(folder_pattern):
-                query = supabase.table("vault_files").select(
+                query = vault_source.table("vault_files").select(
                     "id, filename, storage_path, file_type, content, created_at, metadata"
                 ).eq("construct_id", construct_id)
                 if user_id:
@@ -90,7 +74,7 @@ except Exception:  # pragma: no cover - fallback keeps the dry-run helper bootab
 
                 content = row.get("content") if isinstance(row.get("content"), str) and row.get("content") else ""
                 if not content and allow_storage_download:
-                    content = _MemupSyncShim._load_transcript_text(supabase, row)
+                    content = _MemupSyncShim._load_transcript_text(vault_source, row)
                 if content and len(content) >= 50:
                     transcripts.append(
                         {
@@ -106,13 +90,13 @@ except Exception:  # pragma: no cover - fallback keeps the dry-run helper bootab
 
         @staticmethod
         def _fetch_capsule_record(
-            supabase,
+            vault_source,
             construct_id: str,
             user_id: str = None,
             capsule_path: str = None,
         ) -> Optional[Dict[str, Any]]:
             capsule_path = capsule_path or _MemupSyncShim._original_capsule_path(construct_id)
-            query = supabase.table("vault_files").select("id, user_id, content, metadata, sha256, created_at")
+            query = vault_source.table("vault_files").select("id, user_id, content, metadata, sha256, created_at")
             if user_id:
                 query = query.eq("user_id", user_id)
             result = query.eq("construct_id", construct_id).eq("filename", capsule_path).execute()
@@ -137,9 +121,9 @@ except Exception:  # pragma: no cover - fallback keeps the dry-run helper bootab
             }
 
         @staticmethod
-        def _fetch_existing_capsule(supabase, construct_id: str, user_id: str = None) -> Optional[Dict[str, Any]]:
+        def _fetch_existing_capsule(vault_source, construct_id: str, user_id: str = None) -> Optional[Dict[str, Any]]:
             return _MemupSyncShim._fetch_capsule_record(
-                supabase,
+                vault_source,
                 construct_id,
                 user_id=user_id,
                 capsule_path=_MemupSyncShim._original_capsule_path(construct_id),
@@ -308,13 +292,13 @@ def _has_text_content(content: str) -> bool:
     return isinstance(content, str) and bool(content.strip())
 
 
-def _load_row_text(supabase, row: Dict[str, Any], allow_storage_download: bool) -> str:
+def _load_row_text(vault_source, row: Dict[str, Any], allow_storage_download: bool) -> str:
     content = row.get("content")
     if isinstance(content, str) and content:
         return content
     if not allow_storage_download:
         return ""
-    return memup_sync._load_transcript_text(supabase, row)
+    return memup_sync._load_transcript_text(vault_source, row)
 
 
 def _run_paged_query(query_factory, page_size: int = 100, max_pages: int = 20) -> List[Dict[str, Any]]:
@@ -332,7 +316,7 @@ def _run_paged_query(query_factory, page_size: int = 100, max_pages: int = 20) -
 
 
 def _read_query_rows(
-    supabase,
+    vault_source,
     construct_id: str,
     user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
@@ -346,7 +330,7 @@ def _read_query_rows(
         for pattern in _DISCOVERY_PATTERNS:
             for field_name in ("filename", "storage_path"):
                 def _pattern_query(field_name=field_name, pattern=pattern, construct_key=construct_key):
-                    query = supabase.table("vault_files").select(
+                    query = vault_source.table("vault_files").select(
                         "id, construct_id, user_id, filename, storage_path, file_type, created_at, sha256, metadata"
                     ).eq("construct_id", construct_key).ilike(field_name, pattern).order("created_at", desc=True)
                     if user_id:
@@ -362,7 +346,7 @@ def _read_query_rows(
 
         for file_type in _DISCOVERY_FILE_TYPES:
             def _file_type_query(file_type=file_type, construct_key=construct_key):
-                query = supabase.table("vault_files").select(
+                query = vault_source.table("vault_files").select(
                     "id, construct_id, user_id, filename, storage_path, file_type, created_at, sha256, metadata"
                 ).eq("construct_id", construct_key).eq("file_type", file_type).order("created_at", desc=True)
                 if user_id:
@@ -483,7 +467,7 @@ def _artifact_id_for(row: Dict[str, Any], metadata: Dict[str, Any]) -> str:
 
 
 def collect_construct_source_inventory(
-    supabase,
+    vault_source,
     construct_id: str,
     user_id: Optional[str] = None,
     include_legacy_capsule_transcript: bool = False,
@@ -495,11 +479,11 @@ def collect_construct_source_inventory(
     omitted_sources: List[Dict[str, Any]] = []
     total_content_bytes = 0
     metadata_rows = _read_query_rows(
-        supabase,
+        vault_source,
         callsign,
         user_id=user_id,
     )
-    hydrated_rows = _fetch_rows_by_ids(supabase, [row.get("id") for row in metadata_rows], user_id=user_id)
+    hydrated_rows = _fetch_rows_by_ids(vault_source, [row.get("id") for row in metadata_rows], user_id=user_id)
 
     for metadata_row in metadata_rows:
         row = hydrated_rows.get(str(metadata_row.get("id"))) or metadata_row
@@ -516,7 +500,7 @@ def collect_construct_source_inventory(
             )
             continue
 
-        content = _load_row_text(supabase, row, allow_storage_download=allow_storage_download)
+        content = _load_row_text(vault_source, row, allow_storage_download=allow_storage_download)
         source_type = _classify_source_type(path, content)
         if source_type == "legacy_capsule_transcript" and not include_legacy_capsule_transcript:
             omitted_sources.append(
@@ -566,7 +550,7 @@ def collect_construct_source_inventory(
 
 
 def _fetch_rows_by_ids(
-    supabase,
+    vault_source,
     row_ids: List[str],
     user_id: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
@@ -577,7 +561,7 @@ def _fetch_rows_by_ids(
     rows_by_id: Dict[str, Dict[str, Any]] = {}
     for start in range(0, len(ids), 50):
         chunk = ids[start : start + 50]
-        query = supabase.table("vault_files").select(
+        query = vault_source.table("vault_files").select(
             "id, construct_id, user_id, filename, storage_path, file_type, content, created_at, sha256, metadata"
         ).in_("id", chunk)
         result = query.execute()
@@ -605,17 +589,17 @@ def _select_legacy_capsule_source(legacy_sources: List[Dict[str, Any]]) -> Optio
 
 
 def _materialized_or_original_capsule(
-    supabase,
+    vault_source,
     construct_id: str,
     user_id: Optional[str],
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]], str]:
     materialized = memup_sync._fetch_capsule_record(
-        supabase,
+        vault_source,
         construct_id,
         user_id=user_id,
         capsule_path=memup_sync._materialized_capsule_path(construct_id),
     )
-    original = memup_sync._fetch_existing_capsule(supabase, construct_id, user_id)
+    original = memup_sync._fetch_existing_capsule(vault_source, construct_id, user_id)
     if materialized:
         return materialized, original, materialized, "materialized"
     if original:
@@ -1046,7 +1030,7 @@ def _validation_summary(
 
 
 def build_construct_v3_capsule_proposal(
-    supabase,
+    vault_source,
     construct_id: str,
     source_inventory: Dict[str, Any],
     user_id: Optional[str] = None,
@@ -1055,7 +1039,7 @@ def build_construct_v3_capsule_proposal(
 ) -> Dict[str, Any]:
     callsign = _normalize_callsign(construct_id)
     inventory_sources = list(source_inventory.get("sources") or [])
-    rows_by_id = _fetch_rows_by_ids(supabase, [item.get("row_id") for item in inventory_sources], user_id=user_id)
+    rows_by_id = _fetch_rows_by_ids(vault_source, [item.get("row_id") for item in inventory_sources], user_id=user_id)
 
     parser = ContinuityParser(callsign)
     hydrated_sources: List[Dict[str, Any]] = []
@@ -1072,7 +1056,7 @@ def build_construct_v3_capsule_proposal(
                 }
             )
             continue
-        content = _load_row_text(supabase, row, allow_storage_download=allow_storage_download)
+        content = _load_row_text(vault_source, row, allow_storage_download=allow_storage_download)
         hydrated = dict(source)
         hydrated["_filename"] = row.get("storage_path") or row.get("filename") or ""
         hydrated["_created_at"] = row.get("created_at") or ""
@@ -1109,7 +1093,7 @@ def build_construct_v3_capsule_proposal(
         )
 
     materialized_capsule, original_capsule, merge_base, merge_base_source = _materialized_or_original_capsule(
-        supabase,
+        vault_source,
         callsign,
         user_id=user_id,
     )

@@ -1,9 +1,18 @@
 # VVAULT Role in Ecosystem
 
-VVAULT is the **stateful infrastructure layer** for the Devon Woodson AI ecosystem, serving as:
-1. **Construct identity vault** - Persistent memory, capsules, and identity files for VSIs
-2. **Service config store** - Strategy configs, credentials, and settings for connected services
-3. **Secrets manager** - Encrypted credential storage for external APIs
+VVAULT is the **stateful infrastructure layer** for protected Vectored Anatomies in the Devon Woodson ecosystem.
+
+> Current runtime note: VVAULT-native Postgres (`ovvaults`), local auth/session persistence, and VVAULT-owned file/storage repositories are runtime truth. Supabase references in older integration examples are legacy/provenance or external product context only.
+
+A Vectored Anatomy is a protected, identity-bearing directory body. It can represent a human, AI, product, project, repository, place, object, organization, service, or system.
+
+VVAULT currently serves as:
+1. **Anatomy vault/drive** - Directory storage, identity files, capsules, glyphs, and witness history for protected bodies
+2. **AI/VSI anatomy support** - Persistent memory, capsules, identity files, and transcripts for current construct-based anatomies
+3. **Service/system anatomy support** - Strategy configs, credentials, and settings for connected services
+4. **Secrets manager** - Encrypted credential storage for external APIs
+
+Zen may appear in VVAULT as a dev-only continuity and vault-integrity panel. That panel is a specialized surface on Zen's singleton Chatty thread, not a separate Zen and not a replacement for Aurora's VVAULT-facing role. See [ZEN_DEV_PANEL_CANON.md](/Users/devonwoodson/Documents/GitHub/vvault/docs/ZEN_DEV_PANEL_CANON.md).
 
 ## Architecture Overview
 
@@ -36,22 +45,23 @@ VVAULT is the **stateful infrastructure layer** for the Devon Woodson AI ecosyst
 ### VVAULT Owns:
 - **Strategy configs** - Parameters, symbols, risk limits, enabled flags
 - **Service credentials** - Encrypted API keys (OANDA, Kalshi, etc.)
-- **Construct identity** - VSI capsules, transcripts, identity files
+- **Vectored Anatomy identity** - Directory bodies, capsule snapshots, glyph marks, transcripts, identity files, and witness records
 - **Config versioning** - Track changes to strategy parameters
 
-### Supabase Owns:
-- **Trade data** - Executed trades, P&L, timestamps
-- **User sessions** - Auth tokens, user profiles
-- **Strategy runs** - Execution logs, performance snapshots
-- **Vault files** - Construct transcripts, documents
+### External/Legacy Systems May Own:
+- **Trade data** - Executed trades, P&L, timestamps when owned by a trading service outside VVAULT
+- **Strategy runs** - Execution logs and performance snapshots when owned by a trading service outside VVAULT
+- **Legacy Supabase source rows** - Import/offboarding provenance only, not runtime VVAULT users, sessions, files, or construct bodies
 
 ### Clear Boundaries:
 | Data Type | Owner | Reason |
 |-----------|-------|--------|
 | API Keys | VVAULT | Encrypted at rest, never in Supabase |
 | Strategy Params | VVAULT | Versioned, auditable changes |
-| Trade History | Supabase | Transactional, needs queries |
-| Construct Memory | VVAULT+Supabase | Transcripts in Supabase, capsules synthesized |
+| Trade History | External trading service DB | Transactional service-owned records |
+| Anatomy Artifacts | VVAULT | Directory body records, transcripts, capsule snapshots, identity files |
+
+`construct_id` remains the current compatibility subject key for AI/VSI anatomies. Future neutral anatomy metadata should be layered beside it without breaking current service calls.
 
 ---
 
@@ -86,7 +96,7 @@ Health check - no auth required.
   "version": "1.0.0",
   "timestamp": "2026-01-25T10:00:00.000Z",
   "components": {
-    "supabase": "connected" | "not_configured",
+    "body_database": "healthy" | "unavailable",
     "store": "connected" | "error",
     "service_api": "enabled" | "disabled"
   },
@@ -214,8 +224,8 @@ Store or update a credential (encrypted at rest).
 |----------|-------------|----------|
 | `VVAULT_SERVICE_TOKEN` | Token for backend-to-backend auth | Yes (for service API) |
 | `VVAULT_ENCRYPTION_KEY` | Key for credential encryption | Yes (defaults to SECRET_KEY) |
-| `SUPABASE_URL` | Supabase project URL | Yes |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key | Yes |
+| `DATABASE_URL` | VVAULT runtime Postgres/body database URL | Yes |
+| `VVAULT_S3_ENDPOINT_URL` | VVAULT-native S3-compatible storage endpoint | If object storage is used |
 
 ### Required for FXShinobi (client)
 
@@ -223,8 +233,6 @@ Store or update a credential (encrypted at rest).
 |----------|-------------|
 | `VVAULT_URL` | VVAULT base URL (e.g., `https://...replit.dev`) |
 | `VVAULT_SERVICE_TOKEN` | Same token as VVAULT server |
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_KEY` | Supabase anon or service key |
 
 ---
 
@@ -236,8 +244,6 @@ Store or update a credential (encrypted at rest).
    ```bash
    VVAULT_URL=https://your-vvault.replit.dev
    VVAULT_SERVICE_TOKEN=your-secure-token
-   SUPABASE_URL=https://your-project.supabase.co
-   SUPABASE_KEY=your-anon-key
    ```
 
 2. **Check VVAULT health on startup:**
@@ -308,14 +314,14 @@ CREATE TABLE service_credentials (
 );
 ```
 
-Run `docs/migrations/add_service_api_tables.sql` in Supabase SQL Editor to create these tables.
+Legacy note: `docs/migrations/add_service_api_tables.sql` was written for an older Supabase-hosted service API table path. Current runtime service/config artifacts should be created through VVAULT-native migrations or `ovvaults.vault_files` system config rows.
 
 ---
 
 ## Next Actions
 
 ### Immediate
-- [ ] Run `add_service_api_tables.sql` in Supabase
+- [ ] Create required service/config storage through VVAULT-native Postgres/body storage
 - [ ] Set `VVAULT_SERVICE_TOKEN` in VVAULT environment
 - [ ] Set `VVAULT_URL` and `VVAULT_SERVICE_TOKEN` in FXShinobi
 

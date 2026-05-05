@@ -1,17 +1,17 @@
 # VVAULT Runtime Closure Rubric
 
-This rubric defines when VVAULT is actually ready. It exists because a running app is not the same as a closed runtime loop.
+This rubric defines when VVAULT is actually ready after the runtime cutover. A running app is not the same as a closed runtime loop.
 
 ## Purpose
 
 VVAULT must never confuse:
 
-- configured with connected
-- reachable gateway with healthy database
-- missing data with nonexistent data
+- configured with ready
+- reachable process with healthy body database
+- metadata/path/hash with materialized body
 - degraded read with safe write
-- OAuth configured with identity authority proven
-- local fallback with canonical truth
+- OAuth configured with local auth persistence ready
+- legacy Supabase provenance with runtime authority
 
 ## Hard Pass Requirements
 
@@ -20,43 +20,56 @@ All items must pass:
 - `localhost:7784` serves the frontend.
 - `localhost:8000` serves exactly one backend listener.
 - `/api/status` returns `200`.
+- `/api/health` reports VVAULT-native dependency status.
 - `/api/ready` returns `200`.
-- steward state is `connected`.
-- `canonical` is `true`.
-- `storage_mode` is `supabase`.
-- Google OAuth health says identity authority is available.
-- OAuth login and callback do not bypass the steward.
-- Vault directory loads after login.
-- At least one text-like file preview opens.
-- Canonical writes are allowed only while Supabase is connected.
-- Focused Supabase, OAuth, preview, and duplicate-name tests pass.
+- `body_database.ready` is `true`.
+- `body_database.status` is `healthy`.
+- `ovvaults.vault_files` is readable.
+- `ovvaults.transcripts` is readable.
+- Google OAuth health reports VVAULT-native auth readiness when OAuth is configured.
+- OAuth login/callback store identity and sessions locally.
+- Vault directory loads from `ovvaults.vault_files`.
+- At least one text-like file preview opens from materialized content or VVAULT-native storage.
+- Canonical writes persist through VVAULT-native repositories/storage.
+- Focused VVAULT runtime, auth, file, frontend, body, and duplicate-name tests pass.
 
 ## Hard Fail Conditions
 
 Any item fails runtime closure:
 
 - `/api/ready` returns `503`.
-- `/api/health` is used as proof of canonical readiness.
-- Google OAuth redirects while identity authority is unavailable.
+- `/api/health` is used as proof of readiness.
+- Google OAuth redirects while VVAULT auth persistence is unavailable.
 - A fallback path mints or promotes a replacement LIFE id.
-- A write silently succeeds while Supabase is degraded.
-- Missing Supabase data is treated as nonexistence.
-- Direct Supabase real-key table reads return `522`.
-- Storage returns `DatabaseTimeout`.
+- A write silently succeeds without local persistence proof.
+- Missing local body data is treated as nonexistence.
+- Metadata/path/hash is called materialized body.
+- Supabase is required for runtime readiness, auth, file storage, or body continuity.
 - Duplicate backend listeners exist on `8000`.
 - Generated data, runtime databases, or `.DS_Store` files are staged as feature work.
 
-## Supabase Readiness Rubric
+## VVAULT Readiness Rubric
 
-1. Prove gateway reachability.
-2. Prove bad-key failure is fast.
-3. Prove real-key `users` metadata read.
-4. Prove real-key `vault_files` metadata read.
-5. Prove steward state reaches `connected`.
-6. Prove `/api/ready` returns `200`.
-7. Prove OAuth health reports identity authority available.
+1. Prove frontend reachability.
+2. Prove backend reachability.
+3. Prove `/api/status`.
+4. Prove `/api/ready`.
+5. Prove body DB URL resolution.
+6. Prove readable `ovvaults.vault_files`.
+7. Prove readable `ovvaults.transcripts`.
+8. Prove `/api/auth/google/health` reports local auth authority, not legacy identity authority.
 
-If real-key table reads return slow `522`, VVAULT is not closed. Recover the Supabase project database path first.
+If local body database reads fail, VVAULT is not closed. Recover the local body database path first.
+
+## Legacy Supabase Classification
+
+Supabase references are allowed only as:
+
+- migration/offboarding source extraction
+- historical provenance
+- quarantined compatibility tests for old modules
+
+They are not runtime closure criteria.
 
 ## QFB Cleanup Rubric
 
@@ -77,7 +90,7 @@ A pass receipt must include:
 - live `/api/status`
 - live `/api/ready`
 - live `/api/auth/google/health`
-- direct Supabase probe outcome when readiness fails
+- body database proof when readiness fails
 - exact files changed
 - merge/staging exclusions
 - remaining risks

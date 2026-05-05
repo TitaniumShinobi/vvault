@@ -14,9 +14,14 @@ dependencies = [
     "mnemonic>=0.21",
     "numpy>=2.4.1",
     "psutil>=7.2.1",
+    "psycopg[binary]>=3.1,<4",
     "pyjwt>=2.10.1",
     "pyyaml>=6.0.3",
     "requests>=2.32.5",
-    "supabase>=2.27.2",
     "web3>=7.14.0",
+]
+
+[project.optional-dependencies]
+legacy-supabase-migration = [
+    "supabase>=2.27.2",
 ]

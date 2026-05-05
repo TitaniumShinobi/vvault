@@ -1,7 +1,7 @@
 # Transcript Memory Fallback System
 
 ## Last Updated: 2026-02-12
-## Status: IMPLEMENTED (in Chatty codebase)
+## Status: HISTORICAL CHATTY IMPLEMENTATION NOTE
 
 This system was built in the Chatty repo to give constructs genuine conversation memory even when ChromaDB is unavailable.
 
@@ -17,7 +17,7 @@ Constructs had no deeper memory — they couldn't reference things from 50 messa
 ## The Solution: Transcript Memory Extraction
 
 When ChromaDB is unavailable, the system now automatically:
-1. Loads the full conversation transcript for a construct from Supabase
+1. Loads the full conversation transcript for a construct from VVAULT's body API/body database
 2. Extracts the most relevant past exchanges using weighted keyword scoring
 3. Injects them as memory context into the system prompt
 
@@ -42,7 +42,7 @@ User Message
     │       │       └─→ If fails → transcript fallback
     │       │
     │       ├─→ Transcript Fallback:
-    │       │       1. readConversations(constructId) from Supabase
+    │       │       1. read transcript body from VVAULT
     │       │       2. Score each message by keyword relevance
     │       │       3. Select top N most relevant exchanges
     │       │       4. Format as memory context block
@@ -60,7 +60,7 @@ User Message
 
 ### MemoryContextBuilder Updates
 - Added `extractTranscriptMemories(constructId, userMessage)` function
-- Queries Supabase `readConversations()` for full conversation history
+- Queries the VVAULT transcript/body path for full conversation history
 - Scores and selects most relevant past exchanges
 - Returns formatted memory block for system prompt injection
 
@@ -91,9 +91,11 @@ Log output:
 ## Relationship to VVAULT
 
 This system runs entirely in the Chatty codebase but depends on VVAULT for:
-- **Conversation transcripts**: Stored in Supabase `vault_files` at `instances/{callsign}/chatty/chat_with_{callsign}.md`
+- **Conversation transcripts**: Stored/queryable through VVAULT body storage, including `ovvaults.transcripts` and materialized `ovvaults.vault_files.content`
 - **Identity files**: Loaded from VVAULT API (`/api/chatty/construct/<id>/identity`)
 - **Capsule data**: Loaded from VVAULT API (when available)
+
+Older references to Supabase in this document describe the pre-cutover source system. Supabase is no longer runtime authority for transcript memory.
 
 When ChromaDB is eventually installed and connected (see `MEMORY_ORCHESTRATION_PLAN.md`), the transcript fallback will serve as a secondary source while ChromaDB becomes the primary memory backend.
 

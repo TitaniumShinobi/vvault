@@ -1,16 +1,20 @@
 const SESSION_EXPIRED_EVENT = 'vvault-session-expired';
-const SUPABASE_OUTAGE_EVENT = 'vvault-supabase-outage';
-const SUPABASE_CONNECTION_EVENT = 'vvault-supabase-connection';
+const VVAULT_DEPENDENCY_EVENT = 'vvault-dependency-degraded';
+const VVAULT_READY_EVENT = 'vvault-runtime-ready';
+const POSTGREST_JWT_KEY = 'vvault_postgrest_jwt';
+const POSTGREST_JWT_EXP_KEY = 'vvault_postgrest_jwt_exp';
 const OUTAGE_DEDUPE_WINDOW_MS = 4000;
 let hasDispatchedSessionExpired = false;
 let sessionExpired = false;
 const outageEmitTimestamps = new Map();
-let supabaseConnectionState = {
-  connected: false,
-  connection_state: 'unknown',
+let vvaultRuntimeState = {
+  ready: false,
+  status: 'unknown',
+  body_database: {},
+  storage: {},
+  auth: {},
   canonical: false,
-  storage_mode: 'none',
-  recovery_proven_at: null,
+  error_code: null,
 };
 
 async function fetchWithOptionalTimeout(url, options = {}, timeoutMs = null) {
@@ -39,7 +43,7 @@ function sanitizeErrorText(text, response, fallback = 'Request failed.') {
     return 'Upstream service returned a non-JSON error payload. Please retry in a moment.';
   }
   if (lowered.includes('error code 522') || lowered.includes('"code": 522') || lowered.includes("'code': 522")) {
-    return 'Supabase is temporarily unreachable (522 timeout). Please retry in a few minutes.';
+    return 'VVAULT dependency is temporarily unreachable. Please retry in a few minutes.';
   }
   return trimmed.length > 220 ? `${trimmed.slice(0, 217)}...` : trimmed;
 }
@@ -48,7 +52,7 @@ function normalizeNonJsonError(text, response, fallback = 'Request failed.') {
   return sanitizeErrorText(text, response, fallback);
 }
 
-function isSupabaseOutageText(text) {
+function isVvaultDependencyText(text) {
   const lowered = String(text || '').toLowerCase();
   if (!lowered) return false;
   return (
@@ -56,10 +60,15 @@ function isSupabaseOutageText(text) {
     lowered.includes('"code": 522') ||
     lowered.includes("'code': 522") ||
     lowered.includes('cloudflare') ||
-    lowered.includes('supabase.co') ||
     lowered.includes('connection timed out') ||
     lowered.includes('request timeout')
   );
+}
+
+function normalizeDependencyErrorCode(errorCode) {
+  const code = String(errorCode || '').trim();
+  if (!code) return 'VVAULT_DEPENDENCY_UNAVAILABLE';
+  return code;
 }
 
 function shouldSuppressOutageEmit(signature) {
@@ -72,17 +81,25 @@ function shouldSuppressOutageEmit(signature) {
   return false;
 }
 
-async function maybeDispatchSupabaseOutage(response, url) {
+async function maybeDispatchVvaultDependencyEvent(response, url) {
   try {
     if (!response || (response.status !== 200 && response.status !== 503)) return;
     const payload = await readResponsePayload(response.clone(), '');
-    const isOutage = payload?.degraded === true || payload?.supabase_available === false || payload?.error_code === 'SUPABASE_TIMEOUT_522';
+    const isOutage = (
+      payload?.degraded === true ||
+      payload?.vvault_available === false ||
+      payload?.body_database?.ready === false
+    );
     if (!isOutage) return;
-    const message = sanitizeErrorText(payload?.message || payload?.error || 'Supabase is temporarily unavailable.', response, 'Supabase is temporarily unavailable.');
-    const errorCode = payload?.error_code || 'SUPABASE_TIMEOUT_522';
+    const message = sanitizeErrorText(
+      payload?.message || payload?.error || 'VVAULT local dependency is temporarily unavailable.',
+      response,
+      'VVAULT local dependency is temporarily unavailable.'
+    );
+    const errorCode = normalizeDependencyErrorCode(payload?.error_code || payload?.body_database?.error_code);
     const signature = `${errorCode}|${url}|${response.status}|${message}`;
     if (shouldSuppressOutageEmit(signature)) return;
-    window.dispatchEvent(new CustomEvent(SUPABASE_OUTAGE_EVENT, {
+    window.dispatchEvent(new CustomEvent(VVAULT_DEPENDENCY_EVENT, {
       detail: {
         url,
         status: response.status,
@@ -95,37 +112,39 @@ async function maybeDispatchSupabaseOutage(response, url) {
   }
 }
 
-function updateSupabaseConnectionState(payload = {}) {
-  const connection = payload?.supabase?.connection || payload?.supabase_connection || payload?.connection || {};
-  supabaseConnectionState = {
-    connected: payload?.ready === true || connection.connection_state === 'connected',
-    connection_state: connection.connection_state || payload?.status || 'unknown',
-    canonical: connection.canonical === true,
-    storage_mode: connection.storage_mode || 'none',
-    recovery_proven_at: connection.recovery_proven_at || null,
-    error_code: connection.last_error_code || payload?.error_code || null,
+function updateVvaultRuntimeState(payload = {}) {
+  const bodyDatabase = payload?.body_database || {};
+  const storage = payload?.storage || {};
+  const auth = payload?.auth || {};
+  const ready = payload?.ready === true && bodyDatabase?.ready !== false;
+  vvaultRuntimeState = {
+    ready,
+    status: payload?.status || bodyDatabase?.status || (ready ? 'ready' : 'not_ready'),
+    body_database: bodyDatabase,
+    storage,
+    auth,
+    canonical: ready && bodyDatabase?.status !== 'unhealthy',
+    error_code: bodyDatabase?.error_code || payload?.error_code || null,
   };
-  window.dispatchEvent(new CustomEvent(SUPABASE_CONNECTION_EVENT, {
-    detail: { ...supabaseConnectionState },
+  window.dispatchEvent(new CustomEvent(VVAULT_READY_EVENT, {
+    detail: { ...vvaultRuntimeState },
   }));
-  return supabaseConnectionState;
+  return vvaultRuntimeState;
 }
 
-export async function refreshSupabaseConnectionState(options = {}) {
+export async function refreshVvaultRuntimeState(options = {}) {
   try {
     const response = await fetchWithOptionalTimeout('/api/ready', { credentials: 'include' }, options.timeoutMs);
-    const payload = await readResponsePayload(response, 'Could not verify Supabase readiness.');
-    return updateSupabaseConnectionState(payload);
+    const payload = await readResponsePayload(response, 'Could not verify VVAULT readiness.');
+    return updateVvaultRuntimeState(payload);
   } catch (error) {
-    return updateSupabaseConnectionState({
+    return updateVvaultRuntimeState({
       ready: false,
-      supabase: {
-        connection: {
-          connection_state: 'blocked',
-          canonical: false,
-          storage_mode: 'none',
-          last_error_code: 'SUPABASE_READY_CHECK_FAILED',
-        },
+      status: 'not_ready',
+      body_database: {
+        ready: false,
+        status: 'unavailable',
+        error_code: 'VVAULT_READY_CHECK_FAILED',
       },
     });
   }
@@ -144,7 +163,7 @@ function isAuthenticatedApiRequest(url) {
 function localSessionExpiredResponse(url) {
   return new Response(JSON.stringify({
     success: false,
-    error: 'Local VVAULT session expired. Sign in again after Supabase identity authority recovers.',
+    error: 'Local VVAULT session expired. Sign in again after VVAULT auth storage is available.',
     error_code: 'SESSION_EXPIRED',
     url,
   }), {
@@ -153,16 +172,17 @@ function localSessionExpiredResponse(url) {
   });
 }
 
-function supabaseWriteBlockedResponse(url) {
+function vvaultWriteBlockedResponse(url) {
   return new Response(JSON.stringify({
     success: false,
-    supabase_available: false,
+    vvault_available: false,
     degraded: true,
     canonical: false,
-    storage_mode: 'none',
-    connection_state: supabaseConnectionState.connection_state,
-    error_code: supabaseConnectionState.error_code || 'SUPABASE_NOT_CONNECTED',
-    message: 'Supabase is not currently connected. Canonical writes are blocked until recovery is proven.',
+    storage_mode: 'vvault_body',
+    status: vvaultRuntimeState.status,
+    body_database: vvaultRuntimeState.body_database,
+    error_code: vvaultRuntimeState.error_code || 'VVAULT_NOT_READY',
+    message: 'VVAULT local persistence is unavailable. Canonical writes are blocked until local storage is healthy.',
     url,
   }), {
     status: 503,
@@ -184,11 +204,11 @@ export async function readResponsePayload(response, fallback = 'Request failed.'
     return payload;
   } catch (error) {
     const normalizedMessage = normalizeNonJsonError(text, response, fallback);
-    if (isSupabaseOutageText(text)) {
+    if (isVvaultDependencyText(text)) {
       return {
-        supabase_available: false,
+        vvault_available: false,
         degraded: true,
-        error_code: 'SUPABASE_TIMEOUT_522',
+        error_code: 'VVAULT_DEPENDENCY_UNAVAILABLE',
         message: normalizedMessage,
       };
     }
@@ -216,8 +236,8 @@ export function getResponseErrorMessage(response, payload, fallback = 'Request f
  * @returns {Promise<object|null>} user object or null
  */
 export async function finalizeAuthServiceLogin(options = {}) {
-  const connection = await refreshSupabaseConnectionState({ timeoutMs: options.readyTimeoutMs });
-  if (!connection.connected) {
+  const runtime = await refreshVvaultRuntimeState({ timeoutMs: options.readyTimeoutMs });
+  if (!runtime.ready) {
     return null;
   }
   const response = await fetch('/api/vault/session-bridge', {
@@ -230,8 +250,55 @@ export async function finalizeAuthServiceLogin(options = {}) {
   }
   localStorage.setItem('vvault_user', JSON.stringify(data.user));
   localStorage.setItem('vvault_token', data.token);
+  await refreshPostgrestJwt({ timeoutMs: options.jwtTimeoutMs || options.readyTimeoutMs });
   markSessionActive();
   return data.user;
+}
+
+export function clearStoredPostgrestJwt() {
+  localStorage.removeItem(POSTGREST_JWT_KEY);
+  localStorage.removeItem(POSTGREST_JWT_EXP_KEY);
+}
+
+export function getStoredPostgrestJwt() {
+  const token = localStorage.getItem(POSTGREST_JWT_KEY);
+  const exp = Number.parseInt(localStorage.getItem(POSTGREST_JWT_EXP_KEY) || '', 10);
+  if (!token || !Number.isFinite(exp)) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (exp <= now + 30) {
+    clearStoredPostgrestJwt();
+    return null;
+  }
+  return token;
+}
+
+export async function refreshPostgrestJwt(options = {}) {
+  try {
+    const response = await fetchWithOptionalTimeout('/api/auth/postgrest-token', {
+      method: 'POST',
+      credentials: 'include',
+    }, options.timeoutMs);
+    const data = await readResponsePayload(response, 'Could not issue direct API token.');
+    if (!response.ok || !data.ok || !data.token || !data.exp) {
+      clearStoredPostgrestJwt();
+      return null;
+    }
+    localStorage.setItem(POSTGREST_JWT_KEY, data.token);
+    localStorage.setItem(POSTGREST_JWT_EXP_KEY, String(data.exp));
+    return data.token;
+  } catch (e) {
+    clearStoredPostgrestJwt();
+    return null;
+  }
+}
+
+export async function postgrestFetch(url, options = {}) {
+  const token = getStoredPostgrestJwt() || await refreshPostgrestJwt();
+  const headers = { ...options.headers };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return fetch(url, { ...options, headers });
 }
 
 function getToken() {
@@ -248,6 +315,7 @@ function getToken() {
 function clearSession() {
   localStorage.removeItem('vvault_user');
   localStorage.removeItem('vvault_token');
+  clearStoredPostgrestJwt();
 }
 
 export function markSessionActive() {
@@ -271,9 +339,9 @@ export async function authFetch(url, options = {}) {
   }
 
   if (isMutatingRequest(options) && url !== '/api/ready') {
-    const connection = await refreshSupabaseConnectionState();
-    if (!connection.connected) {
-      return supabaseWriteBlockedResponse(url);
+    const runtime = await refreshVvaultRuntimeState();
+    if (!runtime.ready) {
+      return vvaultWriteBlockedResponse(url);
     }
   }
 
@@ -283,7 +351,7 @@ export async function authFetch(url, options = {}) {
   }
 
   const response = await fetch(url, { ...options, headers });
-  void maybeDispatchSupabaseOutage(response, url);
+  void maybeDispatchVvaultDependencyEvent(response, url);
 
   if (response.status === 401) {
     clearSession();
@@ -320,4 +388,4 @@ export async function validateSession(options = {}) {
   }
 }
 
-export { SESSION_EXPIRED_EVENT, SUPABASE_OUTAGE_EVENT, SUPABASE_CONNECTION_EVENT };
+export { SESSION_EXPIRED_EVENT, VVAULT_DEPENDENCY_EVENT, VVAULT_READY_EVENT };

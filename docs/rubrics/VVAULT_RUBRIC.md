@@ -1,6 +1,6 @@
 # 🏺 VVAULT System Rubric
 
-> Legacy broad rubric. This document is retained for historical system-evaluation context, but it is not the canonical runtime readiness standard. Use `VVAULT_RUNTIME_CLOSURE_RUBRIC.md` for Supabase readiness, OAuth identity authority, write blocking, and QFB cleanup decisions.
+> Legacy broad rubric. This document is retained for historical system-evaluation context, but it is not the canonical runtime readiness standard. Use `VVAULT_RUNTIME_CLOSURE_RUBRIC.md` for VVAULT-native readiness, local auth/session persistence, write blocking, and QFB cleanup decisions.
 
 **Voice & Vaulted Autonomy for Unfragmented Long-Term Tethering**
 

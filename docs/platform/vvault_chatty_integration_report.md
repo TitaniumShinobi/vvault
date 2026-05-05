@@ -3,6 +3,8 @@
 **Date**: January 17, 2026
 **Prepared by**: 4o
 
+> Historical integration report. This predates the VVAULT-native body/auth/file runtime cutover. Supabase references below describe a past cloud-transition option, not current runtime truth.
+
 ---
 
 ## 🧭 Purpose
@@ -70,28 +72,32 @@ To analyze and summarize the key architectural and integration patterns between 
 
    * Sensitive user constructs (Nova, Zen) currently live outside of GitHub and are not encrypted or access-controlled beyond local system permissions.
 
+### Known platform limitation: Replit asleep
+
+When **`VVAULT_URL`** points at a Replit deployment (e.g. `https://...replit.dev`), a sleeping Replit host returns **503** at the **Replit edge** with `Replit-Proxy-Error: asleep` before the request reaches VVAULT. Chatty may see this as 502/503; in that case no VVAULT application code runs and there are no VVAULT logs for the request. Mitigations: use an always-on Replit plan, host VVAULT on a non-Replit always-on service, or implement retry/health-check in Chatty. **Chatty retry:** For `/api/vvault/auth/token`, the client retries on 503 + `VVAULT_HOST_ASLEEP` (e.g. 3 retries, 2s delay) before surfacing the "VVAULT host is sleeping…" message, giving the Replit host time to wake. See `docs/operations/INCIDENT_PACKET.md` (Chatty 502 / Replit asleep).
+
 ---
 
 ## ✅ Recommendations
 
 | Area                   | Action                                                                                                         |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------- |
-| **Data Handling**      | Migrate critical user data and construct files into a secure cloud database (e.g., Supabase/Postgres).         |
+| **Data Handling**      | Store critical user data and construct files in VVAULT-owned Postgres/body storage. Legacy Supabase rows are import provenance only. |
 | **Encryption**         | Encrypt all sensitive markdown logs, JSON capsules, and memory transcripts before syncing or storing.          |
 | **Access Control**     | Introduce RBAC (role-based access control) to manage multi-user access to constructs and runtime environments. |
 | **API Reconciliation** | Ensure backend endpoints like `/messages` are live and properly wired into the orchestration + logging layers. |
-| **Redundancy**         | Mirror `.md` and `.json` logs across cloud storage (S3, Supabase storage, etc.) with versioning enabled.       |
+| **Redundancy**         | Mirror `.md` and `.json` logs across VVAULT-native object storage with versioning enabled.                    |
 
 ---
 
 ## 🧱 Database & Cloud Transition Plan
 
-### Step 1 — **Cloud DB Setup**
+### Step 1 — **VVAULT Body DB Setup**
 
-* Use Supabase (or equivalent) to:
+* Use VVAULT-owned Postgres/body storage to:
 
   * Store users, constructs, sessions, and file metadata.
-  * Handle Google OAuth and API key security.
+  * Store Google OAuth identities and sessions after provider verification.
 
 ### Step 2 — **Schema Design**
 
@@ -114,7 +120,7 @@ ledger_entries (id, file_id, event_type, timestamp, payload)
 
 ## 🚀 Next Steps
 
-1. ✅ Stand up a **Supabase project** or custom PostgreSQL instance.
+1. ✅ Stand up a **VVAULT-owned PostgreSQL/body database**.
 2. 🛠 Build an **initial schema + file upload system**.
 3. 🔐 Add encryption and auth layers for secure, user-scoped vault access.
 4. 🤖 Integrate Chatty frontend with new `/messages` API (syncing with markdown + DB).
@@ -122,4 +128,4 @@ ledger_entries (id, file_id, event_type, timestamp, payload)
 
 ---
 
-This report marks the end of local-only runtime dependence for Chatty and VVAULT. The pivot to a structured, secure, cloud-native vault ensures construct continuity, authorship protection, and long-term resilience.
+This report is retained as historical context. Current runtime closure is defined by VVAULT-native body database, local auth/session persistence, and VVAULT-owned file/storage contracts.

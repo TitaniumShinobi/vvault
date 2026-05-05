@@ -28,14 +28,16 @@ class TestFrontendOutageContractStatic(unittest.TestCase):
     def test_authfetch_treats_degraded_503_as_outage_contract(self):
         self.assertIn("response.status !== 200 && response.status !== 503", self.auth_fetch)
         self.assertIn("payload?.degraded === true", self.auth_fetch)
-        self.assertIn("payload?.supabase_available === false", self.auth_fetch)
-        self.assertIn("SUPABASE_TIMEOUT_522", self.auth_fetch)
+        self.assertIn("payload?.vvault_available === false", self.auth_fetch)
+        self.assertIn("payload?.body_database?.ready === false", self.auth_fetch)
+        self.assertNotIn("payload?.supabase_available === false", self.auth_fetch)
+        self.assertIn("VVAULT_DEPENDENCY_UNAVAILABLE", self.auth_fetch)
 
     def test_authfetch_sanitizes_cloudflare_html_into_degraded_object(self):
-        self.assertIn("isSupabaseOutageText", self.auth_fetch)
-        self.assertIn("supabase_available: false", self.auth_fetch)
+        self.assertIn("isVvaultDependencyText", self.auth_fetch)
+        self.assertIn("vvault_available: false", self.auth_fetch)
         self.assertIn("degraded: true", self.auth_fetch)
-        self.assertIn("error_code: 'SUPABASE_TIMEOUT_522'", self.auth_fetch)
+        self.assertIn("error_code: 'VVAULT_DEPENDENCY_UNAVAILABLE'", self.auth_fetch)
         self.assertIn("lowered.includes('<!doctype html')", self.auth_fetch)
         self.assertIn("lowered.includes('cloudflare')", self.auth_fetch)
 
@@ -59,8 +61,8 @@ class TestFrontendOutageContractStatic(unittest.TestCase):
         self.assertRegex(self.vault_browser, pattern)
 
     def test_vaultbrowser_listens_for_outage_event(self):
-        self.assertIn("window.addEventListener(SUPABASE_OUTAGE_EVENT, onOutage)", self.vault_browser)
-        self.assertIn("window.removeEventListener(SUPABASE_OUTAGE_EVENT, onOutage)", self.vault_browser)
+        self.assertIn("window.addEventListener(VVAULT_DEPENDENCY_EVENT, onOutage)", self.vault_browser)
+        self.assertIn("window.removeEventListener(VVAULT_DEPENDENCY_EVENT, onOutage)", self.vault_browser)
 
     def test_vaultbrowser_preserves_strict_write_failure_payload(self):
         pattern = re.compile(
@@ -74,31 +76,32 @@ class TestFrontendOutageContractStatic(unittest.TestCase):
         self.assertRegex(self.vault_browser, pattern)
 
     def test_authfetch_uses_backend_ready_as_connection_contract(self):
-        self.assertIn("SUPABASE_CONNECTION_EVENT", self.auth_fetch)
-        self.assertIn("refreshSupabaseConnectionState", self.auth_fetch)
+        self.assertIn("VVAULT_READY_EVENT", self.auth_fetch)
+        self.assertIn("refreshVvaultRuntimeState", self.auth_fetch)
         self.assertIn("fetchWithOptionalTimeout('/api/ready'", self.auth_fetch)
-        self.assertIn("connection_state === 'connected'", self.auth_fetch)
+        self.assertIn("body_database", self.auth_fetch)
 
-    def test_authfetch_blocks_mutating_writes_without_connected_supabase(self):
+    def test_authfetch_blocks_mutating_writes_without_ready_vvault(self):
         self.assertIn("isMutatingRequest(options)", self.auth_fetch)
-        self.assertIn("supabaseWriteBlockedResponse(url)", self.auth_fetch)
+        self.assertIn("vvaultWriteBlockedResponse(url)", self.auth_fetch)
+        self.assertIn("vvault_available: false", self.auth_fetch)
         self.assertIn("canonical: false", self.auth_fetch)
-        self.assertIn("storage_mode: 'none'", self.auth_fetch)
+        self.assertIn("storage_mode: 'vvault_body'", self.auth_fetch)
 
-    def test_status_indicator_uses_supabase_connection_state_not_shallow_health(self):
-        self.assertIn("refreshSupabaseConnectionState", self.app)
-        self.assertIn("SUPABASE_CONNECTION_EVENT", self.app)
-        self.assertIn("Supabase connected", self.app)
+    def test_status_indicator_uses_vvault_runtime_state_not_shallow_health(self):
+        self.assertIn("refreshVvaultRuntimeState", self.app)
+        self.assertIn("VVAULT_READY_EVENT", self.app)
+        self.assertIn("VVAULT ready", self.app)
         self.assertNotIn("fetch('/api/health')", self.app)
 
     def test_status_indicator_uses_slower_poll_while_degraded(self):
-        self.assertIn("SUPABASE_STATUS_CONNECTED_POLL_MS = 15000", self.app)
-        self.assertIn("SUPABASE_STATUS_DEGRADED_POLL_MS = 60000", self.app)
-        self.assertIn("nextDelay = connection.connected ? SUPABASE_STATUS_CONNECTED_POLL_MS : SUPABASE_STATUS_DEGRADED_POLL_MS", self.app)
+        self.assertIn("VVAULT_STATUS_READY_POLL_MS = 15000", self.app)
+        self.assertIn("VVAULT_STATUS_DEGRADED_POLL_MS = 60000", self.app)
+        self.assertIn("nextDelay = runtime.ready ? VVAULT_STATUS_READY_POLL_MS : VVAULT_STATUS_DEGRADED_POLL_MS", self.app)
         self.assertIn("timeoutId = setTimeout(checkStatus, nextDelay)", self.app)
         self.assertNotIn("setInterval(checkStatus, 15000)", self.app)
 
-    def test_startup_loading_gate_is_bounded_during_supabase_degradation(self):
+    def test_startup_loading_gate_is_bounded_during_vvault_degradation(self):
         self.assertIn("STARTUP_AUTH_TIMEOUT_MS = 2500", self.app)
         self.assertIn("STARTUP_STATUS_TIMEOUT_MS = 2500", self.app)
         self.assertIn("validateSession({ timeoutMs: STARTUP_AUTH_TIMEOUT_MS })", self.app)
@@ -110,9 +113,9 @@ class TestFrontendOutageContractStatic(unittest.TestCase):
     def test_auth_ready_probe_timeout_is_call_site_scoped(self):
         self.assertIn("fetchWithOptionalTimeout('/api/ready'", self.auth_fetch)
         self.assertIn("options.timeoutMs", self.auth_fetch)
-        self.assertIn("refreshSupabaseConnectionState({ timeoutMs: options.readyTimeoutMs })", self.auth_fetch)
+        self.assertIn("refreshVvaultRuntimeState({ timeoutMs: options.readyTimeoutMs })", self.auth_fetch)
         self.assertIn("fetchWithOptionalTimeout('/api/vault/user-info'", self.auth_fetch)
-        self.assertIn("const connection = await refreshSupabaseConnectionState();", self.auth_fetch)
+        self.assertIn("const runtime = await refreshVvaultRuntimeState();", self.auth_fetch)
 
     def test_session_expired_dispatch_is_deduped_and_local_authenticated_fetches_stop(self):
         self.assertIn("let sessionExpired = false;", self.auth_fetch)
@@ -131,17 +134,40 @@ class TestFrontendOutageContractStatic(unittest.TestCase):
         self.assertIn("if (cancelled || !userInfoOk) return;", self.vault_browser)
         self.assertIn("window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired)", self.vault_browser)
 
-    def test_google_login_blocks_before_redirect_when_identity_authority_unavailable(self):
+    def test_google_login_blocks_before_redirect_when_vvault_auth_unavailable(self):
         self.assertIn("fetch('/api/auth/google/health')", self.cinematic_login)
-        self.assertIn("!health.supabase_identity_authority_available", self.cinematic_login)
-        self.assertIn("Sign-in is blocked to protect immutable LIFE identity", self.cinematic_login)
+        self.assertIn("health.vvault_auth_ready === false", self.cinematic_login)
+        self.assertIn("Sign-in is blocked to protect local identity and session persistence", self.cinematic_login)
 
-        health_check = self.cinematic_login.index("!health.supabase_identity_authority_available")
+        health_check = self.cinematic_login.index("health.vvault_auth_ready === false")
         generic_health_error = self.cinematic_login.index("!healthResponse.ok")
         redirect = self.cinematic_login.index("window.location.href = '/api/auth/google'")
 
         self.assertLess(health_check, generic_health_error)
         self.assertLess(generic_health_error, redirect)
+
+    def test_scoped_frontend_no_longer_presents_supabase_as_runtime_truth(self):
+        scoped_sources = "\n".join([
+            self.auth_fetch,
+            self.vault_browser,
+            self.app,
+            self.cinematic_login,
+        ])
+        forbidden = [
+            "SUPABASE_OUTAGE_EVENT",
+            "SUPABASE_CONNECTION_EVENT",
+            "refreshSupabaseConnectionState",
+            "Supabase connected",
+            "supabase_identity_authority_available",
+            "Supabase is temporarily",
+            "Supabase identity authority",
+            "SUPABASE_NOT_CONNECTED",
+            "data.supabase_available",
+            "payload?.supabase_available",
+        ]
+        for token in forbidden:
+            with self.subTest(token=token):
+                self.assertNotIn(token, scoped_sources)
 
 
 if __name__ == "__main__":
