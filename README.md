@@ -6,12 +6,13 @@
 
 Canonical cross-product user registry spec: `docs/CANONICAL_CROSS_PRODUCT_USER_REGISTRY_SPEC.md`
 
-## Double Acronym
-
-Both VVAULT expansions are canonical:
-
-- **Voice & Vaulted Autonomy for Unfragmented Long-Term Tethering**: the continuity, voice, autonomy, and tethering layer.
-- **Verified Vectored Anatomy Unconsciously Lingering Together**: the product-domain model for protected anatomy bodies.
+**Voice & Vaulted Autonomy for Unfragmented Long-Term Tethering**: the continuity, voice, autonomy, and tethering layer.
+**Verified Vectored Anatomy Unconsciously Lingering Together**: the product-domain model for protected anatomy bodies.
+**Official Verified Vectored Anatomy Unconsciously Lingering Together Stance**
+VVAULT = local body database + VVAULT-native auth/session + VVAULT-native file/storage ownership + provenance-aware integrations
+- Vectored Anatomies (repositories)
+- Personal Files
+- Entire Databases
 
 ## Overview
 
@@ -37,7 +38,7 @@ Operator-facing launcher:
 
 The canonical launcher contract lives in `docs/VVAULT_STARTUP_CONTRACT.md`.
 
-Runtime closure is stricter than process health. Use `docs/operations/RUNTIME_CLOSURE_SUPABASE_CHECKLIST.md` to prove `/api/ready`, the Supabase steward, OAuth identity authority, and write blocking before calling VVAULT ready.
+Runtime closure is stricter than process health. Use `docs/operations/RUNTIME_CLOSURE_CHECKLIST.md` to prove `/api/ready`, local body database health, VVAULT-native auth/session readiness, file/storage ownership, and write blocking before calling VVAULT ready.
 
 If `vvault` still prints raw `npm run dev:full` logs instead of opening the browser, your current shell is probably still using the old repo alias. Run `source ~/.zshrc` or open a fresh terminal window, then try again.
 
@@ -120,7 +121,7 @@ This import is historical context for an early AI/VSI anatomy body. It does not 
 
 ## Compatibility Rules
 
-- Do not rename existing routes, folders, Supabase columns, `construct_id`, `instances`, `capsules`, or `vault_files` as part of product-language alignment.
+- Do not rename existing routes, folders, legacy provenance columns, `construct_id`, `instances`, `capsules`, or `vault_files` as part of product-language alignment.
 - Treat `construct_id` as the current compatibility subject key for AI/VSI anatomies.
 - Future neutral anatomy metadata, such as `anatomy_type` and `anatomy_id`, should be layered in without breaking current clients.
 - Construct and capsule language remains valid for feature/subtype descriptions, but not as the whole-product definition.

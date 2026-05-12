@@ -2,74 +2,75 @@
 
 ## Status
 
-Canonical runtime spec. This file defines live behavior for Chatty, VVAULT, Neat, and FXShinobi user identity routing.
+Canonical runtime spec. This file defines live VVAULT identity routing after the local auth/session cutover.
 
 ## Decision
 
-Use a hybrid model:
+Use a VVAULT-native identity model:
 
-1. Shared identity root in Supabase `users` table.
-2. Product-local registries and storage remain separate.
-3. Cross-product access resolves identity through Supabase first, then maps into product-local runtime paths.
+1. VVAULT account identity is stored in local Postgres under `ovvaults.users`.
+2. VVAULT sessions are stored in local Postgres under `ovvaults.sessions`.
+3. OAuth providers may verify external identity, but resulting users and sessions are persisted locally.
+4. Supabase user rows are legacy import/offboarding provenance only.
 
 ## Canonical Rules
 
-### 1) Shared Account Identity
+### 1) VVAULT Account Identity
 
-- Primary account identity is the Supabase `users.id` (UUID).
-- Email is the cross-product lookup key used to resolve or create a Supabase `users` row.
-- New app integrations must resolve Supabase user before performing product-specific user operations.
+- Primary VVAULT account identity is `ovvaults.users.id`.
+- Email is the lookup key used to resolve or create a VVAULT-local user row.
+- New VVAULT integrations must resolve local auth/session state before performing user operations.
+- Session tokens are owned by `ovvaults.sessions`; raw bearer tokens must not be stored.
 
 ### 2) Product-Local Registry Separation
 
-- Chatty may keep local registry artifacts (for example `users.json`, sharded folders, local profile materialization).
-- VVAULT may keep separate vault file structures and per-user construct paths.
-- Neat and FXShinobi may keep product-local user metadata for local features.
-- Product-local registries do not replace Supabase identity and must not create a conflicting global account model.
+- Chatty may keep local registry artifacts.
+- VVAULT keeps local body/file/auth state in VVAULT-owned storage.
+- Other products may keep product-local user metadata for local features.
+- Product-local registries must not silently override VVAULT's local account/session authority.
 
 ### 3) Mapping Contract
 
 - Logical contract:
-  - `supabase_user_id` = global identity root.
-  - `chatty_user_id` = Chatty-local runtime id (if present).
-  - `vvault_user_id` = VVAULT-local runtime id/path binding (if present).
-- If a local id exists, it must be linked to one `supabase_user_id`.
-- Do not introduce many-to-many identity mappings between local ids and Supabase users.
+  - `vvault_user_id` = VVAULT-local account id.
+  - `chatty_user_id` = Chatty-local runtime id when present.
+  - `legacy_supabase_user_id` = provenance pointer only when imported from Supabase.
+- If a legacy external id exists, it may be preserved as provenance, but it is not runtime authority.
+- Do not introduce many-to-many identity mappings between local ids and legacy imported ids.
 
 ### 4) Auth and Service-to-Service Calls
 
 - Service-to-service requests that cross product boundaries must carry authenticated user context.
 - For Chatty -> VVAULT bridge calls, pass user identity headers and validate service token when configured.
-- Runtime behavior must prefer authenticated identity resolution over filesystem fallback heuristics.
+- Runtime behavior must prefer authenticated local identity resolution over filesystem fallback heuristics.
 
 ### 5) Runtime Lock and Canonical Thread Safety
 
 - Check runtime lock state before write/hydration operations from VVAULT or connected services.
-- Canonical runtime threads (including Synth) must not be removed or overwritten during hydration/rehydration.
+- Canonical runtime threads must not be removed or overwritten during hydration/rehydration.
 - If canonical threads are missing at login/hydration, restore before routing continues.
 
-## Integration Requirements for Any New App
+## Integration Requirements for Any New VVAULT-Connected App
 
-1. Resolve/create Supabase user using authenticated email/session.
-2. Persist local app profile keyed by resolved `supabase_user_id`.
-3. Store local runtime artifacts in app-local paths only.
-4. When calling other products, send authenticated user context that can resolve back to the same `supabase_user_id`.
-5. Reject flows that bypass identity resolution and write directly into another product's user storage.
+1. Resolve the VVAULT user from local auth/session state.
+2. Persist app profile data keyed by the resolved local user id.
+3. Store local runtime artifacts in app-local or VVAULT-owned paths only.
+4. When calling other products, send authenticated user context that can resolve back to the VVAULT user.
+5. Reject flows that bypass local identity resolution and write directly into another product's user storage.
 
-## Non-Goals
+## Legacy Supabase Provenance
 
-- This spec does not force a single physical database for all product-local runtime data.
-- This spec does not remove local registries that existing products require for runtime behavior.
+Supabase `users` data may appear in imported manifests, old docs, test fixtures, and offboarding scripts. Treat it as historical source provenance unless a current VVAULT-native route explicitly maps it into `ovvaults.users`.
 
-## Credential login parity (VVAULT web)
+## Credential Login Parity
 
-VVAULT `/api/auth/login` returns the same hint flags as the rest of the LIFE stack when appropriate:
+VVAULT `/api/auth/login` returns hint flags for local credential parity when appropriate:
 
-- **`oauthOnly`** / **`credentialLoginUnavailable`** when Supabase user has no VVAULT password but **`auth_provider`** is OAuth.
-- **`lifeRegistryMatch`** when the row has **Chatty** `auth_password_hash` but no VVAULT `password_hash`, or no password fields at all — finish product sign-up instead of a generic invalid login.
+- **`oauthOnly`** / **`credentialLoginUnavailable`** when a VVAULT user is OAuth-only.
+- **`lifeRegistryMatch`** when legacy or imported identity evidence exists but no VVAULT password credential exists.
 
 Errors remain under **`success: false`** + **`error`** for the React login UI.
 
 ## Conflict Resolution
 
-If another document conflicts with this spec, this file wins. Update conflicting docs to align with this decision.
+If another document conflicts with this spec, this file wins for VVAULT runtime identity. Update conflicting docs to align with this decision.

@@ -10,7 +10,7 @@ Typing `vvault` in a terminal should:
 
 1. start VVAULT on `http://localhost:7784` if it is not already reachable
 2. reuse the existing local VVAULT process if the app is already live
-3. ensure the paired backend on `8000` is reachable and report whether strict `/api/ready` is connected or degraded
+3. ensure the paired backend on `8000` is reachable and report whether strict `/api/ready` is ready or degraded
 4. open the default browser to `http://localhost:7784`
 5. print:
 
@@ -49,16 +49,16 @@ vvault() {
 - `7784` = VVAULT frontend
 - `8000` = VVAULT backend API
 
-The operator-facing `vvault` command is about the browser entrypoint on `7784`, but runtime closure is stricter than process health. `/api/health` can prove the backend is alive. `/api/ready` proves canonical Supabase readiness.
+The operator-facing `vvault` command is about the browser entrypoint on `7784`, but runtime closure is stricter than process health. `/api/health` can prove the backend is alive. `/api/ready` proves VVAULT-native body/runtime readiness.
 
 ## Runtime readiness contract
 
 - `/api/status` proves the local backend process is alive.
 - `/api/health` may return a degraded process state.
-- `/api/ready` is the strict gate for canonical Supabase readiness.
-- VVAULT is ready only when `/api/ready` returns `200`, steward state is `connected`, `canonical` is `true`, and `storage_mode` is `supabase`.
-- If `/api/ready` returns `503`, VVAULT may be running in degraded mode, but login and canonical writes must remain blocked unless a route has an explicit durable queued receipt.
-- The operational closure loop lives in `docs/operations/RUNTIME_CLOSURE_SUPABASE_CHECKLIST.md`.
+- `/api/ready` is the strict gate for VVAULT-native runtime readiness.
+- VVAULT is ready only when `/api/ready` returns `200` and `body_database` reports healthy readable `ovvaults.vault_files` and `ovvaults.transcripts`.
+- If `/api/ready` returns `503`, VVAULT may be running in degraded mode, but unsafe writes and auth/session mutations must remain blocked unless a route has an explicit local durable receipt.
+- The operational closure loop lives in `docs/operations/RUNTIME_CLOSURE_CHECKLIST.md`.
 
 ## Anti-regression rules
 

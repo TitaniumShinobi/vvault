@@ -54,6 +54,28 @@ class RiskLevel(Enum):
     HIGH = "high"
     CRITICAL = "critical"
 
+
+# Privileged action event types (resilience / sabotage visibility)
+# High-risk events use AuditLevel.SECURITY and RiskLevel.CRITICAL.
+PRIVILEGED_EVENT_TYPES = frozenset({
+    "config_change",
+    "layer_change",
+    "secret_rotate",
+    "backup_delete",
+    "deploy",
+    "oauth_callback_change",
+    "env_change",
+    "role_change",
+    "mass_delete",
+})
+
+
+def get_privileged_event_severity(event_type: str) -> Tuple[AuditLevel, RiskLevel]:
+    """Return (AuditLevel, RiskLevel) for privileged event types."""
+    if event_type in PRIVILEGED_EVENT_TYPES:
+        return AuditLevel.SECURITY, RiskLevel.CRITICAL
+    return AuditLevel.INFO, RiskLevel.LOW
+
 @dataclass
 class AuditEvent:
     """Audit event record"""
@@ -1044,5 +1066,4 @@ if __name__ == "__main__":
     print(f"\n🔒 Active security alerts: {len(alerts)}")
     
     print("\n✅ Audit and compliance system ready!")
-
 

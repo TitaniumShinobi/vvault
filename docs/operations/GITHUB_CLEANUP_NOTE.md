@@ -8,7 +8,7 @@ Do not merge one giant mixed worktree. Split by contract.
 
 ## Safe Slices
 
-1. Runtime Supabase resilience and outbox contracts.
+1. VVAULT-native runtime readiness and retired legacy outbox contracts.
 2. OAuth/login/session bridge.
 3. Custom file preview.
 4. Launcher and local runtime.
@@ -31,8 +31,8 @@ Do not merge one giant mixed worktree. Split by contract.
 
 Before merge, prove:
 
-- focused Supabase/OAuth/outbox/frontend outage tests pass
+- focused VVAULT runtime/OAuth/legacy outbox/frontend dependency tests pass
 - focused preview tests pass
 - `python3 -m pytest tests/test_duplicate_name_audit.py` passes
 - webpack build check passes
-- `/api/ready` is either connected for release or explicitly documented as externally blocked by Supabase project database timeout
+- `/api/ready` is connected for release or explicitly documented as blocked by local VVAULT body database/runtime dependency health

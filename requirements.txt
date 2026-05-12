@@ -16,7 +16,7 @@ oauthlib>=3.2.0
 requests>=2.31.0
 
 # Database
-supabase>=2.0.0
+psycopg[binary]>=3.1,<4
 
 # Configuration
 python-dotenv>=1.0.0

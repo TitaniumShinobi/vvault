@@ -7,13 +7,22 @@ import Blockchain from './components/Blockchain';
 import Settings from './components/Settings';
 import CreateConstruct from './components/CreateConstruct';
 import CinematicLogin from './components/CinematicLogin';
-import { validateSession, SESSION_EXPIRED_EVENT, SUPABASE_CONNECTION_EVENT, finalizeAuthServiceLogin, markSessionActive, refreshSupabaseConnectionState } from './utils/authFetch';
+import {
+  validateSession,
+  SESSION_EXPIRED_EVENT,
+  VVAULT_READY_EVENT,
+  clearStoredPostgrestJwt,
+  finalizeAuthServiceLogin,
+  markSessionActive,
+  refreshPostgrestJwt,
+  refreshVvaultRuntimeState
+} from './utils/authFetch';
 import './App.css';
 
 const STARTUP_AUTH_TIMEOUT_MS = 2500;
 const STARTUP_STATUS_TIMEOUT_MS = 2500;
-const SUPABASE_STATUS_CONNECTED_POLL_MS = 15000;
-const SUPABASE_STATUS_DEGRADED_POLL_MS = 60000;
+const VVAULT_STATUS_READY_POLL_MS = 15000;
+const VVAULT_STATUS_DEGRADED_POLL_MS = 60000;
 
 async function fetchJsonWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
@@ -85,32 +94,32 @@ const Navigation = ({ user, onLogout }) => {
 
 // Status indicator component
 const StatusIndicator = () => {
-  const [status, setStatus] = useState({ online: false, loading: true, connection_state: 'unknown' });
+  const [status, setStatus] = useState({ online: false, loading: true, status: 'unknown' });
   
   useEffect(() => {
     let timeoutId = null;
     const checkStatus = async () => {
-      let nextDelay = SUPABASE_STATUS_DEGRADED_POLL_MS;
+      let nextDelay = VVAULT_STATUS_DEGRADED_POLL_MS;
       try {
-        const connection = await refreshSupabaseConnectionState();
-        setStatus({ online: connection.connected, loading: false, ...connection });
-        nextDelay = connection.connected ? SUPABASE_STATUS_CONNECTED_POLL_MS : SUPABASE_STATUS_DEGRADED_POLL_MS;
+        const runtime = await refreshVvaultRuntimeState();
+        setStatus({ online: runtime.ready, loading: false, ...runtime });
+        nextDelay = runtime.ready ? VVAULT_STATUS_READY_POLL_MS : VVAULT_STATUS_DEGRADED_POLL_MS;
       } catch (error) {
-        setStatus({ online: false, loading: false, connection_state: 'blocked', error: error.message });
+        setStatus({ online: false, loading: false, status: 'not_ready', error: error.message });
       } finally {
         timeoutId = setTimeout(checkStatus, nextDelay);
       }
     };
-    const onConnection = (event) => {
-      const connection = event.detail || {};
-      setStatus({ online: connection.connected === true, loading: false, ...connection });
+    const onRuntimeReady = (event) => {
+      const runtime = event.detail || {};
+      setStatus({ online: runtime.ready === true, loading: false, ...runtime });
     };
-    
-    window.addEventListener(SUPABASE_CONNECTION_EVENT, onConnection);
+
+    window.addEventListener(VVAULT_READY_EVENT, onRuntimeReady);
     checkStatus();
-    
+
     return () => {
-      window.removeEventListener(SUPABASE_CONNECTION_EVENT, onConnection);
+      window.removeEventListener(VVAULT_READY_EVENT, onRuntimeReady);
       clearTimeout(timeoutId);
     };
   }, []);
@@ -127,7 +136,7 @@ const StatusIndicator = () => {
   return (
     <div className={`status-indicator ${status.online ? 'status-success' : 'status-error'}`}>
       <span className="status-dot"></span>
-      <span>{status.online ? 'Supabase connected' : `Supabase ${status.connection_state || 'blocked'}`}</span>
+      <span>{status.online ? 'VVAULT ready' : `VVAULT ${status.status || 'not_ready'}`}</span>
     </div>
   );
 };
@@ -199,6 +208,7 @@ function App() {
                 const valid = await validateSession({ timeoutMs: STARTUP_AUTH_TIMEOUT_MS });
                 if (valid) {
                   markSessionActive();
+                  await refreshPostgrestJwt({ timeoutMs: STARTUP_AUTH_TIMEOUT_MS });
                   if (mounted) {
                     setUser(parsed);
                   }
@@ -257,6 +267,7 @@ function App() {
   const handleLogout = useCallback(() => {
     localStorage.removeItem('vvault_user');
     localStorage.removeItem('vvault_token');
+    clearStoredPostgrestJwt();
     setUser(null);
     fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
   }, []);

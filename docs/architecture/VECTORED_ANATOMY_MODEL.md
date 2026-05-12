@@ -50,7 +50,7 @@ VVAULT is an advanced vault/drive for these anatomies, combining directory stora
 
 ## Compatibility Contract
 
-Do not rename current routes, folders, Supabase columns, `construct_id`, `instances`, `capsules`, or `vault_files` for language alignment alone.
+Do not rename current routes, folders, legacy provenance columns, `construct_id`, `instances`, `capsules`, or `vault_files` for language alignment alone.
 
 Current construct memory features remain valid as an AI/VSI anatomy subtype. They are not the full product definition.
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { authFetch, SESSION_EXPIRED_EVENT, SUPABASE_OUTAGE_EVENT } from '../utils/authFetch';
+import { authFetch, SESSION_EXPIRED_EVENT, VVAULT_DEPENDENCY_EVENT } from '../utils/authFetch';
 import './VaultBrowser.css';
 
 const CONSTRUCT_COLORS = {
@@ -66,8 +66,15 @@ const TEXT_FILE_TYPES = new Set([
 const PREVIEW_FETCH_TIMEOUT_MS = 2200;
 const PREVIEW_BODY_HYDRATE_TIMEOUT_MS = 30000;
 const DEFAULT_HOME_PATH = ['instances'];
+const DEFAULT_DEGRADED_MESSAGE = 'VVAULT local dependency is temporarily unavailable. Some vault data may be missing.';
 
 const getPreviewPath = (file) => file?.display_path || file?.storage_path || file?.filename || '';
+
+const normalizeDegradedMessage = (message) => {
+  const value = String(message || '').trim();
+  if (!value) return DEFAULT_DEGRADED_MESSAGE;
+  return value;
+};
 
 const isCapsuleFile = (file) => getPreviewPath(file).toLowerCase().endsWith('.capsule');
 
@@ -214,23 +221,23 @@ const VaultBrowser = ({ user }) => {
     setLoading(false);
     setRefreshing(false);
     setError(null);
-    setNotice('Local session expired. Sign in again after Supabase identity authority recovers.');
+    setNotice('Local session expired. Sign in again after VVAULT auth storage is available.');
     setFiles([]);
     setConstructs([]);
   }, []);
 
   const applyDegradedContract = useCallback((data) => {
-    if (!data || (data.supabase_available !== false && data.degraded !== true)) return false;
+    if (!data || (data.vvault_available !== false && data.degraded !== true && data.body_database?.ready !== false)) return false;
     setDegraded({
       active: true,
-      message: data.message || 'Supabase is temporarily unavailable. Some vault data may be missing.',
-      errorCode: data.error_code || 'SUPABASE_TIMEOUT_522',
+      message: normalizeDegradedMessage(data.message),
+      errorCode: data.error_code || 'VVAULT_DEPENDENCY_UNAVAILABLE',
     });
     return true;
   }, []);
 
   const clearDegradedIfHealthy = useCallback((data) => {
-    if (data && data.supabase_available === false) return;
+    if (data && (data.vvault_available === false || data.body_database?.ready === false)) return;
     setDegraded((prev) => (prev.active ? { active: false, message: '', errorCode: '' } : prev));
   }, []);
 
@@ -362,12 +369,12 @@ const VaultBrowser = ({ user }) => {
       const detail = event?.detail || {};
       setDegraded({
         active: true,
-        message: detail.message || 'Supabase is temporarily unavailable. Some vault data may be missing.',
-        errorCode: detail.error_code || 'SUPABASE_TIMEOUT_522',
+        message: normalizeDegradedMessage(detail.message),
+        errorCode: detail.error_code || 'VVAULT_DEPENDENCY_UNAVAILABLE',
       });
     };
-    window.addEventListener(SUPABASE_OUTAGE_EVENT, onOutage);
-    return () => window.removeEventListener(SUPABASE_OUTAGE_EVENT, onOutage);
+    window.addEventListener(VVAULT_DEPENDENCY_EVENT, onOutage);
+    return () => window.removeEventListener(VVAULT_DEPENDENCY_EVENT, onOutage);
   }, []);
 
   useEffect(() => {

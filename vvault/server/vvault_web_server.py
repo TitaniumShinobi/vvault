@@ -46,26 +46,10 @@ import time
 import secrets
 import base64
 import jwt
+import bcrypt
 from datetime import datetime, timedelta, timezone
 import requests  # For Turnstile verification
 from oauthlib.oauth2 import WebApplicationClient
-
-# Supabase client for vault files
-try:
-    from supabase import create_client
-    SUPABASE_URL = os.environ.get("SUPABASE_URL")
-    SUPABASE_SERVICE_ROLE_KEY = (
-        os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-        or os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
-    )
-    SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "").strip()
-    SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
-    supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
-except Exception as e:
-    SUPABASE_SERVICE_ROLE_KEY = ""
-    SUPABASE_ANON_KEY = ""
-    supabase_client = None
-    print(f"Supabase not configured: {e}")
 
 _server_dir = os.path.dirname(os.path.abspath(__file__))
 if _server_dir not in sys.path:
@@ -85,19 +69,9 @@ from vvault.security.pocketverse_guard import (
     enforce_pocketverse_authority,
     PocketverseAuthorityError,
 )
-from supabase_connection_steward import SupabaseConnectionSteward
-from supabase_write_outbox import DurableSupabaseWriteOutbox, UNSUPPORTED_OUTBOX_ITEM, VAULT_FILE_UPSERT
-
-
-def _refresh_supabase_client():
-    """Recreate the Supabase client without exposing config values."""
-    global supabase_client
-    creator = globals().get("create_client")
-    if not creator or not SUPABASE_URL or not SUPABASE_KEY:
-        supabase_client = None
-        return None
-    supabase_client = creator(SUPABASE_URL, SUPABASE_KEY)
-    return supabase_client
+import chatty_body_service
+import vvault_auth_repository
+import vvault_file_repository
 
 
 def _pocketverse_request_context():
@@ -108,10 +82,10 @@ def _pocketverse_request_context():
         "email": email,
         "user_id": cu.get("id") or email,
         "session_user": cu,
-        "supabase_client": supabase_client,
+        "metadata_loader": _load_pocketverse_metadata_from_body,
     }
 
-def _is_supabase_uuid(value: Optional[str]) -> bool:
+def _is_uuid(value: Optional[str]) -> bool:
     return bool(
         isinstance(value, str)
         and re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$', value.strip(), re.I)
@@ -224,25 +198,46 @@ def _is_canonical_mutating_request() -> bool:
         return False
     if path == "/api/vault/files/preview" and request.method == "POST":
         return False
+    if path == "/api/vault/knowledge-files/upload" and request.method == "POST":
+        return False
+    if path.startswith("/api/vault/knowledge-files/") and request.method == "DELETE":
+        return False
+    if path == "/api/vault/simdrive/write" and request.method == "POST":
+        return False
+    if path == "/api/vault/simdrive/inject" and request.method == "POST":
+        return False
     if path == "/api/vault/system-files" and request.method == "POST":
         return False
     if path == "/api/vault/system-files/outbox/replay" and request.method == "POST":
         return False
+    if path in {"/api/vault/memup/sync", "/api/vault/memup/materialize"} and request.method == "POST":
+        return False
+    if path.startswith("/api/vault/configs/") and request.method == "POST":
+        return False
+    if path.startswith("/api/vault/constructs/") and path.endswith("/editor") and request.method == "PUT":
+        return False
+    if path.startswith("/api/vault/constructs/") and path.endswith("/identity-projection/project") and request.method == "POST":
+        return False
+    if path.startswith("/api/chatty/construct/") and path.endswith("/ledger/generate") and request.method == "POST":
+        return False
+    if path.startswith("/api/chatty/transcript/") and request.method == "POST":
+        return False
+    if path == "/api/chatty/message" and request.method == "POST":
+        return False
     return (
         path.startswith("/api/vault/")
         or path.startswith("/api/chatty/")
-        or path in {"/api/auth/login", "/api/auth/register"}
     )
 
 
 @app.before_request
-def _gate_supabase_canonical_writes():
+def _gate_vvault_canonical_writes():
     if not _is_canonical_mutating_request():
         return None
-    allowed, state = SUPABASE_STEWARD.allow_write()
-    if allowed:
+    body_status = _body_database_dependency_status()
+    if body_status.get("ready"):
         return None
-    return _supabase_write_block_response(request.path, state=state)
+    return _vvault_write_block_response(request.path, dependency_status=body_status)
 
 # Rate limiting for auth and admin (in-memory, per IP)
 _RATE_LIMIT_LOCK = threading.Lock()
@@ -406,56 +401,150 @@ def _get_backend_url(default: str = None) -> str:
     return backend_url.rstrip("/")
 
 
-def _get_supabase_mode() -> str:
-    if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
-        return "healthy"
-    if SUPABASE_URL and SUPABASE_ANON_KEY:
-        return "degraded"
-    return "broken"
+def _dependency_error_code(exc: Exception) -> str:
+    """Return a sanitized dependency error code without leaking config values."""
+    return type(exc).__name__
 
 
-def _get_supabase_status() -> Dict[str, Any]:
-    mode = _get_supabase_mode()
-    status = {
-        "mode": mode,
-        "available": bool(supabase_client),
-        "configured": bool(SUPABASE_URL and SUPABASE_KEY),
-        "using_service_role": bool(SUPABASE_SERVICE_ROLE_KEY),
-        "using_anon_key": bool(SUPABASE_ANON_KEY and not SUPABASE_SERVICE_ROLE_KEY),
+def _body_database_dependency_status() -> Dict[str, Any]:
+    """Check VVAULT-native body database readiness without remote runtime authority."""
+    status: Dict[str, Any] = {
+        "required": True,
+        "ready": False,
+        "status": "unhealthy",
+        "configured": False,
+        "schema": getattr(chatty_body_service, "BODY_SCHEMA", "ovvaults"),
+        "source_database": None,
+        "checks": {
+            "vault_files_readable": False,
+            "transcripts_readable": False,
+        },
     }
-    steward = globals().get("SUPABASE_STEWARD")
-    if steward:
-        status["connection"] = steward.snapshot()
-        status["available"] = steward.is_connected()
-        status["mode"] = "healthy" if steward.is_connected() else status["connection"].get("connection_state", mode)
+    try:
+        url = chatty_body_service.database_url()
+        status["configured"] = bool(url)
+        status["source_database"] = chatty_body_service.source_database_name(url)
+        if not url:
+            raise RuntimeError("VVAULT body database URL is unavailable")
+
+        with chatty_body_service._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM vault_files LIMIT 1")
+                status["checks"]["vault_files_readable"] = True
+                cur.execute("SELECT 1 FROM transcripts LIMIT 1")
+                status["checks"]["transcripts_readable"] = True
+
+        status["ready"] = True
+        status["status"] = "healthy"
+    except Exception as exc:
+        status["ready"] = False
+        status["status"] = "unhealthy"
+        status["error_code"] = _dependency_error_code(exc)
     return status
 
 
-SUPABASE_STEWARD = SupabaseConnectionSteward(
-    get_client=lambda: supabase_client,
-    refresh_client=_refresh_supabase_client,
-    is_configured=lambda: bool(SUPABASE_URL and SUPABASE_KEY),
-    using_service_role=lambda: bool(SUPABASE_SERVICE_ROLE_KEY),
-    logger=logger,
-    heartbeat_interval_seconds=float(os.environ.get("VVAULT_SUPABASE_HEARTBEAT_SECONDS", "15")),
-    probe_timeout_seconds=float(os.environ.get("VVAULT_SUPABASE_PROBE_TIMEOUT_SECONDS", "8")),
-)
+def _storage_dependency_metadata() -> Dict[str, Any]:
+    """Report VVAULT-native object storage config metadata without probing it yet."""
+    required_keys = ["S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"]
+    configured = all(bool(os.environ.get(key)) for key in required_keys)
+    return {
+        "required_for_readiness": False,
+        "configured": configured,
+        "status": "configured" if configured else "unconfigured",
+        "bucket_configured": bool(os.environ.get("S3_BUCKET")),
+        "provider": "s3_compatible",
+    }
 
-SUPABASE_WRITE_OUTBOX = DurableSupabaseWriteOutbox(
-    Path(os.environ.get("VVAULT_SUPABASE_WRITE_OUTBOX_PATH", _repo_root / "vvault" / "data" / "supabase_write_outbox.json")),
-    steward=SUPABASE_STEWARD,
-)
+
+def _auth_dependency_metadata() -> Dict[str, Any]:
+    """Report auth-adjacent runtime config metadata without making it readiness-blocking."""
+    service_api_configured = bool(globals().get("VVAULT_SERVICE_TOKEN"))
+    google_oauth_configured = _google_oauth_ready()
+    auth_status = _auth_repository_status()
+    return {
+        "required_for_readiness": False,
+        "status": auth_status.get("status") or "unknown",
+        "ready": bool(auth_status.get("ready")),
+        "auth_owner": auth_status.get("auth_owner") or AUTH_OWNER,
+        "session_owner": auth_status.get("session_owner") or SESSION_OWNER,
+        "source_database": auth_status.get("source_database"),
+        "error_code": auth_status.get("error_code"),
+        "service_api": {
+            "configured": service_api_configured,
+        },
+        "google_oauth": {
+            "configured": google_oauth_configured,
+            "callback_route": "/api/auth/google/callback",
+        },
+    }
+
+
+def _runtime_metadata() -> Dict[str, Any]:
+    return {
+        "server_pid": os.getpid(),
+        "repo_root": str(_repo_root),
+        "started_at": SERVER_STARTED_AT,
+        "log_configured": bool(os.environ.get("VVAULT_LOG") or os.environ.get("VVAULT_DEVFULL_LOG")),
+    }
+
+
+def _get_vvault_runtime_status() -> Dict[str, Any]:
+    body_database = _body_database_dependency_status()
+    ready = bool(body_database.get("ready"))
+    return {
+        "ready": ready,
+        "status": "ready" if ready else "not_ready",
+        "runtime": _runtime_metadata(),
+        "body_database": body_database,
+        "storage": _storage_dependency_metadata(),
+        "auth": _auth_dependency_metadata(),
+    }
+
+
+AUTH_REPOSITORY = vvault_auth_repository.VVaultAuthRepository()
+AUTH_OWNER = vvault_auth_repository.AUTH_OWNER
+SESSION_OWNER = vvault_auth_repository.SESSION_OWNER
+VAULT_FILE_REPOSITORY = vvault_file_repository.VVaultFileRepository(auth_repository=AUTH_REPOSITORY)
+VAULT_FILE_OWNER = vvault_file_repository.FILE_OWNER
+VAULT_STORAGE_OWNER = vvault_file_repository.STORAGE_OWNER
+UNSUPPORTED_OUTBOX_ITEM = "UNSUPPORTED_OUTBOX_ITEM"
+VAULT_FILE_UPSERT = "vault_file_upsert"
 
 SYSTEM_FILE_OUTBOX_MUTABLE_FIELDS = ["content", "file_type", "filename", "metadata", "sha256", "updated_at"]
 SYSTEM_FILE_OUTBOX_IDENTITY_FIELDS = ["storage_path", "is_system", "user_id"]
+
+
+def _load_pocketverse_metadata_from_body(construct_id: str) -> Optional[Dict[str, Any]]:
+    callsign = (construct_id or "").strip().lower()
+    if not callsign:
+        return None
+    bare_name = _bare_name_from_callsign(callsign)
+    rows = VAULT_FILE_REPOSITORY.list_construct_identity_rows(
+        callsign=callsign,
+        bare_name=bare_name,
+        user_id=None,
+    )
+    for row in rows:
+        path = str(row.get("storage_path") or row.get("filename") or "").lower()
+        if not path.endswith("/metadata.json"):
+            continue
+        content = row.get("content")
+        if isinstance(content, str) and content.strip():
+            parsed = _safe_json_loads(content)
+            if isinstance(parsed, dict):
+                return parsed
+        metadata = row.get("metadata")
+        if isinstance(metadata, dict) and metadata:
+            return metadata
+    return None
 
 
 def _is_admin_email(email: Optional[str]) -> bool:
     return bool(email and email.strip().lower() in VVAULT_ADMIN_EMAILS)
 
 
-def _resolve_user_role(email: Optional[str], supabase_user: Optional[Dict] = None, fallback_user: Optional[Dict] = None) -> str:
-    for candidate in (supabase_user, fallback_user):
+def _resolve_user_role(email: Optional[str], local_user: Optional[Dict] = None, fallback_user: Optional[Dict] = None) -> str:
+    for candidate in (local_user, fallback_user):
         if candidate and candidate.get('role'):
             return candidate['role']
     if _is_admin_email(email):
@@ -463,23 +552,51 @@ def _resolve_user_role(email: Optional[str], supabase_user: Optional[Dict] = Non
     return 'user'
 
 
-def _upsert_supabase_user_record(user_id: str, email: str, name: str, role: str) -> None:
-    record = {
-        'id': user_id,
-        'email': email,
-        'name': name,
-    }
-    if role:
-        record['role'] = role
+def _session_token_hash(token: str) -> str:
+    return vvault_auth_repository.hash_session_token(token, app.config.get("SECRET_KEY", ""))
 
-    try:
-        supabase_client.table('users').insert(record).execute()
-    except Exception as insert_err:
-        if 'role' in str(insert_err):
-            record.pop('role', None)
-            supabase_client.table('users').insert(record).execute()
-        else:
-            raise
+
+def _auth_repository_status() -> Dict[str, Any]:
+    return AUTH_REPOSITORY.healthcheck()
+
+
+def _auth_repository_ready() -> bool:
+    return bool(_auth_repository_status().get("ready"))
+
+
+def _auth_repository_unavailable_response(route: str):
+    status = _auth_repository_status()
+    logger.warning(
+        "VVAULT_AUTH_UNAVAILABLE route=%s auth_owner=%s session_owner=%s error_code=%s",
+        route,
+        status.get("auth_owner") or AUTH_OWNER,
+        status.get("session_owner") or SESSION_OWNER,
+        status.get("error_code"),
+    )
+    return jsonify({
+        "success": False,
+        "error": "VVAULT auth database is unavailable",
+        "error_code": "VVAULT_AUTH_UNAVAILABLE",
+        "auth_owner": status.get("auth_owner") or AUTH_OWNER,
+        "session_owner": status.get("session_owner") or SESSION_OWNER,
+    }), 503
+
+
+def _oauth_auth_unavailable_redirect(frontend_url: str):
+    from flask import redirect
+    from urllib.parse import quote
+
+    error_message = quote(
+        "Google sign-in cannot complete because VVAULT auth storage is unavailable. Please retry after recovery.",
+        safe="",
+    )
+    logger.warning(
+        "GOOGLE_OAUTH_BLOCKED dependency=vvault_auth contract=identity_fail_closed auth_owner=%s session_owner=%s ts=%s",
+        AUTH_OWNER,
+        SESSION_OWNER,
+        datetime.now(timezone.utc).isoformat(),
+    )
+    return redirect(f"{frontend_url}/?oauth_error={error_message}")
 
 
 def _fetch_all_rows(query_factory, page_size: int = 1000) -> List[Dict[str, Any]]:
@@ -504,66 +621,11 @@ def _fetch_scoped_vault_rows(
     is_admin: bool,
     page_size: int = 1000,
 ) -> List[Dict[str, Any]]:
-    normalized_path = str(requested_path or "").strip().strip("/")
-    if not normalized_path:
-        return []
-
-    select_columns = 'id, user_id, is_system, filename, storage_path, construct_id, file_type, metadata, created_at'
-
-    def _page_query(query_factory):
-        rows: List[Dict[str, Any]] = []
-        offset = 0
-        while True:
-            result = query_factory().range(offset, offset + page_size - 1).execute()
-            batch = result.data or []
-            rows.extend(batch)
-            if len(batch) < page_size:
-                break
-            offset += page_size
-        return rows
-
-    def _apply_user_scope(query):
-        if is_admin:
-            return query
-        return query.eq('user_id', user_id).eq('is_system', False)
-
-    if normalized_path == "instances":
-        return []
-
-    if normalized_path.startswith("instances/"):
-        parts = normalized_path.split("/")
-        if len(parts) < 2 or not parts[1]:
-            return []
-        construct_id = parts[1]
-
-        def _construct_query():
-            query = supabase_client.table('vault_files').select(select_columns).eq('construct_id', construct_id)
-            return _apply_user_scope(query)
-
-        return _page_query(_construct_query)
-
-    top_level = normalized_path.split("/", 1)[0]
-    if top_level not in {"library", "account", "system"}:
-        return []
-
-    rows: List[Dict[str, Any]] = []
-    seen_ids = set()
-    prefix_pattern = f"{normalized_path}%"
-
-    for field_name in ("filename", "storage_path"):
-        def _prefix_query(field_name=field_name):
-            query = supabase_client.table('vault_files').select(select_columns).ilike(field_name, prefix_pattern)
-            return _apply_user_scope(query)
-
-        for row in _page_query(_prefix_query):
-            row_id = row.get('id')
-            dedupe_key = row_id or f"{row.get('filename')}|{row.get('storage_path')}"
-            if dedupe_key in seen_ids:
-                continue
-            seen_ids.add(dedupe_key)
-            rows.append(row)
-
-    return rows
+    return VAULT_FILE_REPOSITORY.list_for_browser(
+        user_id=user_id,
+        is_admin=is_admin,
+        requested_path=requested_path,
+    )
 
 
 def _parse_vault_timestamp(value: Optional[str]) -> float:
@@ -641,7 +703,6 @@ def _dedupe_vault_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _upsert_vault_file_record(record: Dict[str, Any], *, context: str) -> Dict[str, Any]:
-    global _VAULT_FILES_HAS_UPDATED_AT
     logical_path = (record.get('storage_path') or record.get('filename') or '').strip()
     if not logical_path:
         raise ValueError("Vault file record is missing filename/storage_path")
@@ -649,82 +710,26 @@ def _upsert_vault_file_record(record: Dict[str, Any], *, context: str) -> Dict[s
     record = dict(record)
     record['filename'] = logical_path
     record['storage_path'] = logical_path
-
-    def _existing_rows_query(include_updated_at: bool):
-        columns = _select_with_optional_updated_at(
-            'id, created_at, updated_at, content, filename, storage_path',
-            include_updated_at,
-        )
-        query = supabase_client.table('vault_files').select(columns)
-        query = query.eq('filename', logical_path)
-
-        construct_id = record.get('construct_id')
-        if construct_id:
-            query = query.eq('construct_id', construct_id)
-
-        user_id = record.get('user_id')
-        if user_id is None:
-            query = query.is_('user_id', 'null')
-        else:
-            query = query.eq('user_id', user_id)
-        return query.execute().data or []
-
-    try:
-        existing_rows = _existing_rows_query(_VAULT_FILES_HAS_UPDATED_AT is not False)
-        if _VAULT_FILES_HAS_UPDATED_AT is None:
-            _VAULT_FILES_HAS_UPDATED_AT = True
-    except Exception as err:
-        if _is_missing_updated_at_error(err):
-            _VAULT_FILES_HAS_UPDATED_AT = False
-            existing_rows = _existing_rows_query(False)
-        else:
-            raise
-    if existing_rows:
-        canonical = existing_rows[0]
-        for row in existing_rows[1:]:
-            canonical = _choose_preferred_vault_row(canonical, row)
-        duplicate_ids = [row['id'] for row in existing_rows if row['id'] != canonical['id']]
-        update_payload = dict(record)
-        update_payload.pop('created_at', None)
-        _vault_files_write_with_optional_updated_at('update', update_payload, record_id=canonical['id'])
-        for duplicate_id in duplicate_ids:
-            supabase_client.table('vault_files').delete().eq('id', duplicate_id).execute()
-        if duplicate_ids:
-            logger.warning(
-                "VFILE_DEDUP: context=%s path=%s canonical_id=%s removed_duplicates=%s",
-                context,
-                logical_path,
-                canonical['id'],
-                len(duplicate_ids),
-            )
-        return {
-            'action': 'updated',
-            'id': canonical['id'],
-            'deduped': len(duplicate_ids),
-            'path': logical_path,
-        }
-
-    insert_result = _vault_files_write_with_optional_updated_at('insert', record)
-    inserted = (insert_result.data or [{}])[0]
-    return {
-        'action': 'created',
-        'id': inserted.get('id'),
-        'deduped': 0,
-        'path': logical_path,
-    }
+    result = VAULT_FILE_REPOSITORY.upsert(record)
+    logger.info(
+        "VFILE_LOCAL_UPSERT: context=%s action=%s path=%s id=%s",
+        context,
+        result.get('action'),
+        logical_path,
+        result.get('id'),
+    )
+    return result
 
 
-def _supabase_unavailable_response(message: str, *, include_constructs: bool = False):
-    connection = SUPABASE_STEWARD.snapshot()
+def _vvault_unavailable_response(message: str, *, include_constructs: bool = False):
     payload = {
         "success": True,
-        "supabase_available": False,
+        "vvault_available": False,
         "degraded": True,
         "canonical": False,
-        "storage_mode": connection.get("storage_mode") or "none",
-        "connection_state": connection.get("connection_state"),
-        "outage_id": connection.get("outage_id"),
-        "error_code": "SUPABASE_UNAVAILABLE",
+        "storage_mode": "vvault_body",
+        "storage_owner": VAULT_FILE_OWNER,
+        "error_code": "VVAULT_BODY_UNAVAILABLE",
         "message": message,
     }
     if include_constructs:
@@ -734,7 +739,7 @@ def _supabase_unavailable_response(message: str, *, include_constructs: bool = F
     return jsonify(payload)
 
 
-def _is_supabase_upstream_timeout(error: Exception) -> bool:
+def _is_dependency_timeout(error: Exception) -> bool:
     def _iter_chain(root: Exception, limit: int = 8):
         seen = set()
         current = root
@@ -778,8 +783,7 @@ def _is_supabase_upstream_timeout(error: Exception) -> bool:
             "timed out",
             "timeout",
             "json could not be generated",
-            "supabase.co",
-            "supabase timeout",
+            "connection timeout",
         )
         if any(signal in lowered for signal in signals):
             return True
@@ -787,33 +791,26 @@ def _is_supabase_upstream_timeout(error: Exception) -> bool:
     return False
 
 
-def _supabase_timeout_message() -> str:
+def _dependency_timeout_message() -> str:
     return (
-        "Supabase is temporarily unreachable (522 timeout). "
-        "Vault data is temporarily unavailable; please retry in a few minutes."
+        "VVAULT local persistence is temporarily unavailable. "
+        "Canonical writes remain blocked until local readiness is restored."
     )
 
 
-def _log_supabase_outage(route: str, contract: str, status_code: int, error_code: str) -> None:
-    connection = SUPABASE_STEWARD.snapshot()
+def _log_vvault_dependency_outage(route: str, contract: str, status_code: int, error_code: str) -> None:
     logger.warning(
-        "SUPABASE_OUTAGE route=%s operation=dependency dependency=supabase upstream_class=supabase_timeout_522 "
-        "contract=%s status=%s error_code=%s connection_state=%s latency_ms=%s retry_count=0 "
-        "recovery_proven=%s storage_mode=%s canonical=false outage_id=%s ts=%s",
+        "VVAULT_DEPENDENCY_OUTAGE route=%s operation=dependency dependency=body_database "
+        "contract=%s status=%s error_code=%s storage_mode=vvault_body canonical=false ts=%s",
         route,
         contract,
         status_code,
         error_code,
-        connection.get("connection_state"),
-        connection.get("latency_ms"),
-        bool(connection.get("recovery_proven_at")),
-        connection.get("storage_mode") or "none",
-        connection.get("outage_id"),
         datetime.now(timezone.utc).isoformat(),
     )
 
 
-def _supabase_timeout_response(
+def _dependency_timeout_response(
     route: str,
     *,
     status_code: int,
@@ -823,17 +820,15 @@ def _supabase_timeout_response(
     include_files: bool = False,
     extra: Optional[Dict[str, Any]] = None,
 ):
-    error_code = "SUPABASE_TIMEOUT_522"
-    connection = SUPABASE_STEWARD.snapshot()
+    error_code = "VVAULT_DEPENDENCY_TIMEOUT"
     payload = {
-        "supabase_available": False,
+        "vvault_available": False,
         "degraded": True,
         "canonical": False,
-        "storage_mode": connection.get("storage_mode") or "none",
-        "connection_state": connection.get("connection_state"),
-        "outage_id": connection.get("outage_id"),
+        "storage_mode": "vvault_body",
+        "storage_owner": VAULT_FILE_OWNER,
         "error_code": error_code,
-        "message": _supabase_timeout_message(),
+        "message": _dependency_timeout_message(),
     }
     if include_success:
         payload["success"] = status_code < 400
@@ -844,18 +839,18 @@ def _supabase_timeout_response(
     if extra:
         payload.update(extra)
 
-    _log_supabase_outage(route, contract, status_code, error_code)
+    _log_vvault_dependency_outage(route, contract, status_code, error_code)
     return jsonify(payload), status_code
 
 
-def _supabase_timeout_read_response(
+def _dependency_timeout_read_response(
     route: str,
     *,
     include_constructs: bool = False,
     include_files: bool = False,
     extra: Optional[Dict[str, Any]] = None,
 ):
-    return _supabase_timeout_response(
+    return _dependency_timeout_response(
         route,
         status_code=200,
         contract="soft_degrade",
@@ -866,8 +861,8 @@ def _supabase_timeout_read_response(
     )
 
 
-def _supabase_timeout_write_response(route: str, *, extra: Optional[Dict[str, Any]] = None):
-    return _supabase_timeout_response(
+def _dependency_timeout_write_response(route: str, *, extra: Optional[Dict[str, Any]] = None):
+    return _dependency_timeout_response(
         route,
         status_code=503,
         contract="strict_503",
@@ -875,48 +870,40 @@ def _supabase_timeout_write_response(route: str, *, extra: Optional[Dict[str, An
     )
 
 
-def _supabase_write_block_response(route: str, *, state: Optional[Dict[str, Any]] = None):
-    connection = state or SUPABASE_STEWARD.snapshot()
-    error_code = connection.get("last_error_code") or "SUPABASE_NOT_CONNECTED"
-    outage_id = connection.get("outage_id") or str(uuid4())
+def _vvault_write_block_response(route: str, *, dependency_status: Optional[Dict[str, Any]] = None):
+    status = dependency_status or _body_database_dependency_status()
+    error_code = status.get("error_code") or "VVAULT_NOT_READY"
     logger.warning(
-        "SUPABASE_WRITE_BLOCKED route=%s operation=write dependency=supabase "
-        "connection_state=%s error_code=%s status=503 latency_ms=%s retry_count=0 "
-        "recovery_proven=%s storage_mode=none canonical=false outage_id=%s ts=%s",
+        "VVAULT_WRITE_BLOCKED route=%s operation=write dependency=body_database "
+        "error_code=%s status=503 storage_mode=vvault_body canonical=false ts=%s",
         route,
-        connection.get("connection_state"),
         error_code,
-        connection.get("latency_ms"),
-        bool(connection.get("recovery_proven_at")),
-        outage_id,
         datetime.now(timezone.utc).isoformat(),
     )
     return jsonify({
         "success": False,
-        "supabase_available": False,
+        "vvault_available": False,
         "degraded": True,
         "canonical": False,
-        "storage_mode": "none",
-        "connection_state": connection.get("connection_state"),
-        "outage_id": outage_id,
+        "storage_mode": "vvault_body",
+        "storage_owner": VAULT_FILE_OWNER,
         "error_code": error_code,
-        "message": "Supabase is not currently connected. Canonical writes are blocked until recovery is proven.",
+        "message": "VVAULT local persistence is unavailable; canonical writes remain blocked.",
     }), 503
 
 
-def _supabase_read_block_response(route: str, *, state: Optional[Dict[str, Any]] = None):
-    connection = state or SUPABASE_STEWARD.snapshot()
-    error_code = connection.get("last_error_code") or "SUPABASE_NOT_CONNECTED"
+def _vvault_read_block_response(route: str, *, dependency_status: Optional[Dict[str, Any]] = None):
+    status = dependency_status or _body_database_dependency_status()
+    error_code = status.get("error_code") or "VVAULT_NOT_READY"
     payload = {
         "success": True,
-        "supabase_available": False,
+        "vvault_available": False,
         "degraded": True,
         "canonical": False,
-        "storage_mode": "none",
-        "connection_state": connection.get("connection_state"),
-        "outage_id": connection.get("outage_id"),
+        "storage_mode": "vvault_body",
+        "storage_owner": VAULT_FILE_OWNER,
         "error_code": error_code,
-        "message": "Supabase is not currently connected. Canonical reads are unavailable until recovery is proven.",
+        "message": "VVAULT local persistence is unavailable; canonical reads are unavailable.",
     }
     status_code = 503
     if route == "/api/vault/files" or route.startswith("/api/vault/files?"):
@@ -938,16 +925,11 @@ def _supabase_read_block_response(route: str, *, state: Optional[Dict[str, Any]]
         })
         status_code = 200
     logger.warning(
-        "SUPABASE_READ_BLOCKED route=%s operation=read dependency=supabase "
-        "connection_state=%s error_code=%s status=%s latency_ms=%s retry_count=0 "
-        "recovery_proven=%s storage_mode=none canonical=false outage_id=%s ts=%s",
+        "VVAULT_READ_BLOCKED route=%s operation=read dependency=body_database "
+        "error_code=%s status=%s storage_mode=vvault_body canonical=false ts=%s",
         route,
-        connection.get("connection_state"),
         error_code,
         status_code,
-        connection.get("latency_ms"),
-        bool(connection.get("recovery_proven_at")),
-        connection.get("outage_id"),
         datetime.now(timezone.utc).isoformat(),
     )
     return jsonify(payload), status_code
@@ -1035,27 +1017,17 @@ def _identity_projection_select_columns(include_content: bool = False) -> str:
 
 
 def _query_construct_identity_projection_pool(callsign: str, bare_name: str) -> List[Dict[str, Any]]:
-    query = (
-        supabase_client.table('vault_files')
-        .select(_identity_projection_select_columns())
-        .or_(f'construct_id.eq.{callsign},construct_id.eq.{bare_name}')
-        .not_.is_('filename', 'null')
-        .limit(5000)
+    return VAULT_FILE_REPOSITORY.list_construct_file_rows(
+        callsign=callsign,
+        bare_name=bare_name,
+        user_id=None,
+        include_content=False,
     )
-    return query.execute().data or []
 
 
 def _load_identity_projection_content(file_id: str) -> Any:
-    result = (
-        supabase_client.table('vault_files')
-        .select('content')
-        .eq('id', file_id)
-        .limit(1)
-        .execute()
-    )
-    if result.data:
-        return result.data[0].get('content')
-    return None
+    row = VAULT_FILE_REPOSITORY.get_by_id(file_id)
+    return row.get('content') if row else None
 
 
 def _normalize_identity_projection_text(value: Any) -> str:
@@ -1256,19 +1228,7 @@ def _read_identity_projection_snapshot(construct_id: str) -> Dict[str, Any]:
 
 
 def _infer_construct_owner_user_id(callsign: str) -> Optional[str]:
-    bare_name = _bare_name_from_callsign(callsign)
-    result = (
-        supabase_client.table('vault_files')
-        .select('id, user_id, created_at')
-        .or_(f'construct_id.eq.{callsign},construct_id.eq.{bare_name}')
-        .not_.is_('user_id', 'null')
-        .execute()
-    )
-    rows = [row for row in (result.data or []) if row.get('user_id')]
-    if not rows:
-        return None
-    rows.sort(key=lambda row: _identity_projection_candidate_sort_key(row), reverse=True)
-    return rows[0].get('user_id')
+    return VAULT_FILE_REPOSITORY.first_owner_for_construct(callsign)
 
 
 def _serialize_projected_field(field: str, value: Any) -> Tuple[str, str]:
@@ -1296,26 +1256,14 @@ def _serialize_projected_field(field: str, value: Any) -> Tuple[str, str]:
 
 
 def _find_canonical_identity_projection_rows(callsign: str, canonical_path: str) -> List[Dict[str, Any]]:
-    by_filename = (
-        supabase_client.table('vault_files')
-        .select(_identity_projection_select_columns())
-        .eq('construct_id', callsign)
-        .eq('filename', canonical_path)
-        .execute()
-        .data or []
+    row = VAULT_FILE_REPOSITORY.find_exact(
+        filename=canonical_path,
+        storage_path=canonical_path,
+        construct_id=callsign,
+        user_id=None,
+        is_admin=True,
     )
-    by_storage = (
-        supabase_client.table('vault_files')
-        .select(_identity_projection_select_columns())
-        .eq('construct_id', callsign)
-        .eq('storage_path', canonical_path)
-        .execute()
-        .data or []
-    )
-    merged: Dict[str, Dict[str, Any]] = {}
-    for row in by_filename + by_storage:
-        merged[row['id']] = row
-    return list(merged.values())
+    return [row] if row else []
 
 
 def _upsert_identity_projection_record(record: Dict[str, Any], canonical_path: str) -> Tuple[str, Optional[str], Optional[str]]:
@@ -1329,12 +1277,11 @@ def _upsert_identity_projection_record(record: Dict[str, Any], canonical_path: s
         previous_sha = current.get('sha256')
         update_record = dict(record)
         update_record['created_at'] = current.get('created_at') or record['created_at']
-        _vault_files_write_with_optional_updated_at('update', update_record, record_id=current['id'])
-        return 'updated', current['id'], previous_sha
+        result = _upsert_vault_file_record(update_record, context='identity_projection')
+        return result.get('action') or 'updated', result.get('id') or current['id'], previous_sha
 
-    insert_result = _vault_files_write_with_optional_updated_at('insert', record)
-    inserted = (insert_result.data or [{}])[0]
-    return 'created', inserted.get('id'), None
+    result = _upsert_vault_file_record(record, context='identity_projection')
+    return result.get('action') or 'created', result.get('id'), None
 
 
 def _project_identity_fields(construct_id: str, fields: Dict[str, Any], dry_run: bool = False) -> Dict[str, Any]:
@@ -1411,43 +1358,6 @@ def _project_identity_fields(construct_id: str, fields: Dict[str, Any], dry_run:
     }
 
 
-def _vault_files_record_without_optional_updated_at(record: Dict[str, Any]) -> Dict[str, Any]:
-    global _VAULT_FILES_HAS_UPDATED_AT
-    record_copy = dict(record)
-    if _VAULT_FILES_HAS_UPDATED_AT is False:
-        record_copy.pop('updated_at', None)
-    return record_copy
-
-
-def _vault_files_write_with_optional_updated_at(action: str, payload: Dict[str, Any], *, record_id: Optional[str] = None):
-    global _VAULT_FILES_HAS_UPDATED_AT
-    prepared = _vault_files_record_without_optional_updated_at(payload)
-    try:
-        if action == 'insert':
-            result = supabase_client.table('vault_files').insert(prepared).execute()
-        elif action == 'update':
-            result = supabase_client.table('vault_files').update(prepared).eq('id', record_id).execute()
-        else:
-            raise ValueError(f"Unsupported vault_files write action: {action}")
-        if _VAULT_FILES_HAS_UPDATED_AT is None and 'updated_at' in payload:
-            _VAULT_FILES_HAS_UPDATED_AT = True
-        return result
-    except Exception as exc:
-        if not _is_missing_updated_at_error(exc):
-            raise
-        _VAULT_FILES_HAS_UPDATED_AT = False
-        logger.warning(
-            "VFILE_SCHEMA_FALLBACK: action=%s target=%s removed_field=updated_at",
-            action,
-            payload.get('storage_path') or payload.get('filename') or record_id or 'unknown',
-        )
-        fallback_payload = dict(payload)
-        fallback_payload.pop('updated_at', None)
-        if action == 'insert':
-            return supabase_client.table('vault_files').insert(fallback_payload).execute()
-        return supabase_client.table('vault_files').update(fallback_payload).eq('id', record_id).execute()
-
-
 def _get_current_user_email() -> Optional[str]:
     current_user = getattr(request, 'current_user', None)
     if not current_user:
@@ -1457,17 +1367,17 @@ def _get_current_user_email() -> Optional[str]:
 
 def _get_authenticated_user_id() -> Optional[str]:
     current_user = getattr(request, 'current_user', None) or {}
-    current_user_id = current_user.get('id') or current_user.get('supabase_user_id')
-    if _is_supabase_uuid(current_user_id):
+    current_user_id = current_user.get('id') or current_user.get('user_id')
+    if _is_uuid(current_user_id):
         return current_user_id.strip()
 
     user_email = _get_current_user_email()
-    if not user_email or not supabase_client:
+    if not user_email:
         return None
-    result = supabase_client.table('users').select('id').eq('email', user_email).limit(1).execute()
-    if not result.data:
+    user = db_get_user(user_email)
+    if not user:
         return None
-    return result.data[0].get('id')
+    return user.get('id')
 
 
 def _ensure_vvault_user(email: str, name: Optional[str] = None) -> Dict[str, Any]:
@@ -1476,32 +1386,13 @@ def _ensure_vvault_user(email: str, name: Optional[str] = None) -> Dict[str, Any
         return existing
 
     display_name = (name or email.split('@')[0]).strip() or email.split('@')[0]
-    now = datetime.now(timezone.utc).isoformat()
-    if supabase_client:
-        try:
-            insert_result = supabase_client.table('users').insert({
-                'email': email,
-                'name': display_name,
-                'role': 'user',
-                'created_at': now,
-            }).execute()
-            if insert_result.data:
-                user_id = insert_result.data[0].get('id')
-                if user_id:
-                    _create_default_user_folders(user_id, email)
-            created = db_get_user(email)
-            if created:
-                return created
-        except Exception as exc:
-            logger.warning(f"SESSION_EXCHANGE: failed to upsert VVAULT user for {email}: {exc}")
-
-    USERS_DB_FALLBACK[email] = {
-        'email': email,
-        'name': display_name,
-        'role': 'user',
-        'source': 'fallback',
-    }
-    return USERS_DB_FALLBACK[email]
+    try:
+        user = AUTH_REPOSITORY.ensure_external_user(email=email, name=display_name, role='user')
+        user['source'] = 'vvault_auth'
+        return user
+    except Exception as exc:
+        logger.warning(f"SESSION_EXCHANGE: failed to upsert VVAULT auth user for {email}: {type(exc).__name__}")
+        raise
 
 
 def _extract_life_id_anchor(user: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -1513,7 +1404,7 @@ def _extract_life_id_anchor(user: Optional[Dict[str, Any]]) -> Optional[str]:
             return value
     for field in ("id", "user_id"):
         value = str(user.get(field) or "").strip()
-        if value and not _is_supabase_uuid(value):
+        if value and not _is_uuid(value):
             return value
     return None
 
@@ -1521,16 +1412,33 @@ def _extract_life_id_anchor(user: Optional[Dict[str, Any]]) -> Optional[str]:
 def _resolve_auth_life_identity(
     *,
     email: str,
-    supabase_user: Optional[Dict[str, Any]] = None,
+    local_user: Optional[Dict[str, Any]] = None,
     fallback_user: Optional[Dict[str, Any]] = None,
     proposed_life_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return SUPABASE_STEWARD.resolve_life_identity(
-        email=email,
-        registry_life_id=_extract_life_id_anchor(fallback_user),
-        supabase_life_id=_extract_life_id_anchor(supabase_user),
-        proposed_life_id=proposed_life_id,
-    )
+    registry_life_id = _extract_life_id_anchor(fallback_user)
+    local_life_id = _extract_life_id_anchor(local_user)
+    conflict_ids = sorted({value for value in (registry_life_id, local_life_id) if value})
+    if len(conflict_ids) > 1:
+        return {
+            "ok": False,
+            "canonical": False,
+            "should_mint": False,
+            "error_code": "IDENTITY_CONFLICT",
+            "email": email,
+            "conflict_life_ids": conflict_ids,
+            "proposed_life_id": proposed_life_id,
+        }
+    return {
+        "ok": True,
+        "canonical": True,
+        "should_mint": not bool(conflict_ids),
+        "error_code": None,
+        "email": email,
+        "life_user_id": conflict_ids[0] if conflict_ids else proposed_life_id,
+        "proposed_life_id": proposed_life_id,
+        "auth_owner": AUTH_OWNER,
+    }
 
 
 def _auth_identity_failure_response(receipt: Dict[str, Any]):
@@ -1547,8 +1455,8 @@ def _auth_identity_failure_response(receipt: Dict[str, Any]):
 
 
 def _oauth_identity_authority_available() -> Tuple[bool, Dict[str, Any]]:
-    write_allowed, state = SUPABASE_STEWARD.allow_write()
-    return bool(write_allowed and state.get("canonical") is True), state
+    state = _auth_repository_status()
+    return bool(state.get("ready")), state
 
 
 def _oauth_identity_authority_redirect(frontend_url: str, state: Dict[str, Any]):
@@ -1556,53 +1464,22 @@ def _oauth_identity_authority_redirect(frontend_url: str, state: Dict[str, Any])
     from urllib.parse import quote
 
     error_message = quote(
-        "Google sign-in cannot complete because Supabase identity authority is unavailable. Please retry after recovery.",
+        "Google sign-in cannot complete because VVAULT auth storage is unavailable. Please retry after recovery.",
         safe="",
     )
     logger.warning(
-        "GOOGLE_OAUTH_BLOCKED dependency=supabase contract=identity_fail_closed "
-        "connection_state=%s error_code=%s canonical=%s storage_mode=%s outage_id=%s ts=%s",
-        state.get("connection_state"),
-        state.get("last_error_code") or "SUPABASE_NOT_CONNECTED",
-        state.get("canonical"),
-        state.get("storage_mode") or "none",
-        state.get("outage_id"),
+        "GOOGLE_OAUTH_BLOCKED dependency=vvault_auth contract=identity_fail_closed "
+        "auth_owner=%s session_owner=%s error_code=%s ts=%s",
+        state.get("auth_owner") or AUTH_OWNER,
+        state.get("session_owner") or SESSION_OWNER,
+        state.get("error_code"),
         datetime.now(timezone.utc).isoformat(),
     )
     return redirect(f"{frontend_url}/?oauth_error={error_message}")
 
 
 def _load_vault_file_text(row: Optional[Dict[str, Any]]) -> str:
-    if not row:
-        return ""
-    content = row.get('content')
-    if isinstance(content, str) and content:
-        return content
-
-    storage_path = row.get('storage_path') or row.get('filename')
-    if not storage_path or not supabase_client:
-        return ""
-
-    try:
-        bucket = supabase_client.storage.from_('vault-files')
-    except AttributeError:
-        bucket = supabase_client.storage.from_('vault-files') if hasattr(supabase_client.storage, 'from_') else supabase_client.storage.from_('vault-files')
-
-    try:
-        data = supabase_client.storage.from_('vault-files').download(storage_path)
-        blob = data[0] if isinstance(data, tuple) else getattr(data, 'data', None)
-        error = data[1] if isinstance(data, tuple) and len(data) > 1 else getattr(data, 'error', None)
-        if error or not blob:
-            return ""
-        if hasattr(blob, 'read'):
-            raw = blob.read()
-        else:
-            raw = blob
-        if isinstance(raw, bytes):
-            return raw.decode('utf-8', errors='ignore')
-        return str(raw)
-    except Exception:
-        return ""
+    return VAULT_FILE_REPOSITORY.load_text(row)
 
 
 def _looks_readable_text(value: Any) -> bool:
@@ -1649,59 +1526,36 @@ def _preview_elapsed_ms(started_at: float) -> int:
 
 
 def _query_transcript_rows_for_preview(callsign: str, bare_name: str) -> List[Dict[str, Any]]:
-    global _VAULT_FILES_HAS_UPDATED_AT
     candidates: List[Dict[str, Any]] = []
     seen_ids = set()
     transcript_keywords = ['transcript', 'character_ai', 'chatgpt', 'chat_with_', 'conversation', 'chat']
-    base_columns = 'id, filename, storage_path, file_type, content, created_at, updated_at'
-
-    def _run(construct_key: str, include_updated_at: bool) -> List[Dict[str, Any]]:
-        columns = _select_with_optional_updated_at(base_columns, include_updated_at)
-        result = (
-            supabase_client.table('vault_files')
-            .select(columns)
-            .eq('construct_id', construct_key)
-            .order('created_at', desc=True)
-            .limit(max(VAULT_PREVIEW_MAX_TRANSCRIPTS * 2, 4))
-            .execute()
-        )
-        return result.data or []
-
-    for construct_key in {callsign, bare_name}:
-        if not construct_key:
+    rows = VAULT_FILE_REPOSITORY.query_transcript_rows_for_preview(
+        callsign=callsign,
+        bare_name=bare_name,
+        limit=VAULT_PREVIEW_MAX_TRANSCRIPTS,
+    )
+    for row in rows:
+        row_id = row.get('id')
+        if row_id in seen_ids:
             continue
-        try:
-            rows = _run(construct_key, _VAULT_FILES_HAS_UPDATED_AT is not False)
-            if _VAULT_FILES_HAS_UPDATED_AT is None:
-                _VAULT_FILES_HAS_UPDATED_AT = True
-        except Exception as exc:
-            if not _is_missing_updated_at_error(exc):
-                raise
-            _VAULT_FILES_HAS_UPDATED_AT = False
-            rows = _run(construct_key, False)
+        seen_ids.add(row_id)
 
-        for row in rows:
-            row_id = row.get('id')
-            if row_id in seen_ids:
-                continue
-            seen_ids.add(row_id)
-
-            path = (row.get('filename') or row.get('storage_path') or '').lower()
-            ftype = (row.get('file_type') or '').lower()
-            if not path:
-                continue
-            if any(ext in path for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.capsule']):
-                continue
-            if not (
-                any(keyword in path for keyword in transcript_keywords)
-                or 'transcript' in ftype
-                or 'markdown' in ftype
-                or 'text' in ftype
-            ):
-                continue
-            candidates.append(row)
-            if len(candidates) >= VAULT_PREVIEW_MAX_TRANSCRIPTS:
-                return candidates
+        path = (row.get('filename') or row.get('storage_path') or '').lower()
+        ftype = (row.get('file_type') or '').lower()
+        if not path:
+            continue
+        if any(ext in path for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.capsule']):
+            continue
+        if not (
+            any(keyword in path for keyword in transcript_keywords)
+            or 'transcript' in ftype
+            or 'markdown' in ftype
+            or 'text' in ftype
+        ):
+            continue
+        candidates.append(row)
+        if len(candidates) >= VAULT_PREVIEW_MAX_TRANSCRIPTS:
+            return candidates
 
     return candidates
 
@@ -1823,24 +1677,11 @@ def _build_capsule_preview_from_candidate_ids(
     started_at = time.perf_counter()
     callsign = _normalize_callsign(construct_id)
     ids = [str(value).strip() for value in (transcript_ids or []) if str(value).strip()]
-    if not ids or not supabase_client:
+    if not ids:
         return ""
 
     ids = ids[:VAULT_PREVIEW_MAX_TRANSCRIPTS]
-    base_columns = 'id, user_id, filename, storage_path, file_type, content, created_at, updated_at'
-
-    def _run(include_updated_at: bool) -> List[Dict[str, Any]]:
-        columns = _select_with_optional_updated_at(base_columns, include_updated_at)
-        query = supabase_client.table('vault_files').select(columns).in_('id', ids)
-        result = query.execute()
-        return result.data or []
-
-    try:
-        rows = _run(_VAULT_FILES_HAS_UPDATED_AT is not False)
-    except Exception as exc:
-        if not _is_missing_updated_at_error(exc):
-            raise
-        rows = _run(False)
+    rows = VAULT_FILE_REPOSITORY.get_by_ids(ids)
 
     transcript_files = []
     for row in _sort_vault_rows(rows):
@@ -1935,7 +1776,7 @@ def _build_capsule_preview_from_candidate_ids(
 
 def _reconstruct_capsule_preview_text(row: Optional[Dict[str, Any]], deadline: Optional[float] = None) -> str:
     started_at = time.perf_counter()
-    if not row or not supabase_client:
+    if not row:
         return ""
 
     construct_id = str(row.get('construct_id') or '').strip()
@@ -1970,29 +1811,6 @@ def _reconstruct_capsule_preview_text(row: Optional[Dict[str, Any]], deadline: O
         )
         return ""
 
-    try:
-        try:
-            from memup_sync import build_construct_memup_preview
-        except ImportError:
-            from vvault.server.memup_sync import build_construct_memup_preview
-
-        preview = build_construct_memup_preview(
-            supabase_client,
-            construct_id,
-            user_id,
-            max_transcripts=VAULT_PREVIEW_MAX_TRANSCRIPTS,
-            deadline=deadline,
-            allow_storage_download=False,
-        ) or ""
-        if preview:
-            logger.info(
-                "VAULT_PREVIEW_TIMING: capsule preview reconstructed via memup fallback for %s in %sms",
-                construct_id,
-                _preview_elapsed_ms(started_at),
-            )
-            return preview
-    except Exception as exc:
-        logger.warning("capsule preview reconstruction failed for %s: %s", construct_id, exc)
     return ""
 
 
@@ -2223,64 +2041,19 @@ def _lookup_exact_vault_preview_row(
     user_id: Optional[str],
     is_admin: bool,
 ) -> Optional[Dict[str, Any]]:
-    global _VAULT_FILES_HAS_UPDATED_AT
-    if not supabase_client:
-        return None
-
-    paths = {path.strip() for path in (filename, storage_path) if isinstance(path, str) and path.strip()}
-    if not paths:
-        return None
-
-    base_columns = 'id, user_id, is_system, filename, storage_path, construct_id, file_type, metadata, content, sha256, created_at, updated_at'
-
-    def _run(include_updated_at: bool) -> List[Dict[str, Any]]:
-        columns = _select_with_optional_updated_at(base_columns, include_updated_at)
-        matched_rows: List[Dict[str, Any]] = []
-        for field in ('filename', 'storage_path'):
-            for path in paths:
-                query = supabase_client.table('vault_files').select(columns).eq(field, path)
-                if construct_id:
-                    query = query.eq('construct_id', construct_id)
-                if not is_admin and user_id:
-                    query = query.eq('user_id', user_id)
-                result = query.execute()
-                matched_rows.extend(result.data or [])
-        return matched_rows
-
-    try:
-        matched_rows = _run(_VAULT_FILES_HAS_UPDATED_AT is not False)
-        if _VAULT_FILES_HAS_UPDATED_AT is None:
-            _VAULT_FILES_HAS_UPDATED_AT = True
-    except Exception as exc:
-        if not _is_missing_updated_at_error(exc):
-            raise
-        _VAULT_FILES_HAS_UPDATED_AT = False
-        matched_rows = _run(False)
-
-    if not matched_rows:
-        return None
-
-    deduped_rows = _dedupe_vault_rows(matched_rows)
-    return _pick_latest_vault_row(deduped_rows or matched_rows)
+    return VAULT_FILE_REPOSITORY.find_exact(
+        filename=filename,
+        storage_path=storage_path,
+        construct_id=construct_id,
+        user_id=user_id,
+        is_admin=is_admin,
+    )
 
 
 def _resolve_construct_owner_user_id(construct_id: str) -> Optional[str]:
-    if not supabase_client or not construct_id:
+    if not construct_id:
         return None
-
-    result = (
-        supabase_client.table('vault_files')
-        .select('user_id')
-        .eq('construct_id', construct_id)
-        .not_.is_('user_id', 'null')
-        .limit(1)
-        .execute()
-    )
-    for row in result.data or []:
-        user_id = row.get('user_id')
-        if user_id:
-            return user_id
-    return None
+    return VAULT_FILE_REPOSITORY.first_owner_for_construct(construct_id)
 
 
 def _candidate_transcript_ids_for_construct(construct_id: str) -> List[str]:
@@ -2306,7 +2079,7 @@ def _persist_capsule_from_candidate_transcripts(
             from vvault.server.memup_sync import persist_construct_memup_from_candidate_transcripts
 
         return persist_construct_memup_from_candidate_transcripts(
-            supabase_client,
+            VAULT_FILE_REPOSITORY,
             construct_id,
             ids,
             user_id,
@@ -2537,89 +2310,31 @@ def _binary_data_url_from_row(row: Optional[Dict[str, Any]]) -> Tuple[Optional[s
     if isinstance(content, str) and content:
         return f"data:{mime};base64,{content}", mime
 
-    storage_path = row.get('storage_path') or row.get('filename')
-    if not storage_path or not supabase_client:
-        return None, mime
-
-    try:
-        download = supabase_client.storage.from_('vault-files').download(storage_path)
-        blob = download[0] if isinstance(download, tuple) else getattr(download, 'data', None)
-        error = download[1] if isinstance(download, tuple) and len(download) > 1 else getattr(download, 'error', None)
-        if error or not blob:
-            return None, mime
-        if hasattr(blob, 'read'):
-            raw = blob.read()
-        else:
-            raw = blob
-        if not isinstance(raw, bytes):
-            raw = bytes(raw)
-        encoded = base64.b64encode(raw).decode('utf-8')
-        return f"data:{mime};base64,{encoded}", mime
-    except Exception:
-        return None, mime
+    data_url = VAULT_FILE_REPOSITORY.binary_data_url(row, mime)
+    return data_url, mime
 
 
 def _query_construct_identity_rows(callsign: str, user_id: Optional[str]) -> List[Dict[str, Any]]:
-    global _VAULT_FILES_HAS_UPDATED_AT
     bare_name = _bare_name_from_callsign(callsign)
-    def _run(include_updated_at: bool) -> List[Dict[str, Any]]:
-        columns = _select_with_optional_updated_at(
-            'id, user_id, construct_id, filename, storage_path, content, file_type, metadata, sha256, created_at, updated_at',
-            include_updated_at,
+    return _dedupe_vault_rows(
+        VAULT_FILE_REPOSITORY.list_construct_identity_rows(
+            callsign=callsign,
+            bare_name=bare_name,
+            user_id=user_id,
         )
-        query = (
-            supabase_client.table('vault_files')
-            .select(columns)
-            .or_(f'construct_id.eq.{callsign},construct_id.eq.{bare_name}')
-            .ilike('filename', f'instances/{callsign}/identity/%')
-        )
-        if user_id:
-            query = query.eq('user_id', user_id)
-        return _dedupe_vault_rows(query.execute().data or [])
-
-    try:
-        rows = _run(_VAULT_FILES_HAS_UPDATED_AT is not False)
-        if _VAULT_FILES_HAS_UPDATED_AT is None:
-            _VAULT_FILES_HAS_UPDATED_AT = True
-        return rows
-    except Exception as err:
-        if _is_missing_updated_at_error(err):
-            _VAULT_FILES_HAS_UPDATED_AT = False
-            return _run(False)
-        raise
+    )
 
 
 def _query_construct_file_rows(callsign: str, user_id: Optional[str], include_content: bool = False) -> List[Dict[str, Any]]:
-    global _VAULT_FILES_HAS_UPDATED_AT
     bare_name = _bare_name_from_callsign(callsign)
-    def _run(include_updated_at: bool) -> List[Dict[str, Any]]:
-        columns = 'id, user_id, construct_id, filename, storage_path, metadata, created_at, updated_at'
-        if include_content:
-            columns = 'id, user_id, construct_id, filename, storage_path, metadata, content, created_at, updated_at'
-        columns = _select_with_optional_updated_at(
-            columns,
-            include_updated_at,
+    return _dedupe_vault_rows(
+        VAULT_FILE_REPOSITORY.list_construct_file_rows(
+            callsign=callsign,
+            bare_name=bare_name,
+            user_id=user_id,
+            include_content=include_content,
         )
-        query = (
-            supabase_client.table('vault_files')
-            .select(columns)
-            .or_(f'construct_id.eq.{callsign},construct_id.eq.{bare_name}')
-            .ilike('filename', f'instances/{callsign}/%')
-        )
-        if user_id:
-            query = query.eq('user_id', user_id)
-        return _dedupe_vault_rows(query.execute().data or [])
-
-    try:
-        rows = _run(_VAULT_FILES_HAS_UPDATED_AT is not False)
-        if _VAULT_FILES_HAS_UPDATED_AT is None:
-            _VAULT_FILES_HAS_UPDATED_AT = True
-        return rows
-    except Exception as err:
-        if _is_missing_updated_at_error(err):
-            _VAULT_FILES_HAS_UPDATED_AT = False
-            return _run(False)
-        raise
+    )
 
 
 def _build_construct_editor_payload(callsign: str, user_id: Optional[str]) -> Dict[str, Any]:
@@ -2939,11 +2654,11 @@ def _cleanup_old_backups():
     except Exception as e:
         logger.error(f"BACKUP CLEANUP ERROR: {e}")
 
-def _protected_vault_update(supabase_client, file_id: str, new_content: str, force: bool = False, context: str = "unknown") -> dict:
+def _protected_vault_update(file_id: str, new_content: str, force: bool = False, context: str = "unknown") -> dict:
     """Wrap vault_files update operations with delete protection.
     
     Before performing a full content replacement:
-    1. Reads existing content from Supabase
+    1. Reads existing content from VVAULT-native vault_files
     2. If existing content is longer than new content by more than 50%, rejects the update
     3. Accepts force parameter to bypass the check
     4. Logs all content updates with before/after lengths
@@ -2953,15 +2668,15 @@ def _protected_vault_update(supabase_client, file_id: str, new_content: str, for
     result = {"allowed": True, "error": None, "existing_content": "", "existing_length": 0}
     
     try:
-        existing = supabase_client.table('vault_files').select('content, filename').eq('id', file_id).execute()
-        
-        if not existing.data or len(existing.data) == 0:
-            logger.warning(f"PROTECTED_UPDATE [{context}]: file_id={file_id} not found in Supabase")
+        existing = VAULT_FILE_REPOSITORY.get_by_id(file_id)
+
+        if not existing:
+            logger.warning(f"PROTECTED_UPDATE [{context}]: file_id={file_id} not found in VVAULT body")
             result["allowed"] = True
             return result
         
-        existing_content = existing.data[0].get('content', '') or ''
-        existing_filename = existing.data[0].get('filename', '')
+        existing_content = existing.get('content', '') or ''
+        existing_filename = existing.get('filename', '')
         existing_length = len(existing_content)
         new_length = len(new_content)
         
@@ -3053,8 +2768,8 @@ def require_service_token(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Database-backed user management (Zero Trust: no hardcoded credentials)
-# Fallback mock DB only used if database is unavailable
+# Legacy fallback identity references. These are not an auth persistence
+# authority after the VVAULT-native auth cutover.
 USERS_DB_FALLBACK = {
     'admin@vvault.com': {
         'password': 'admin123',
@@ -3066,168 +2781,68 @@ USERS_DB_FALLBACK = {
 # In-memory session cache (primary storage when DB table unavailable)
 ACTIVE_SESSIONS = {}
 
-# Flag to track if session table exists (auto-detected on first use)
-_SESSION_TABLE_AVAILABLE = None
-
 def _check_session_table_available() -> bool:
-    """Check if user_sessions table exists in Supabase (cached)"""
-    global _SESSION_TABLE_AVAILABLE
-    if _SESSION_TABLE_AVAILABLE is not None:
-        return _SESSION_TABLE_AVAILABLE
-    
-    if not supabase_client:
-        _SESSION_TABLE_AVAILABLE = False
-        return False
-    
-    try:
-        supabase_client.table('user_sessions').select('id').limit(1).execute()
-        _SESSION_TABLE_AVAILABLE = True
-        logger.info("Session table available in Supabase")
-        return True
-    except Exception as e:
-        if 'PGRST205' in str(e) or '404' in str(e):
-            _SESSION_TABLE_AVAILABLE = False
-            logger.info("Session table not available in Supabase - using in-memory sessions")
-            return False
-        _SESSION_TABLE_AVAILABLE = False
-        return False
+    """Check if VVAULT-native session storage is available."""
+    return _auth_repository_ready()
 
 def db_create_session(email: str, role: str, token: str, expires_at: datetime, remember_me: bool = False) -> bool:
-    """Create session (in-memory, with optional database persistence)"""
-    ACTIVE_SESSIONS[token] = {
-        'email': email,
-        'role': role,
-        'expires_at': expires_at,
-        'created_at': datetime.now(),
-        'remember_me': remember_me
-    }
-    
-    if not _check_session_table_available():
-        return True
-    
-    try:
-        result = supabase_client.table('users').select('id').eq('email', email).execute()
-        user_id = result.data[0]['id'] if result.data else None
-        
-        supabase_client.table('user_sessions').insert({
-            'user_id': user_id,
-            'token': token,
-            'email': email,
-            'remember_me': remember_me,
-            'expires_at': expires_at.isoformat(),
-            'created_at': datetime.now().isoformat()
-        }).execute()
-        logger.info(f"Session persisted to database for {email} (remember_me={remember_me})")
-    except Exception as e:
-        logger.debug(f"Session DB persistence failed (using in-memory): {e}")
-    
+    """Create a VVAULT-native session; persist only a token hash."""
+    user = AUTH_REPOSITORY.get_user_by_email(email)
+    if not user:
+        raise RuntimeError("VVAULT auth user does not exist")
+    token_hash = _session_token_hash(token)
+    AUTH_REPOSITORY.create_session(
+        user_id=str(user["id"]),
+        token_hash=token_hash,
+        expires_at=expires_at,
+    )
+    logger.info(f"Session persisted to VVAULT auth DB for {email} (remember_me={remember_me})")
     return True
 
 def db_delete_session(token: str) -> bool:
-    """Delete session from cache and database"""
-    if token in ACTIVE_SESSIONS:
-        del ACTIVE_SESSIONS[token]
-    
-    if not _check_session_table_available():
-        return True
-    
-    try:
-        supabase_client.table('user_sessions').delete().eq('token', token).execute()
-    except Exception as e:
-        logger.debug(f"Session DB delete failed (already removed from memory): {e}")
-    
+    """Revoke session from VVAULT-native session storage."""
+    AUTH_REPOSITORY.revoke_session_by_hash(_session_token_hash(token))
     return True
 
 def db_get_session(token: str) -> Optional[Dict]:
-    """Get session from cache (primary) or database (fallback)"""
-    if token in ACTIVE_SESSIONS:
-        session = ACTIVE_SESSIONS[token]
-        if datetime.now() > session['expires_at']:
-            db_delete_session(token)
-            return None
-        return session
-    
-    if not _check_session_table_available():
-        return None
-    
+    """Get session from VVAULT-native session storage."""
     try:
-        result = supabase_client.table('user_sessions').select('*').eq('token', token).execute()
-        if not result.data:
+        session_data = AUTH_REPOSITORY.get_session_by_hash(_session_token_hash(token))
+        if not session_data:
             return None
-        
-        session_data = result.data[0]
-        expires_at = datetime.fromisoformat(session_data['expires_at'].replace('Z', '+00:00').replace('+00:00', ''))
-        
-        if datetime.now() > expires_at:
-            db_delete_session(token)
-            return None
-        
-        user_result = supabase_client.table('users').select('*').eq('email', session_data['email']).execute()
-        supabase_user = user_result.data[0] if user_result.data else None
-        role = _resolve_user_role(session_data['email'], supabase_user=supabase_user, fallback_user=USERS_DB_FALLBACK.get(session_data['email']))
-        
-        session = {
+        return {
+            'id': str(session_data.get('user_id')),
             'email': session_data['email'],
-            'role': role,
-            'expires_at': expires_at,
-            'created_at': datetime.fromisoformat(session_data['created_at'].replace('Z', '+00:00').replace('+00:00', ''))
+            'name': session_data.get('name') or session_data['email'].split('@')[0],
+            'role': session_data.get('role') or 'user',
+            'auth_provider': session_data.get('auth_provider'),
+            'expires_at': session_data.get('expires_at'),
+            'created_at': session_data.get('session_created_at'),
+            'source': 'vvault_auth',
         }
-        ACTIVE_SESSIONS[token] = session
-        return session
     except Exception as e:
-        logger.debug(f"Session DB lookup failed: {e}")
+        logger.debug(f"VVAULT auth session lookup failed: {type(e).__name__}")
         return None
 
 def db_get_user(email: str) -> Optional[Dict]:
-    """Get user from database with fallback to local storage"""
+    """Get user from VVAULT-native auth storage."""
     try:
-        supabase_user = None
-        fallback_user = USERS_DB_FALLBACK.get(email)
-        
-        if supabase_client:
-            result = supabase_client.table('users').select('*').eq('email', email).execute()
-            if result.data:
-                supabase_user = result.data[0]
-        
-        if supabase_user:
-            user_data = {
-                'id': supabase_user['id'],
-                'email': supabase_user['email'],
-                'name': supabase_user.get('name'),
-                'password_hash': supabase_user.get('password_hash'),
-                'auth_password_hash': supabase_user.get('auth_password_hash'),
-                'auth_provider': supabase_user.get('auth_provider'),
-                'role': _resolve_user_role(email, supabase_user=supabase_user, fallback_user=fallback_user),
-                'source': 'supabase'
-            }
-            if not user_data['password_hash'] and fallback_user:
-                user_data['password_hash'] = fallback_user.get('password_hash')
-                user_data['role'] = _resolve_user_role(email, supabase_user=supabase_user, fallback_user=fallback_user)
-            return user_data
-        
-        if fallback_user:
-            fallback_user['source'] = 'fallback'
-            return fallback_user
-        return None
+        user = AUTH_REPOSITORY.get_user_by_email(email)
+        if not user:
+            return None
+        user['source'] = 'vvault_auth'
+        user['role'] = _resolve_user_role(email, local_user=user)
+        return user
     except Exception as e:
-        logger.error(f"Failed to get user from database: {e}")
-        if email in USERS_DB_FALLBACK:
-            USERS_DB_FALLBACK[email]['source'] = 'fallback'
-            return USERS_DB_FALLBACK[email]
+        logger.error(f"Failed to get user from VVAULT auth database: {type(e).__name__}")
         return None
 
 def db_cleanup_expired_sessions():
-    """Clean up expired sessions from database"""
+    """Clean up expired sessions from VVAULT-native session storage."""
     try:
-        now = datetime.now()
-        for token in list(ACTIVE_SESSIONS.keys()):
-            if now > ACTIVE_SESSIONS[token]['expires_at']:
-                del ACTIVE_SESSIONS[token]
-        
-        if supabase_client:
-            supabase_client.table('user_sessions').delete().lt('expires_at', now.isoformat()).execute()
+        AUTH_REPOSITORY.cleanup_expired_sessions()
     except Exception as e:
-        logger.error(f"Failed to cleanup expired sessions: {e}")
+        logger.error(f"Failed to cleanup expired VVAULT auth sessions: {type(e).__name__}")
 
 # Audit log for zero trust compliance
 AUTH_AUDIT_LOG = []
@@ -3355,11 +2970,10 @@ def require_chatty_auth(f):
             chatty_email = request.headers.get("X-Chatty-User")
             if not chatty_email:
                 return jsonify({"success": False, "error": "X-Chatty-User header required with API key auth"}), 400
-            chatty_supabase_user_id = request.headers.get("X-Chatty-Supabase-User-Id")
+            chatty_user_id = request.headers.get("X-Chatty-User-Id")
             current_user = {"email": chatty_email}
-            if _is_supabase_uuid(chatty_supabase_user_id):
-                current_user["id"] = chatty_supabase_user_id.strip()
-                current_user["supabase_user_id"] = chatty_supabase_user_id.strip()
+            if _is_uuid(chatty_user_id):
+                current_user["id"] = chatty_user_id.strip()
             log_auth_decision(
                 action="access_granted",
                 user_id=chatty_email,
@@ -3883,49 +3497,34 @@ def root():
 
 @app.route('/api/health')
 def health_check():
-    """Health check endpoint"""
-    supabase_status = _get_supabase_status()
-    connection = SUPABASE_STEWARD.snapshot()
+    """Health check endpoint backed by VVAULT-native runtime dependencies."""
+    runtime_status = _get_vvault_runtime_status()
     return jsonify({
-        "status": "healthy" if connection.get("connection_state") == "connected" else "degraded",
+        "status": "healthy" if runtime_status["ready"] else "degraded",
         "timestamp": datetime.now().isoformat(),
         "service": "vvault-backend",
         "version": "1.0.0",
-        "server": {
-            "server_pid": os.getpid(),
-            "repo_root": str(_repo_root),
-            "started_at": SERVER_STARTED_AT,
-            "log_path": os.environ.get("VVAULT_LOG") or os.environ.get("VVAULT_DEVFULL_LOG"),
-        },
-        "supabase": supabase_status,
-        "oauth": {
-            "configured": _google_oauth_ready(),
-            "callback_url": f"{_get_backend_url()}/api/auth/google/callback",
-            "frontend_url": _get_frontend_url(),
-        },
+        "runtime": runtime_status["runtime"],
+        "body_database": runtime_status["body_database"],
+        "storage": runtime_status["storage"],
+        "auth": runtime_status["auth"],
     })
 
 
 @app.route('/api/ready')
 def readiness_check():
-    """Readiness requires freshly proven canonical Supabase connectivity."""
-    connection = SUPABASE_STEWARD.snapshot()
-    ready = connection.get("connection_state") == "connected"
+    """Readiness requires VVAULT-native body database health."""
+    runtime_status = _get_vvault_runtime_status()
+    ready = runtime_status["ready"]
     return jsonify({
         "ready": ready,
         "status": "ready" if ready else "not_ready",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "service": "vvault-backend",
-        "server": {
-            "server_pid": os.getpid(),
-            "repo_root": str(_repo_root),
-            "started_at": SERVER_STARTED_AT,
-        },
-        "supabase": {
-            "configured": bool(SUPABASE_URL and SUPABASE_KEY),
-            "using_service_role": bool(SUPABASE_SERVICE_ROLE_KEY),
-            "connection": connection,
-        },
+        "runtime": runtime_status["runtime"],
+        "body_database": runtime_status["body_database"],
+        "storage": runtime_status["storage"],
+        "auth": runtime_status["auth"],
     }), 200 if ready else 503
 
 USER_PATH_PATTERN = re.compile(r'^vvault/users/shard_\d+/[^/]+/')
@@ -3953,17 +3552,13 @@ def _create_default_user_folders(user_id: int, user_email: str) -> bool:
     
     Returns True if successful, False otherwise.
     """
-    if not supabase_client:
-        logger.warning("Cannot create default folders: Supabase not configured")
-        return False
-    
     try:
         base_path = _get_user_base_path(user_id, user_email)
-        
-        # Get user's name for profile
-        user_result = supabase_client.table('users').select('name').eq('id', user_id).execute()
-        user_name = user_result.data[0].get('name', 'User') if user_result.data else 'User'
-        
+        user_name = user_email.split('@')[0].replace('.', ' ').title()
+        local_user = AUTH_REPOSITORY.get_user_by_email(user_email)
+        if local_user and local_user.get("name"):
+            user_name = local_user["name"]
+
         # Default profile content
         profile_content = json.dumps({
             "name": user_name,
@@ -4012,10 +3607,7 @@ def _create_default_user_folders(user_id: int, user_email: str) -> bool:
         
         for folder in default_folders:
             try:
-                supabase_client.table('vault_files').upsert(
-                    folder, 
-                    on_conflict='filename'
-                ).execute()
+                _upsert_vault_file_record(folder, context='default_user_folders')
             except Exception as e:
                 logger.warning(f"Error creating folder {folder['filename']}: {e}")
         
@@ -4112,43 +3704,32 @@ def _find_chatty_transcript_rows(
     user_id: Optional[int],
     columns: str,
 ):
-    if user_id:
-        result = (
-            supabase_client.table('vault_files')
-            .select(columns)
-            .eq('user_id', user_id)
-            .eq('filename', target['storage_path'])
-            .execute()
-        )
-        if result.data:
-            return result.data
-
-        if target.get('is_hydro_project_thread'):
-            storage_result = (
-                supabase_client.table('vault_files')
-                .select(columns)
-                .eq('user_id', user_id)
-                .eq('storage_path', target['storage_path'])
-                .execute()
-            )
-            if storage_result.data:
-                return storage_result.data
-
-    fallback = (
-        supabase_client.table('vault_files')
-        .select(columns)
-        .ilike('filename', f"%{target['filename']}%")
-        .execute()
+    del columns
+    rows = VAULT_FILE_REPOSITORY.list_construct_file_rows(
+        callsign=target['construct_id'],
+        bare_name=_bare_name_from_callsign(target['construct_id']),
+        user_id=str(user_id) if user_id else None,
+        include_content=True,
     )
-    if not fallback.data:
+    exact = [
+        row for row in rows
+        if (row.get('filename') == target['storage_path'] or row.get('storage_path') == target['storage_path'])
+    ]
+    if exact:
+        return exact
+    fallback = [
+        row for row in rows
+        if str(row.get('filename') or row.get('storage_path') or '').endswith(target['filename'])
+    ]
+    if not fallback:
         return []
     if target.get('is_hydro_project_thread'):
         suffix = f"/{target['folder']}/{target['filename']}"
         return [
-            row for row in fallback.data
+            row for row in fallback
             if str(row.get('filename') or row.get('storage_path') or '').endswith(suffix)
         ]
-    return fallback.data
+    return fallback
 
 def _strip_user_prefix(path: str) -> str:
     """Strip any internal user path prefix (vvault/users/shard_XXXX/user_slug/) for display.
@@ -4322,11 +3903,17 @@ def session_bridge_from_standalone_auth():
         return jsonify({"success": False, "error": "Invalid or expired auth session"}), 401
     email = payload.get("email", "").strip().lower()
     display_name = (payload.get("name") or email.split("@")[0]).strip()
-    user_row = _ensure_vvault_user(email, display_name)
+    try:
+        user_row = _ensure_vvault_user(email, display_name)
+    except Exception:
+        return _auth_repository_unavailable_response("/api/vault/session-bridge")
     role = user_row.get("role", "user")
     session_token = secrets.token_urlsafe(32)
     expires_at = datetime.now() + timedelta(days=90)
-    db_create_session(email, role, session_token, expires_at, remember_me=True)
+    try:
+        db_create_session(email, role, session_token, expires_at, remember_me=True)
+    except Exception:
+        return _auth_repository_unavailable_response("/api/vault/session-bridge")
     user_info = {
         "email": email,
         "name": user_row.get("name", display_name),
@@ -4343,7 +3930,7 @@ def session_bridge_from_standalone_auth():
 @app.route('/api/vault/user-info')
 @require_auth
 def get_vault_user_info():
-    """Get current user's vault info (display name, root path, etc.)"""
+    """Get current user's VVAULT-native vault info."""
     try:
         current_user = getattr(request, 'current_user', None)
         if not current_user:
@@ -4352,82 +3939,65 @@ def get_vault_user_info():
         if not user_email:
             return jsonify({"success": False, "error": "Invalid session"}), 401
         user_role = current_user.get('role', 'user')
-
-        read_allowed, read_state = SUPABASE_STEWARD.allow_read()
-        if not read_allowed:
-            return _supabase_read_block_response("/api/vault/user-info", state=read_state)
-        
-        if not supabase_client:
-            display_name = user_email.split('@')[0].replace('.', ' ').title()
-            return jsonify({
-                "success": True,
-                "supabase_available": False,
-                "degraded": True,
-                "canonical": False,
-                "storage_mode": "none",
-                "connection_state": SUPABASE_STEWARD.snapshot().get("connection_state"),
-                "display_name": display_name,
-                "is_admin": user_role == 'admin',
-                "root_label": display_name if user_role != 'admin' else "Vault (Admin)"
-            })
-        
-        user_result = supabase_client.table('users').select('id, name, email').eq('email', user_email).execute()
-        if user_result.data:
-            user_data = user_result.data[0]
-            display_name = user_data.get('name') or user_email.split('@')[0].replace('.', ' ').title()
-            user_id = user_data.get('id')
-        else:
-            display_name = user_email.split('@')[0].replace('.', ' ').title()
-            user_id = None
+        local_user = AUTH_REPOSITORY.get_user_by_email(user_email)
+        display_name = (
+            (local_user or {}).get('name')
+            or current_user.get('name')
+            or user_email.split('@')[0].replace('.', ' ').title()
+        )
+        user_id = str((local_user or {}).get('id') or current_user.get('id') or "")
+        role = _resolve_user_role(user_email, local_user=local_user, fallback_user=current_user)
+        is_admin = role == 'admin' or user_role == 'admin'
         
         return jsonify({
             "success": True,
-            "supabase_available": True,
+            "vvault_available": True,
             "degraded": False,
             "canonical": True,
-            "storage_mode": "supabase",
-            "connection_state": SUPABASE_STEWARD.snapshot().get("connection_state"),
+            "storage_mode": "vvault_body",
+            "storage_owner": VAULT_FILE_OWNER,
+            "auth_owner": AUTH_OWNER,
+            "session_owner": SESSION_OWNER,
             "display_name": display_name,
             "user_id": user_id,
-            "is_admin": user_role == 'admin',
-            "root_label": display_name if user_role != 'admin' else "Vault (Admin)"
+            "email": user_email,
+            "role": role,
+            "is_admin": is_admin,
+            "root_label": display_name if not is_admin else "Vault (Admin)"
         })
     except Exception as e:
-        logger.error(f"Error getting user info: {e}")
-        if _is_supabase_upstream_timeout(e):
+        logger.error(f"Error getting user info: {type(e).__name__}")
+        if _is_dependency_timeout(e):
             current_user = getattr(request, 'current_user', None) or {}
             user_email = current_user.get('email', '')
             user_role = current_user.get('role', 'user')
             display_name = user_email.split('@')[0].replace('.', ' ').title() if user_email else "Vault User"
-            return _supabase_timeout_read_response(
+            return _dependency_timeout_read_response(
                 "/api/vault/user-info",
                 extra={
                     "display_name": display_name,
-                    "user_id": None,
+                    "user_id": "",
                     "is_admin": user_role == 'admin',
                     "root_label": display_name if user_role != 'admin' else "Vault (Admin)",
                 },
             )
-        return jsonify({"success": False, "error": "Failed to load user info"}), 500
+        return jsonify({
+            "success": False,
+            "error": "VVAULT auth database is unavailable",
+            "error_code": type(e).__name__,
+            "auth_owner": AUTH_OWNER,
+            "session_owner": SESSION_OWNER,
+        }), 503
 
 @app.route('/api/vault/files')
 @require_auth
 def get_vault_files():
-    """Get vault files from Supabase (multi-tenant: users see only their files)"""
+    """Get vault files from local VVAULT body storage."""
     route_started_at = time.perf_counter()
     user_lookup_ms = 0
     row_fetch_ms = 0
     transform_ms = 0
     try:
-        read_allowed, read_state = SUPABASE_STEWARD.allow_read()
-        if not read_allowed:
-            return _supabase_read_block_response("/api/vault/files", state=read_state)
-
-        if not supabase_client:
-            return _supabase_unavailable_response(
-                "Supabase is not configured for this backend. Vault files are temporarily unavailable."
-            )
-        
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
@@ -4439,40 +4009,19 @@ def get_vault_files():
         requested_path = (request.args.get('path') or '').strip().strip('/')
         
         user_lookup_started_at = time.perf_counter()
-        user_result = supabase_client.table('users').select('id, name').eq('email', user_email).execute()
+        user_id = _get_authenticated_user_id()
         user_lookup_ms = int(round((time.perf_counter() - user_lookup_started_at) * 1000))
-        user_id = user_result.data[0]['id'] if user_result.data else None
-        user_name = user_result.data[0].get('name', user_email.split('@')[0]) if user_result.data else user_email.split('@')[0]
+        user_name = current_user.get('name') or user_email.split('@')[0]
         
         if not is_admin and not user_id:
-            return jsonify({
-                "success": True,
-                "files": [],
-                "count": 0,
-                "user_root": user_name,
-                "message": "No files yet - upload your first file to get started"
-            })
+            return jsonify({"success": False, "error": "User not found"}), 403
 
         row_fetch_started_at = time.perf_counter()
-        if requested_path:
-            rows = _fetch_scoped_vault_rows(
-                requested_path,
-                user_id=user_id,
-                is_admin=is_admin,
-            )
-        elif is_admin:
-            logger.debug(f"Admin {user_email} fetching all vault files")
-            rows = _fetch_all_rows(
-                lambda: supabase_client.table('vault_files').select('id, user_id, is_system, filename, storage_path, construct_id, file_type, metadata, created_at')
-            )
-        else:
-            logger.debug(f"User {user_email} fetching their vault files (user_id={user_id})")
-            rows = _fetch_all_rows(
-                lambda: supabase_client.table('vault_files')
-                .select('id, user_id, is_system, filename, storage_path, construct_id, file_type, metadata, created_at')
-                .eq('user_id', user_id)
-                .eq('is_system', False)
-            )
+        rows = VAULT_FILE_REPOSITORY.list_for_browser(
+            user_id=user_id,
+            is_admin=is_admin,
+            requested_path=requested_path,
+        )
         row_fetch_ms = int(round((time.perf_counter() - row_fetch_started_at) * 1000))
 
         transform_started_at = time.perf_counter()
@@ -4496,38 +4045,32 @@ def get_vault_files():
         
         return jsonify({
             "success": True,
-            "supabase_available": True,
             "degraded": False,
             "canonical": True,
-            "storage_mode": "supabase",
-            "connection_state": SUPABASE_STEWARD.snapshot().get("connection_state"),
+            "storage_mode": "vvault_body",
+            "storage_owner": VAULT_FILE_OWNER,
             "files": files,
             "count": len(files),
             "user_root": user_name if not is_admin else "Vault (Admin)"
         })
     except Exception as e:
         logger.error(f"Error fetching vault files: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_read_response(
-                "/api/vault/files",
-                include_files=True,
-            )
         return jsonify({
             "success": False,
-            "error": "Failed to load vault files"
-        }), 500
+            "error": "Failed to load vault files",
+            "error_code": type(e).__name__,
+            "storage_mode": "vvault_body",
+            "storage_owner": VAULT_FILE_OWNER,
+        }), 503
 
 @app.route('/api/vault/knowledge-files')
 @require_chatty_auth
 def get_knowledge_files():
-    """Get knowledge files for a construct from Supabase vault_files.
+    """Get knowledge files for a construct from VVAULT-native vault_files.
     Used by GPTCreator to list construct documents stored in VVAULT.
     Query params: construct_id (required)
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-        
         construct_id = request.args.get('construct_id', '').strip()
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
@@ -4535,22 +4078,14 @@ def get_knowledge_files():
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
-        user_email = current_user.get('email')
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
+        user_id = _get_authenticated_user_id()
         
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
         
         knowledge_folders = ['documents', 'identity', 'config', 'chatty']
-        query = supabase_client.table('vault_files').select(
-            'id, filename, file_type, metadata, created_at, construct_id, sha256'
-        ).eq('construct_id', construct_id).eq('user_id', user_id)
-        
-        result = query.execute()
-        
         knowledge_data = []
-        for row in (result.data or []):
+        for row in VAULT_FILE_REPOSITORY.list_knowledge_files(construct_id=construct_id, user_id=user_id):
             fname = row.get('filename', '')
             parts = fname.split('/')
             folder = parts[-2] if len(parts) >= 2 else ''
@@ -4641,32 +4176,28 @@ def upload_knowledge_files():
       - If a file is a .zip, it is extracted and each inner file is stored individually.
 
     Each file is routed to its VSI folder via map_to_vsi_folder() and inserted
-    into Supabase vault_files. Existing files with the same path are updated
+    into local VVAULT vault_files. Existing files with the same path are updated
     (upsert by filename + construct_id + user_id).
 
     Returns summary with created/updated/skipped/failed counts.
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 503
-
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
-        user_email = current_user.get('email')
-        user_role = current_user.get('role', 'user')
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
-        if not user_id and user_role == 'admin':
-            user_id = _resolve_construct_owner_user_id(construct_id)
-        if not user_id:
-            return jsonify({"success": False, "error": "User not found"}), 403
 
         construct_id = (request.form.get('construct_id') or '').strip()
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
         callsign = _normalize_callsign(construct_id)
+        user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
+        user_id = _get_authenticated_user_id()
+        if not user_id and user_role == 'admin':
+            user_id = _resolve_construct_owner_user_id(callsign)
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
         uploaded_files = request.files.getlist('files')
         if not uploaded_files or all(f.filename == '' for f in uploaded_files):
             return jsonify({"success": False, "error": "No files provided"}), 400
@@ -4750,11 +4281,8 @@ def upload_knowledge_files():
         failed = 0
         failed_files = []
 
-        existing_result = supabase_client.table('vault_files').select(
-            'id, filename'
-        ).eq('construct_id', callsign).eq('user_id', user_id).execute()
         existing_map = {}
-        for row in (existing_result.data or []):
+        for row in VAULT_FILE_REPOSITORY.list_knowledge_files(construct_id=callsign, user_id=user_id):
             existing_map[row['filename']] = row['id']
 
         for entry in file_entries:
@@ -4791,11 +4319,11 @@ def upload_knowledge_files():
 
                 if vsi_path in existing_map:
                     file_id = existing_map[vsi_path]
-                    _vault_files_write_with_optional_updated_at('update', record, record_id=file_id)
+                    _upsert_vault_file_record(record, context='knowledge_upload')
                     updated += 1
                 else:
                     record['created_at'] = now
-                    _vault_files_write_with_optional_updated_at('insert', record)
+                    _upsert_vault_file_record(record, context='knowledge_upload')
                     existing_map[vsi_path] = True
                     created += 1
             except Exception as fe:
@@ -4819,9 +4347,7 @@ def upload_knowledge_files():
 
     except Exception as e:
         logger.error(f"KNOWLEDGE_UPLOAD: Error: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/vault/knowledge-files/upload")
-        return jsonify({"success": False, "error": "Knowledge upload failed"}), 500
+        return jsonify({"success": False, "error": "Knowledge upload failed", "error_code": type(e).__name__}), 503
 
 
 @app.route('/api/vault/knowledge-files/<file_id>', methods=['DELETE'])
@@ -4829,31 +4355,24 @@ def upload_knowledge_files():
 def delete_knowledge_file(file_id):
     """Delete a single knowledge file by ID (user-scoped)."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 503
-
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
         user_email = current_user.get('email')
         user_role = current_user.get('role', 'user')
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
-        if not user_id and user_role == 'admin':
-            user_id = _resolve_construct_owner_user_id(construct_id)
+        user_id = _get_authenticated_user_id()
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
-        existing = supabase_client.table('vault_files').select('id, filename, construct_id').eq('id', file_id).eq('user_id', user_id).execute()
-        if not existing.data:
+        row = VAULT_FILE_REPOSITORY.get_user_file(file_id=file_id, user_id=user_id)
+        if not row:
             return jsonify({"success": False, "error": "File not found or access denied"}), 404
 
-        row = existing.data[0]
         construct_id = (row.get('construct_id') or '').strip()
         if construct_id:
             enforce_pocketverse_authority(construct_id, _pocketverse_request_context())
 
-        supabase_client.table('vault_files').delete().eq('id', file_id).eq('user_id', user_id).execute()
+        VAULT_FILE_REPOSITORY.delete_for_user(file_id=file_id, user_id=user_id)
         logger.info(f"KNOWLEDGE_DELETE: file_id={file_id} user={user_email} filename={row.get('filename')}")
         _log_privileged_event(
             "mass_delete",
@@ -4868,9 +4387,7 @@ def delete_knowledge_file(file_id):
         return jsonify({"success": True, "message": "File deleted", "file_id": file_id})
     except Exception as e:
         logger.error(f"KNOWLEDGE_DELETE: Error deleting file {file_id}: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/vault/knowledge-files/<file_id>")
-        return jsonify({"success": False, "error": "File delete failed"}), 500
+        return jsonify({"success": False, "error": "File delete failed", "error_code": type(e).__name__}), 503
 
 
 @app.route('/api/vault/memup/sync', methods=['POST'])
@@ -4878,9 +4395,6 @@ def delete_knowledge_file(file_id):
 def sync_memup():
     """Trigger memup sync for a construct — processes transcripts into capsule data."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
@@ -4890,10 +4404,8 @@ def sync_memup():
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
-        user_email = current_user.get('email')
         user_role = current_user.get('role', 'user')
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
+        user_id = _get_authenticated_user_id()
         if not user_id and user_role == 'admin':
             user_id = _resolve_construct_owner_user_id(construct_id)
         if not user_id:
@@ -4903,7 +4415,7 @@ def sync_memup():
         _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from memup_sync import sync_construct_memup
 
-        result = sync_construct_memup(supabase_client, construct_id, user_id)
+        result = sync_construct_memup(VAULT_FILE_REPOSITORY, construct_id, user_id)
         status_code = 200 if result.get('success') else 404
         return jsonify(result), status_code
 
@@ -4911,9 +4423,7 @@ def sync_memup():
         logger.error(f"MEMUP_SYNC_ERROR: {e}")
         import traceback
         traceback.print_exc()
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/vault/memup/sync")
-        return jsonify({"success": False, "error": "Memup sync failed"}), 500
+        return jsonify({"success": False, "error": "Memup sync failed", "error_code": type(e).__name__}), 503
 
 
 @app.route('/api/vault/memup/materialize', methods=['POST'])
@@ -4921,9 +4431,6 @@ def sync_memup():
 def materialize_memup():
     """Materialize a canonical memup capsule from transcript candidates without running the full sync path."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
@@ -4933,10 +4440,8 @@ def materialize_memup():
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
-        user_email = current_user.get('email')
         user_role = current_user.get('role', 'user')
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
+        user_id = _get_authenticated_user_id()
         if not user_id and user_role == 'admin':
             user_id = _resolve_construct_owner_user_id(construct_id)
         if not user_id:
@@ -4989,9 +4494,7 @@ def materialize_memup():
         logger.error(f"MEMUP_MATERIALIZE_ERROR: {e}")
         import traceback
         traceback.print_exc()
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/vault/memup/materialize")
-        return jsonify({"success": False, "error": "Memup materialization failed"}), 500
+        return jsonify({"success": False, "error": "Memup materialization failed", "error_code": type(e).__name__}), 503
 
 
 @app.route('/api/vault/memup/status')
@@ -4999,9 +4502,6 @@ def materialize_memup():
 def memup_status():
     """Check memup sync status for a construct — returns capsule metadata if it exists."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
@@ -5010,11 +4510,9 @@ def memup_status():
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
-        user_email = current_user.get('email')
         user_role = current_user.get('role', 'user')
         is_admin = user_role == 'admin'
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
+        user_id = _get_authenticated_user_id()
         if not user_id and not is_admin:
             return jsonify({"success": False, "error": "User not found"}), 403
 
@@ -5098,9 +4596,6 @@ def memup_status():
 def simdrive_list():
     """List all SimDrive files for a construct with classification metadata."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
@@ -5109,16 +4604,15 @@ def simdrive_list():
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
-        user_email = current_user.get('email')
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
+        user_id = _get_authenticated_user_id()
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
-        simdrive_path = f'instances/{construct_id}/simDrive/%'
-        result = supabase_client.table('vault_files').select(
-            'id, filename, file_type, sha256, metadata, created_at, updated_at'
-        ).eq('construct_id', construct_id).eq('user_id', user_id).ilike('filename', simdrive_path).execute()
+        rows = VAULT_FILE_REPOSITORY.list_simdrive_files(
+            construct_id=construct_id,
+            user_id=user_id,
+            include_content=False,
+        )
 
         import sys as _sys
         _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -5126,7 +4620,7 @@ def simdrive_list():
 
         parser = SimDriveParser(construct_id)
         files = []
-        for row in (result.data or []):
+        for row in rows:
             classified = parser.classify_file(row.get('filename', ''))
             files.append({
                 'id': row['id'],
@@ -5138,7 +4632,7 @@ def simdrive_list():
                 'updated_at': row.get('updated_at', ''),
             })
 
-        manifest = parser.build_manifest(result.data or [])
+        manifest = parser.build_manifest(rows)
 
         return jsonify({
             "success": True,
@@ -5158,9 +4652,6 @@ def simdrive_list():
 def simdrive_read():
     """Read a specific SimDrive file with parsed classification."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
@@ -5170,20 +4661,14 @@ def simdrive_read():
         if not file_id or not construct_id:
             return jsonify({"success": False, "error": "file_id and construct_id are required"}), 400
 
-        user_email = current_user.get('email')
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
+        user_id = _get_authenticated_user_id()
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
-        result = supabase_client.table('vault_files').select(
-            'id, filename, content, file_type, sha256, metadata, created_at, updated_at'
-        ).eq('id', file_id).eq('construct_id', construct_id).eq('user_id', user_id).execute()
-
-        if not result.data:
+        row = VAULT_FILE_REPOSITORY.get_user_file(file_id=file_id, construct_id=construct_id, user_id=user_id)
+        if not row:
             return jsonify({"success": False, "error": "File not found"}), 404
 
-        row = result.data[0]
         filename = row.get('filename', '')
         if '/simDrive/' not in filename:
             return jsonify({"success": False, "error": "File is not in simDrive folder"}), 403
@@ -5223,9 +4708,6 @@ def simdrive_read():
 def simdrive_write():
     """Write or update a SimDrive file for a construct."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
@@ -5238,9 +4720,7 @@ def simdrive_write():
         if not construct_id or not filename:
             return jsonify({"success": False, "error": "construct_id and filename are required"}), 400
 
-        user_email = current_user.get('email')
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
+        user_id = _get_authenticated_user_id()
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
@@ -5300,9 +4780,7 @@ def simdrive_write():
 
     except Exception as e:
         logger.error(f"SIMDRIVE_WRITE_ERROR: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/vault/simdrive/write")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e), "error_code": type(e).__name__}), 503
 
 
 @app.route('/api/vault/simdrive/inject', methods=['POST'])
@@ -5314,9 +4792,6 @@ def simdrive_inject():
     and writes it to instances/{construct}/simDrive/continuity_injection.json.
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         current_user = getattr(request, 'current_user', None)
         if not current_user:
             return jsonify({"success": False, "error": "Authentication required"}), 401
@@ -5328,24 +4803,23 @@ def simdrive_inject():
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
-        user_email = current_user.get('email')
-        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-        user_id = user_result.data[0]['id'] if user_result.data else None
+        user_id = _get_authenticated_user_id()
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
         capsule_path = f'instances/{construct_id}/memup/{construct_id}.capsule'
-        capsule_result = supabase_client.table('vault_files').select('content').eq(
-            'construct_id', construct_id
-        ).eq('user_id', user_id).eq('filename', capsule_path).execute()
-
-        if not capsule_result.data:
+        capsule_row = VAULT_FILE_REPOSITORY.find_by_path(
+            construct_id=construct_id,
+            user_id=user_id,
+            filename=capsule_path,
+        )
+        if not capsule_row:
             return jsonify({
                 "success": False,
                 "error": "No memup capsule found. Run memup sync first."
             }), 404
 
-        capsule_content = capsule_result.data[0].get('content', '')
+        capsule_content = capsule_row.get('content', '')
         try:
             capsule_data = json.loads(capsule_content) if capsule_content else {}
         except (json.JSONDecodeError, TypeError):
@@ -5419,9 +4893,7 @@ def simdrive_inject():
         logger.error(f"SIMDRIVE_INJECT_ERROR: {e}")
         import traceback
         traceback.print_exc()
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/vault/simdrive/inject")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e), "error_code": type(e).__name__}), 503
 
 
 @app.route('/api/vault/files/<file_id>')
@@ -5430,25 +4902,21 @@ def get_vault_file(file_id):
     """Get a single vault file by ID (multi-tenant: users can only access their files)"""
     started_at = time.perf_counter()
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-        
         current_user = request.current_user
         user_email = current_user.get('email')
         user_role = current_user.get('role', 'user')
         
-        result = supabase_client.table('vault_files').select('*').eq('id', file_id).single().execute()
+        row = VAULT_FILE_REPOSITORY.get_by_id(file_id)
         
-        if not result.data:
+        if not row:
             return jsonify({"success": False, "error": "File not found"}), 404
         
-        effective_user_id = result.data.get('user_id')
+        effective_user_id = row.get('user_id')
         if user_role != 'admin':
-            user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-            user_id = user_result.data[0]['id'] if user_result.data else None
+            user_id = _get_authenticated_user_id()
             
-            file_user_id = result.data.get('user_id')
-            is_system = result.data.get('is_system', False)
+            file_user_id = row.get('user_id')
+            is_system = row.get('is_system', False)
             
             if file_user_id is None and not is_system:
                 log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "unassigned_file")
@@ -5460,18 +4928,18 @@ def get_vault_file(file_id):
             effective_user_id = user_id
 
         backing_row = _lookup_materialized_capsule_backing_row(
-            result.data,
+            row,
             user_id=effective_user_id,
             is_admin=user_role == 'admin',
         )
         if backing_row and isinstance(backing_row.get('content'), str) and backing_row.get('content'):
             file_payload = _build_preview_payload_from_materialized_sibling(
-                result.data,
+                row,
                 backing_row,
                 preview_budget_ms=VAULT_PREVIEW_ROUTE_BUDGET_MS,
             )
         else:
-            file_payload = _derive_vault_preview_payload(result.data)
+            file_payload = _derive_vault_preview_payload(row)
         logger.info(
             "VAULT_FILE_DETAIL: id=%s path=%s route_elapsed_ms=%s preview_elapsed_ms=%s preview_status=%s preview_source=%s preview_timed_out=%s",
             file_id,
@@ -5485,7 +4953,7 @@ def get_vault_file(file_id):
         return jsonify({"success": True, "file": file_payload})
     except Exception as e:
         logger.error(f"Error fetching vault file: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e), "error_code": type(e).__name__}), 503
 
 
 @app.route('/api/vault/files/preview', methods=['POST'])
@@ -5494,9 +4962,6 @@ def preview_vault_file():
     """Build a fast preview payload from list-row metadata without refetching the file by id."""
     started_at = time.perf_counter()
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         current_user = request.current_user
         user_email = current_user.get('email')
         user_role = current_user.get('role', 'user')
@@ -5513,8 +4978,7 @@ def preview_vault_file():
 
         effective_user_id = payload.get('user_id')
         if user_role != 'admin':
-            user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-            effective_user_id = user_result.data[0]['id'] if user_result.data else None
+            effective_user_id = _get_authenticated_user_id()
             if not effective_user_id:
                 return jsonify({"success": False, "error": "User not found"}), 403
 
@@ -5596,7 +5060,7 @@ def preview_vault_file():
                     preview_row['content'] = hydrated_text
                     file_payload = _derive_vault_preview_payload(preview_row, preview_budget_ms=0)
                     file_payload['preview_status'] = 'recovered'
-                    file_payload['preview_source'] = 'storage_hydrate'
+                    file_payload['preview_source'] = 'vvault_hydrate'
                 else:
                     file_payload = dict(pseudo_row)
                     file_payload['content'] = _build_unavailable_capsule_preview(file_payload, filename, file_type)
@@ -5638,7 +5102,7 @@ def preview_vault_file():
         return jsonify({"success": True, "file": file_payload})
     except Exception as e:
         logger.error(f"Error building fast vault preview: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e), "error_code": type(e).__name__}), 503
 
 # ============================================================================
 # SERVICE API ENDPOINTS (for FXShinobi/Chatty backend-to-backend integration)
@@ -5646,23 +5110,17 @@ def preview_vault_file():
 
 @app.route('/api/vault/health')
 def service_health():
-    """Service health check - returns VVAULT availability status
+    """Service health check - returns VVAULT-native availability status
     
     No auth required - allows services to check if VVAULT is up before auth
     """
-    supabase_meta = _get_supabase_status()
-    connection = SUPABASE_STEWARD.snapshot()
-    supabase_status = "connected" if supabase_client else "not_configured"
+    runtime_status = _get_vvault_runtime_status()
     service_api_status = "enabled" if VVAULT_SERVICE_TOKEN else "disabled"
-    
-    # Check Supabase connectivity
-    store_status = connection.get("connection_state") or "unknown"
-    
-    overall_status = "ok"
-    if store_status != "connected":
-        overall_status = "degraded"
-    if supabase_meta["mode"] != "healthy":
-        overall_status = "degraded"
+    body_status = runtime_status.get("body_database") or {}
+    auth_status = runtime_status.get("auth") or {}
+    storage_status = runtime_status.get("storage") or {}
+
+    overall_status = "ok" if body_status.get("ready") else "degraded"
     if service_api_status == "disabled":
         overall_status = "degraded"
     
@@ -5672,97 +5130,144 @@ def service_health():
         "version": "1.0.0",
         "timestamp": datetime.now().isoformat(),
         "components": {
-            "supabase": supabase_status,
-            "store": store_status,
-            "service_api": service_api_status
+            "body_database": body_status.get("status"),
+            "auth": auth_status.get("status"),
+            "storage": storage_status.get("status"),
+            "service_api": service_api_status,
         },
-        "supabase_mode": supabase_meta["mode"],
-        "supabase_config": supabase_meta,
-        "supabase_connection": connection,
+        "runtime": runtime_status.get("runtime"),
+        "body_database": body_status,
+        "auth": auth_status,
+        "storage": storage_status,
+        "storage_mode": "vvault_body",
+        "storage_owner": VAULT_FILE_OWNER,
+        "auth_owner": AUTH_OWNER,
+        "session_owner": SESSION_OWNER,
         "message": "VVAULT service API" if service_api_status == "enabled" else "Service API disabled (VVAULT_SERVICE_TOKEN not set)"
     })
+
+def _safe_config_path_segment(value: str, field: str) -> str:
+    segment = str(value or "").strip()
+    if not segment or "/" in segment or "\\" in segment or segment in {".", ".."} or ".." in segment:
+        raise ValueError(f"{field} contains an invalid path segment")
+    return segment
+
+
+def _service_config_path(service: str, strategy_id: str) -> str:
+    safe_service = _safe_config_path_segment(service, "service")
+    safe_strategy = _safe_config_path_segment(strategy_id, "strategy_id")
+    return f"system/configs/{safe_service}/{safe_strategy}.json"
+
+
+def _service_credential_path(service: str, key: str) -> str:
+    safe_service = _safe_config_path_segment(service, "service")
+    safe_key = _safe_config_path_segment(key, "key")
+    return f"system/credentials/{safe_service}/{safe_key}.json"
+
+
+def _service_credential_payload_from_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    content = row.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    parsed = _safe_json_loads(content)
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _service_config_payload_from_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    content = row.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    parsed = _safe_json_loads(content)
+    if not isinstance(parsed, dict):
+        return None
+    return {
+        "strategy_id": parsed.get("strategy_id"),
+        "params": parsed.get("params", {}),
+        "symbols": parsed.get("symbols", []),
+        "risk_limits": parsed.get("risk_limits", {}),
+        "enabled": parsed.get("enabled", True),
+        "version": parsed.get("version", 1),
+        "updated_at": parsed.get("updated_at") or row.get("updated_at"),
+    }
+
+
+def _list_service_config_rows(service: str) -> List[Dict[str, Any]]:
+    prefix = f"system/configs/{_safe_config_path_segment(service, 'service')}"
+    summaries = VAULT_FILE_REPOSITORY.list_for_browser(user_id=None, is_admin=True, requested_path=prefix)
+    rows: List[Dict[str, Any]] = []
+    for summary in summaries:
+        path = summary.get("storage_path") or summary.get("filename")
+        if not path or not str(path).startswith(f"{prefix}/"):
+            continue
+        row = VAULT_FILE_REPOSITORY.get_system_file(path)
+        if row:
+            rows.append(row)
+    return rows
+
 
 @app.route('/api/vault/configs/<service>')
 @require_service_token
 def get_service_configs(service):
-    """Get strategy configs for a service (e.g., fxshinobi)
-    
-    Returns: symbols, risk limits, params, enabled flags
-    Auth: Requires VVAULT_SERVICE_TOKEN
-    """
+    """Get VVAULT-native strategy configs for a service."""
     try:
-        if not supabase_client:
-            return jsonify({
-                "success": False,
-                "error": "Supabase not configured"
-            }), 503
-        
-        result = supabase_client.table('strategy_configs').select('*').eq('service', service).execute()
-        
-        if not result.data:
-            # Return defaults if no configs found
+        configs = []
+        for row in _list_service_config_rows(service):
+            payload = _service_config_payload_from_row(row)
+            if payload:
+                configs.append(payload)
+
+        if not configs:
             return jsonify({
                 "success": True,
                 "service": service,
                 "configs": [],
-                "message": "No configs found, using defaults"
+                "message": "No configs found, using defaults",
+                "storage_mode": "vvault_body",
+                "storage_owner": VAULT_FILE_OWNER,
             })
-        
-        configs = []
-        for row in result.data:
-            configs.append({
-                "strategy_id": row.get('strategy_id'),
-                "params": row.get('params', {}),
-                "symbols": row.get('symbols', []),
-                "risk_limits": row.get('risk_limits', {}),
-                "enabled": row.get('enabled', True),
-                "version": row.get('version', 1),
-                "updated_at": row.get('updated_at')
-            })
-        
+
+        configs.sort(key=lambda item: str(item.get("strategy_id") or ""))
         logger.info(f"SERVICE_API: Configs retrieved for {service} ({len(configs)} strategies)")
-        
         return jsonify({
             "success": True,
             "service": service,
-            "configs": configs
+            "configs": configs,
+            "storage_mode": "vvault_body",
+            "storage_owner": VAULT_FILE_OWNER,
         })
-        
+
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logger.error(f"SERVICE_API: Error fetching configs for {service}: {e}")
         return jsonify({
             "success": False,
-            "error": "Failed to retrieve configs"
-        }), 500
+            "error": "Failed to retrieve configs",
+            "error_code": type(e).__name__,
+        }), 503
 
 @app.route('/api/vault/credentials/<key>')
 @require_service_token
 def get_service_credential(key):
-    """Get a credential by key (decrypted)
+    """Get a locally stored credential by key (decrypted)
     
     Auth: Requires VVAULT_SERVICE_TOKEN
     NEVER logs the actual credential value
     """
     try:
-        if not supabase_client:
-            return jsonify({
-                "success": False,
-                "error": "Supabase not configured"
-            }), 503
-        
-        result = supabase_client.table('service_credentials').select('*').eq('key', key).execute()
-        
-        if not result.data:
+        service = request.args.get('service', 'default')
+        path = _service_credential_path(service, key)
+        row = VAULT_FILE_REPOSITORY.get_system_file(path)
+        payload = _service_credential_payload_from_row(row or {}) if row else None
+        if not payload:
             logger.info(f"SERVICE_API: Credential not found: {key}")
             return jsonify({
                 "success": False,
                 "error": f"Credential '{key}' not found"
             }), 404
-        
-        row = result.data[0]
-        
+
         try:
-            decrypted_value = decrypt_credential(row['encrypted_value'])
+            decrypted_value = decrypt_credential(payload['encrypted_value'])
         except Exception as decrypt_error:
             logger.error(f"SERVICE_API: Decryption failed for {key}")
             return jsonify({
@@ -5775,18 +5280,21 @@ def get_service_credential(key):
         return jsonify({
             "success": True,
             "key": key,
-            "service": row.get('service'),
+            "service": payload.get('service') or service,
             "value": decrypted_value,
-            "metadata": row.get('metadata', {}),
-            "updated_at": row.get('updated_at')
+            "metadata": payload.get('metadata', {}),
+            "updated_at": payload.get('updated_at') or row.get('updated_at'),
+            "storage_mode": "vvault_body",
+            "storage_owner": VAULT_FILE_OWNER,
         })
         
     except Exception as e:
-        logger.error(f"SERVICE_API: Error fetching credential {key}: {e}")
+        logger.error(f"SERVICE_API: Error fetching credential {key}: {type(e).__name__}")
         return jsonify({
             "success": False,
-            "error": "Failed to retrieve credential"
-        }), 500
+            "error": "Failed to retrieve credential",
+            "error_code": type(e).__name__,
+        }), 503
 
 @app.route('/api/vault/credentials', methods=['POST'])
 @require_service_token
@@ -5798,12 +5306,6 @@ def store_service_credential():
     NEVER logs the actual credential value
     """
     try:
-        if not supabase_client:
-            return jsonify({
-                "success": False,
-                "error": "Supabase not configured"
-            }), 503
-        
         data = request.get_json()
         if not data:
             return jsonify({"success": False, "error": "Request body required"}), 400
@@ -5815,32 +5317,36 @@ def store_service_credential():
         
         if not key or not value:
             return jsonify({"success": False, "error": "key and value are required"}), 400
-        
-        # Encrypt the value
+
+        path = _service_credential_path(service, key)
+        existing = VAULT_FILE_REPOSITORY.get_system_file(path)
         encrypted_value = encrypt_credential(value)
-        
-        # Upsert: update if exists, insert if not
-        existing = supabase_client.table('service_credentials').select('id').eq('key', key).eq('service', service).execute()
-        
-        if existing.data:
-            # Update existing
-            supabase_client.table('service_credentials').update({
-                'encrypted_value': encrypted_value,
-                'metadata': metadata,
-                'updated_at': datetime.now().isoformat()
-            }).eq('key', key).eq('service', service).execute()
-            action = "updated"
-        else:
-            # Insert new
-            supabase_client.table('service_credentials').insert({
-                'key': key,
-                'service': service,
-                'encrypted_value': encrypted_value,
-                'metadata': metadata,
-                'created_at': datetime.now().isoformat(),
-                'updated_at': datetime.now().isoformat()
-            }).execute()
-            action = "created"
+        now = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "key": key,
+            "service": service,
+            "encrypted_value": encrypted_value,
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "created_at": (existing or {}).get("created_at") or now,
+            "updated_at": now,
+        }
+        content = json.dumps(payload, sort_keys=True, indent=2)
+        result = VAULT_FILE_REPOSITORY.upsert({
+            "filename": path,
+            "storage_path": path,
+            "content": content,
+            "metadata": {
+                "artifact_type": "service_credential",
+                "service": service,
+                "key": key,
+            },
+            "file_type": "application/json",
+            "content_type": "application/json",
+            "sha256": _sha256_text(content),
+            "is_system": True,
+            "updated_at": now,
+        })
+        action = result.get("action") or ("updated" if existing else "created")
         
         logger.info(f"SERVICE_API: Credential {action}: {key} (service: {service})")
         _log_privileged_event(
@@ -5857,99 +5363,107 @@ def store_service_credential():
             "key": key,
             "service": service,
             "action": action,
-            "message": f"Credential {action} successfully"
+            "message": f"Credential {action} successfully",
+            "storage_mode": "vvault_body",
+            "storage_owner": VAULT_FILE_OWNER,
         })
 
     except Exception as e:
-        logger.error(f"SERVICE_API: Error storing credential: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/vault/credentials")
+        logger.error(f"SERVICE_API: Error storing credential: {type(e).__name__}")
+        if _is_dependency_timeout(e):
+            return _dependency_timeout_write_response("/api/vault/credentials")
         return jsonify({
             "success": False,
-            "error": "Failed to store credential"
-        }), 500
+            "error": "Failed to store credential",
+            "error_code": type(e).__name__,
+        }), 503
 
 @app.route('/api/vault/configs/<service>', methods=['POST'])
 @require_service_token
 def store_service_config(service):
-    """Store or update strategy config for a service
-    
-    Request body: { strategy_id, params, symbols, risk_limits, enabled }
-    Auth: Requires VVAULT_SERVICE_TOKEN
-    """
+    """Store or update VVAULT-native strategy config for a service."""
     try:
-        if not supabase_client:
-            return jsonify({
-                "success": False,
-                "error": "Supabase not configured"
-            }), 503
-        
         data = request.get_json()
         if not data:
             return jsonify({"success": False, "error": "Request body required"}), 400
-        
-        strategy_id = data.get('strategy_id', 'default')
+
+        safe_service = _safe_config_path_segment(service, "service")
+        strategy_id = _safe_config_path_segment(data.get('strategy_id', 'default'), "strategy_id")
         params = data.get('params', {})
         symbols = data.get('symbols', [])
         risk_limits = data.get('risk_limits', {})
         enabled = data.get('enabled', True)
-        
-        # Upsert: update if exists, insert if not
-        existing = supabase_client.table('strategy_configs').select('id, version').eq('service', service).eq('strategy_id', strategy_id).execute()
-        
-        if existing.data:
-            current_version = existing.data[0].get('version', 1)
-            supabase_client.table('strategy_configs').update({
-                'params': params,
-                'symbols': symbols,
-                'risk_limits': risk_limits,
-                'enabled': enabled,
-                'version': current_version + 1,
-                'updated_at': datetime.now().isoformat()
-            }).eq('service', service).eq('strategy_id', strategy_id).execute()
-            action = "updated"
-            new_version = current_version + 1
-        else:
-            supabase_client.table('strategy_configs').insert({
-                'service': service,
-                'strategy_id': strategy_id,
-                'params': params,
-                'symbols': symbols,
-                'risk_limits': risk_limits,
-                'enabled': enabled,
-                'version': 1,
-                'created_at': datetime.now().isoformat(),
-                'updated_at': datetime.now().isoformat()
-            }).execute()
-            action = "created"
-            new_version = 1
-        
-        logger.info(f"SERVICE_API: Config {action} for {service}/{strategy_id} (v{new_version})")
+
+        path = _service_config_path(safe_service, strategy_id)
+        existing = VAULT_FILE_REPOSITORY.get_system_file(path)
+        existing_payload = _service_config_payload_from_row(existing) if existing else None
+        current_version = int((existing_payload or {}).get("version") or 0)
+        new_version = current_version + 1
+        now = datetime.now(timezone.utc).isoformat()
+        content_payload = {
+            "service": safe_service,
+            "strategy_id": strategy_id,
+            "params": params,
+            "symbols": symbols,
+            "risk_limits": risk_limits,
+            "enabled": enabled,
+            "version": new_version,
+            "updated_at": now,
+        }
+        content = json.dumps(content_payload, indent=2, ensure_ascii=False)
+        result = _upsert_vault_file_record(
+            {
+                "filename": path,
+                "storage_path": path,
+                "file_type": "application/json",
+                "content": content,
+                "is_system": True,
+                "sha256": _sha256_text(content),
+                "metadata": json.dumps({
+                    "folder": "system/configs",
+                    "service": safe_service,
+                    "strategy_id": strategy_id,
+                    "source": "vvault_service_config",
+                    "updatedAt": now,
+                }),
+                "created_at": existing.get("created_at") if existing else now,
+                "updated_at": now,
+            },
+            context="service_config",
+        )
+        action = result.get("action") or ("updated" if existing else "created")
+
+        logger.info(f"SERVICE_API: Config {action} for {safe_service}/{strategy_id} (v{new_version})")
         _log_privileged_event(
             "config_change",
-            resource=f"config:{service}:{strategy_id}",
+            resource=f"config:{safe_service}:{strategy_id}",
             action=action,
             result="success",
             description=f"Strategy config {action}",
-            metadata={"service": service, "strategy_id": strategy_id, "version": new_version},
+            metadata={"service": safe_service, "strategy_id": strategy_id, "version": new_version},
         )
 
         return jsonify({
             "success": True,
-            "service": service,
+            "service": safe_service,
             "strategy_id": strategy_id,
             "action": action,
-            "version": new_version
+            "version": new_version,
+            "file_id": result.get("id"),
+            "storage_path": path,
+            "storage_mode": "vvault_body",
+            "storage_owner": VAULT_FILE_OWNER,
         })
 
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logger.error(f"SERVICE_API: Error storing config: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/vault/configs/<service>")
         return jsonify({
             "success": False,
-            "error": "Failed to store config"
-        }), 500
+            "error": "Failed to store config",
+            "error_code": type(e).__name__,
+        }), 503
 
 
 @app.route('/api/vault/system-files', methods=['GET'])
@@ -5962,29 +5476,18 @@ def get_system_file():
       - storage_path (required)
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 503
-
         storage_path = (request.args.get("storage_path") or "").strip()
         if not storage_path:
             return jsonify({"success": False, "error": "storage_path is required"}), 400
 
-        result = (
-            supabase_client.table("vault_files")
-            .select("*")
-            .eq("is_system", True)
-            .eq("storage_path", storage_path)
-            .limit(1)
-            .execute()
-        )
-
-        if not result.data:
+        row = VAULT_FILE_REPOSITORY.get_system_file(storage_path)
+        if not row:
             return jsonify({"success": False, "error": "File not found"}), 404
 
-        return jsonify({"success": True, "file": result.data[0]})
+        return jsonify({"success": True, "file": row, "storage_mode": "vvault_body"})
     except Exception as e:
         logger.error(f"SERVICE_API: Error fetching system file: {e}")
-        return jsonify({"success": False, "error": "Failed to fetch system file"}), 500
+        return jsonify({"success": False, "error": "Failed to fetch system file", "error_code": type(e).__name__}), 503
 
 
 def _queue_system_file_write(
@@ -5994,27 +5497,25 @@ def _queue_system_file_write(
     sha256: str,
     reason: str,
 ) -> Tuple[Any, int]:
-    receipt = SUPABASE_WRITE_OUTBOX.queue_write(
-        operation=VAULT_FILE_UPSERT,
-        operation_kind="upsert",
-        table="vault_files",
-        record=record,
-        mutable_fields=SYSTEM_FILE_OUTBOX_MUTABLE_FIELDS,
-        identity_fields=SYSTEM_FILE_OUTBOX_IDENTITY_FIELDS,
-        idempotency_key=f"vault_files:system_file:{storage_path}:{sha256}",
-    )
-    status = 202 if receipt.get("ok") else 503
+    receipt = {
+        "ok": False,
+        "action": "retired",
+        "operation": VAULT_FILE_UPSERT,
+        "table": "vault_files",
+        "idempotency_key": f"vault_files:system_file:{storage_path}:{sha256}",
+        "reason": reason,
+        "message": "legacy remote system-file outbox is retired; VVAULT local writes are canonical.",
+    }
     return jsonify(
         {
-            "success": bool(receipt.get("ok")),
-            "queued": bool(receipt.get("ok")),
+            "success": False,
+            "queued": False,
             "canonical": False,
-            "storage_mode": "outbox",
-            "supabase_available": False,
+            "storage_mode": "vvault_body",
             "reason": reason,
             "outbox_receipt": receipt,
         }
-    ), status
+    ), 503
 
 
 def _validate_system_file_outbox_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -6062,17 +5563,9 @@ def _validate_system_file_outbox_item(item: Dict[str, Any]) -> Optional[Dict[str
 def _load_remote_system_file_for_outbox_item(item: Dict[str, Any]) -> Dict[str, Any]:
     record = item.get("record") or {}
     storage_path = str(record.get("storage_path") or "").strip()
-    result = (
-        supabase_client.table("vault_files")
-        .select("*")
-        .eq("is_system", True)
-        .eq("storage_path", storage_path)
-        .limit(1)
-        .execute()
-    )
-    if not result.data:
+    remote = VAULT_FILE_REPOSITORY.get_system_file(storage_path)
+    if not remote:
         return {}
-    remote = dict(result.data[0])
     remote_updated = _parse_vault_timestamp(remote.get("updated_at") or remote.get("created_at"))
     queued_updated = _parse_vault_timestamp(record.get("accepted_at") or record.get("updated_at") or record.get("created_at"))
     if remote_updated <= queued_updated:
@@ -6084,54 +5577,35 @@ def _write_system_file_outbox_patch(item: Dict[str, Any], patch: Dict[str, Any],
     illegal_fields = sorted(set(patch.keys()) - set(SYSTEM_FILE_OUTBOX_MUTABLE_FIELDS))
     if illegal_fields:
         raise ValueError(f"Replay patch contains non-mutable fields: {', '.join(illegal_fields)}")
-    remote_id = plan.get("remote_id") or (plan.get("merged_record") or {}).get("id")
-    if not remote_id:
-        raise ValueError("Replay patch has no remote vault_files id.")
-    result = _vault_files_write_with_optional_updated_at("update", patch, record_id=remote_id)
+    merged = dict((plan.get("merged_record") or {}))
+    merged.update(patch)
+    result = VAULT_FILE_REPOSITORY.upsert(merged)
     return {
         "ok": True,
-        "action": "updated",
-        "file_id": remote_id,
+        "action": result.get("action"),
+        "file_id": result.get("id"),
         "applied_fields": sorted(patch.keys()),
-        "row_count": len(result.data or []),
+        "row_count": 1 if result.get("id") else 0,
     }
 
 
 def _replay_system_file_outbox() -> Dict[str, Any]:
-    write_allowed, state = SUPABASE_STEWARD.allow_write()
-    if not supabase_client or not write_allowed:
-        receipt = {
-            "success": False,
-            "ok": False,
-            "action": "blocked",
-            "error_code": state.get("last_error_code") or "SUPABASE_NOT_CONNECTED",
-            "message": "Supabase is not connected; outbox replay is blocked until recovery is proven.",
-            "pending_outbox_count": SUPABASE_WRITE_OUTBOX.pending_count(),
-            "connection_state": state.get("connection_state"),
-        }
-        SUPABASE_STEWARD.update_outbox_visibility(
-            pending_outbox_count=receipt["pending_outbox_count"],
-            last_reconciliation_receipt=receipt,
-            blocked_replay_count=state.get("blocked_replay_count") or 0,
-        )
-        return receipt
-
-    receipt = SUPABASE_WRITE_OUTBOX.replay_pending(
-        remote_loader=_load_remote_system_file_for_outbox_item,
-        writer=_write_system_file_outbox_patch,
-        item_validator=_validate_system_file_outbox_item,
-    )
-    receipt["success"] = receipt.get("blocked", 0) == 0
-    return receipt
+    return {
+        "success": True,
+        "ok": True,
+        "action": "retired",
+        "storage_mode": "vvault_body",
+        "pending_outbox_count": 0,
+        "message": "legacy remote system-file outbox replay is retired; system files write synchronously to ovvaults.vault_files.",
+    }
 
 
 @app.route('/api/vault/system-files/outbox/replay', methods=['POST'])
 @require_service_token
 def replay_system_file_outbox():
-    """Replay queued system-file Supabase writes with field-scoped receipts."""
+    """Compatibility no-op after system-file writes moved to local VVAULT."""
     receipt = _replay_system_file_outbox()
-    status = 200 if receipt.get("success") else 503 if receipt.get("action") == "blocked" and receipt.get("connection_state") != "connected" else 409
-    return jsonify({"success": bool(receipt.get("success")), "outbox_replay_receipt": receipt}), status
+    return jsonify({"success": bool(receipt.get("success")), "outbox_replay_receipt": receipt}), 200
 
 
 @app.route('/api/vault/system-files', methods=['POST'])
@@ -6191,36 +5665,13 @@ def upsert_system_file():
             "updated_at": now,
         }
 
-        write_allowed, _state = SUPABASE_STEWARD.allow_write()
-        if not supabase_client or not write_allowed:
-            return _queue_system_file_write(
-                record=record,
-                storage_path=storage_path,
-                sha256=sha256,
-                reason="supabase_not_connected",
-            )
-
-        existing = (
-            supabase_client.table("vault_files")
-            .select("id, created_at")
-            .eq("is_system", True)
-            .eq("storage_path", storage_path)
-            .limit(1)
-            .execute()
-        )
-
-        action = "created"
-        if existing.data:
-            file_id = existing.data[0]["id"]
-            created_at = existing.data[0].get("created_at") or now
-            update_record = dict(record)
-            update_record["created_at"] = created_at
-            result = _vault_files_write_with_optional_updated_at('update', update_record, record_id=file_id)
-            action = "updated"
+        existing = VAULT_FILE_REPOSITORY.get_system_file(storage_path)
+        if existing and existing.get("created_at"):
+            record["created_at"] = existing.get("created_at")
         else:
-            insert_record = dict(record)
-            insert_record["created_at"] = now
-            result = _vault_files_write_with_optional_updated_at('insert', insert_record)
+            record["created_at"] = now
+        result = _upsert_vault_file_record(record, context='system_file')
+        action = result.get("action") or "updated"
 
         logger.info(f"SERVICE_API: System file upserted: {storage_path}")
         _log_privileged_event(
@@ -6239,21 +5690,13 @@ def upsert_system_file():
                 "sha256": sha256,
                 "action": action,
                 "message": "System file upserted",
-                "file": (result.data[0] if result.data else None),
+                "file": VAULT_FILE_REPOSITORY.get_system_file(storage_path),
+                "storage_mode": "vvault_body",
             }
         )
     except Exception as e:
         logger.error(f"SERVICE_API: Error upserting system file: {e}")
-        if _is_supabase_upstream_timeout(e):
-            if "record" in locals() and storage_path:
-                return _queue_system_file_write(
-                    record=record,
-                    storage_path=storage_path,
-                    sha256=sha256,
-                    reason="supabase_timeout",
-                )
-            return _supabase_timeout_write_response("/api/vault/system-files")
-        return jsonify({"success": False, "error": "Failed to upsert system file"}), 500
+        return jsonify({"success": False, "error": "Failed to upsert system file", "error_code": type(e).__name__}), 503
 
 
 @app.route('/api/vault/constructs/<construct_id>/identity-projection', methods=['GET'])
@@ -6261,9 +5704,6 @@ def upsert_system_file():
 def get_identity_projection(construct_id):
     """Read projected identity field state for a construct."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 503
-
         snapshot = _read_identity_projection_snapshot(construct_id)
         return jsonify(snapshot)
     except Exception as e:
@@ -6276,8 +5716,6 @@ def get_identity_projection(construct_id):
 def project_identity_projection(construct_id):
     """Explicitly project authoritative identity fields into canonical VVAULT files."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 503
         enforce_pocketverse_authority(construct_id, _pocketverse_request_context())
         data = request.get_json(silent=True) or {}
         fields = data.get('fields')
@@ -6294,9 +5732,7 @@ def project_identity_projection(construct_id):
         return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logger.error(f"SERVICE_API: Error projecting identity fields for {construct_id}: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/vault/constructs/<construct_id>/identity-projection/project")
-        return jsonify({"success": False, "error": "Failed to project identity fields"}), 500
+        return jsonify({"success": False, "error": "Failed to project identity fields", "error_code": type(e).__name__}), 503
 
 
 @app.route('/api/chatty/session/exchange', methods=['POST'])
@@ -6317,12 +5753,18 @@ def chatty_session_exchange():
             return jsonify({"success": False, "error": "Authenticated Chatty user email required"}), 400
 
         supplied_name = request.headers.get('X-Chatty-Name') or request.headers.get('X-Chatty-User-Name')
-        user_record = _ensure_vvault_user(email, supplied_name)
+        try:
+            user_record = _ensure_vvault_user(email, supplied_name)
+        except Exception:
+            return _auth_repository_unavailable_response("/api/chatty/session/exchange")
         role = user_record.get('role') or 'user'
 
         session_token = secrets.token_urlsafe(32)
         expires_at = datetime.now() + timedelta(days=30)
-        db_create_session(email, role, session_token, expires_at, remember_me=True)
+        try:
+            db_create_session(email, role, session_token, expires_at, remember_me=True)
+        except Exception:
+            return _auth_repository_unavailable_response("/api/chatty/session/exchange")
 
         return jsonify({
             "success": True,
@@ -6337,8 +5779,6 @@ def chatty_session_exchange():
         })
     except Exception as e:
         logger.error(f"SERVICE_API: Error exchanging Chatty session: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/chatty/session/exchange")
         return jsonify({"success": False, "error": "Failed to exchange Chatty session"}), 500
 
 
@@ -6347,38 +5787,12 @@ def chatty_session_exchange():
 def list_construct_editors():
     """List constructs for the authenticated user as VVAULT-native cards."""
     try:
-        global _VAULT_FILES_HAS_UPDATED_AT
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured", "constructs": []}), 503
-
         user_id = _get_authenticated_user_id()
         if not user_id:
             return jsonify({"success": False, "error": "User not found", "constructs": []}), 403
 
-        def _run(include_updated_at: bool):
-            columns = _select_with_optional_updated_at(
-                'construct_id, filename, storage_path, content, file_type, metadata, sha256, created_at, updated_at, user_id',
-                include_updated_at,
-            )
-            return _fetch_all_rows(
-                lambda: supabase_client.table('vault_files')
-                .select(columns)
-                .eq('user_id', user_id)
-                .ilike('filename', 'instances/%/identity/%')
-            )
-
-        try:
-            rows = _run(_VAULT_FILES_HAS_UPDATED_AT is not False)
-            if _VAULT_FILES_HAS_UPDATED_AT is None:
-                _VAULT_FILES_HAS_UPDATED_AT = True
-        except Exception as err:
-            if _is_missing_updated_at_error(err):
-                _VAULT_FILES_HAS_UPDATED_AT = False
-                rows = _run(False)
-            else:
-                raise
-
         grouped: Dict[str, List[Dict[str, Any]]] = {}
+        rows = VAULT_FILE_REPOSITORY.list_user_identity_rows(user_id=user_id)
         for row in _dedupe_vault_rows(rows):
             construct_id = _normalize_callsign(row.get('construct_id') or '')
             if not construct_id:
@@ -6413,9 +5827,6 @@ def list_construct_editors():
 def get_construct_editor(construct_id):
     """Return the VVAULT-native editor payload for a construct."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 503
-
         callsign = _normalize_callsign(construct_id)
         user_id = _get_authenticated_user_id()
         if not user_id:
@@ -6436,9 +5847,6 @@ def get_construct_editor(construct_id):
 def update_construct_editor(construct_id):
     """Update construct editor fields and return the resolved editor DTO."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 503
-
         callsign = _normalize_callsign(construct_id)
         user_id = _get_authenticated_user_id()
         if not user_id:
@@ -6543,8 +5951,8 @@ def update_construct_editor(construct_id):
         return jsonify(_build_construct_editor_payload(callsign, user_id))
     except Exception as e:
         logger.error(f"CONSTRUCT_EDITOR_UPDATE_ERROR: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/vault/constructs/<construct_id>/editor")
+        if _is_dependency_timeout(e):
+            return _dependency_timeout_write_response("/api/vault/constructs/<construct_id>/editor")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ============================================================================
@@ -6560,8 +5968,8 @@ def get_chatty_transcript(construct_id):
     Returns the chat_with_zen-001.md content from the vault
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        body_payload, body_status = chatty_body_service.transcript_body(construct_id).to_response()
+        return jsonify(body_payload), body_status
         enforce_pocketverse_authority(construct_id, _pocketverse_request_context())
         current_user = request.current_user
         user_email = current_user.get('email')
@@ -6646,8 +6054,9 @@ def update_chatty_transcript(construct_id):
     POST body: { "content": "full markdown content" }
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        data = request.get_json(silent=True) or {}
+        body_payload, body_status = chatty_body_service.update_transcript_body(construct_id, data).to_response()
+        return jsonify(body_payload), body_status
         if construct_id == 'zen-001' and _is_runtime_lock_active():
             return _runtime_lock_deferred_response(construct_id, 'transcript_update')
         enforce_pocketverse_authority(construct_id, _pocketverse_request_context())
@@ -6676,7 +6085,7 @@ def update_chatty_transcript(construct_id):
             file_id = existing_rows[0]['id']
             
             protection = _protected_vault_update(
-                supabase_client, file_id, content,
+                file_id, content,
                 force=force, context=f"update_chatty_transcript:{construct_id}"
             )
             
@@ -6688,10 +6097,16 @@ def update_chatty_transcript(construct_id):
                     "new_length": len(content)
                 }), 409
             
-            supabase_client.table('vault_files').update({
+            update_row = dict(existing_rows[0])
+            update_row.update({
                 'content': content,
-                'sha256': sha256
-            }).eq('id', file_id).execute()
+                'sha256': sha256,
+                'storage_path': update_row.get('storage_path') or update_row.get('filename') or target['storage_path'],
+                'filename': update_row.get('filename') or update_row.get('storage_path') or target['storage_path'],
+                'user_id': update_row.get('user_id') or user_id,
+                'construct_id': target['construct_id'],
+            })
+            _upsert_vault_file_record(update_row, context='chatty_transcript_update')
             
             logger.info(f"CONTENT_UPDATE [update_chatty_transcript]: construct={construct_id} file_id={file_id} before={protection['existing_length']} after={len(content)}")
             
@@ -6709,8 +6124,8 @@ def update_chatty_transcript(construct_id):
             }), 404
     except Exception as e:
         logger.error(f"Error updating chatty transcript: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/chatty/transcript/<construct_id>")
+        if _is_dependency_timeout(e):
+            return _dependency_timeout_write_response("/api/chatty/transcript/<construct_id>")
         return jsonify({"success": False, "error": "Transcript update failed"}), 500
 
 @app.route('/api/chatty/transcript/<construct_id>/message', methods=['POST'])
@@ -6733,8 +6148,9 @@ def append_chatty_message(construct_id):
     }
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        data = request.get_json(silent=True) or {}
+        body_payload, body_status = chatty_body_service.append_transcript_message(construct_id, data).to_response()
+        return jsonify(body_payload), body_status
         if construct_id == 'zen-001' and _is_runtime_lock_active():
             return _runtime_lock_deferred_response(construct_id, 'transcript_append')
         enforce_pocketverse_authority(construct_id, _pocketverse_request_context())
@@ -6804,10 +6220,16 @@ def append_chatty_message(construct_id):
         import hashlib
         sha256 = hashlib.sha256(updated_content.encode('utf-8')).hexdigest()
         
-        supabase_client.table('vault_files').update({
+        update_row = dict(existing_rows[0])
+        update_row.update({
             'content': updated_content,
-            'sha256': sha256
-        }).eq('id', file_id).execute()
+            'sha256': sha256,
+            'filename': update_row.get('filename') or actual_filename,
+            'storage_path': update_row.get('storage_path') or actual_filename,
+            'user_id': update_row.get('user_id') or user_id,
+            'construct_id': target['construct_id'],
+        })
+        _upsert_vault_file_record(update_row, context='chatty_transcript_append')
         
         attachment_count = len(attachments)
         logger.info(f"Appended {role} message to {construct_id} transcript (before={len(current_content)} after={len(updated_content)} attachments={attachment_count})")
@@ -6826,8 +6248,8 @@ def append_chatty_message(construct_id):
         
     except Exception as e:
         logger.error(f"Error appending message to transcript: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/chatty/transcript/<construct_id>/message")
+        if _is_dependency_timeout(e):
+            return _dependency_timeout_write_response("/api/chatty/transcript/<construct_id>/message")
         return jsonify({"success": False, "error": "Transcript append failed"}), 500
 
 @app.route('/api/chatty/construct/<construct_id>/files')
@@ -6836,7 +6258,7 @@ def get_construct_files(construct_id):
     """List assets, documents, and identity files for a specific construct.
 
     Normalizes the incoming construct_id to callsign format and queries
-    Supabase using BOTH the callsign (e.g. 'katana-001') and the bare
+    legacy remote using BOTH the callsign (e.g. 'katana-001') and the bare
     name (e.g. 'katana') to capture all files regardless of how their
     construct_id column was originally set.
 
@@ -6849,8 +6271,10 @@ def get_construct_files(construct_id):
       - folder: optional filter ('assets', 'documents', 'identity')
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        body_payload, body_status = chatty_body_service.construct_files(construct_id, folder=request.args.get('folder')).to_response()
+        return jsonify(body_payload), body_status
+        if not legacy_remote_client:
+            return jsonify({"success": False, "error": "legacy remote not configured"}), 500
 
         current_user = request.current_user
         user_email = current_user.get('email')
@@ -6863,7 +6287,7 @@ def get_construct_files(construct_id):
         bare_name = _bare_name_from_callsign(callsign)
         folder_filter = request.args.get('folder')
 
-        all_files = supabase_client.table('vault_files').select(
+        all_files = legacy_remote_client.table('vault_files').select(
             'id, filename, file_type, metadata, created_at, construct_id'
         ).or_(f'construct_id.eq.{callsign},construct_id.eq.{bare_name}').execute()
 
@@ -6919,7 +6343,7 @@ def get_construct_files(construct_id):
 def get_construct_identity(construct_id):
     """Return structured identity data for a construct.
 
-    Searches Supabase for canonical identity/config files first, then
+    Searches legacy remote for canonical identity/config files first, then
     compatibility files (prompt.txt, personality.json, voice.md,
     definition.json) using both the callsign and bare name construct_id
     values.
@@ -6936,9 +6360,8 @@ def get_construct_identity(construct_id):
       }
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-        enforce_pocketverse_authority(construct_id, _pocketverse_request_context())
+        body_payload, body_status = chatty_body_service.identity(construct_id).to_response()
+        return jsonify(body_payload), body_status
         callsign = _normalize_callsign(construct_id)
         bare_name = _bare_name_from_callsign(callsign)
         display_name = bare_name.capitalize()
@@ -6949,7 +6372,7 @@ def get_construct_identity(construct_id):
             'definition.txt', 'voice.json', 'voice.md',
         }
 
-        result = supabase_client.table('vault_files').select(
+        result = legacy_remote_client.table('vault_files').select(
             'filename, storage_path, content, file_type, created_at, updated_at'
         ).or_(
             f'construct_id.eq.{callsign},construct_id.eq.{bare_name}'
@@ -7058,7 +6481,7 @@ def get_construct_identity(construct_id):
         )
 
         enforcement = None
-        enf_result = supabase_client.table('vault_files').select(
+        enf_result = legacy_remote_client.table('vault_files').select(
             'content'
         ).eq('construct_id', callsign).eq('file_type', 'enforcement_config').not_.is_('content', 'null').execute()
         if enf_result.data:
@@ -7130,11 +6553,8 @@ def _validate_vault_filename(filename):
 @app.route('/api/chatty/construct/create', methods=['POST'])
 @require_chatty_auth
 def create_construct():
-    """Create a canonical Supabase-backed construct bundle in `vault_files`."""
+    """Create a canonical VVAULT-native construct bundle in `vault_files`."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         def _parse_jsonish(raw_value: Any, default: Any) -> Any:
             if raw_value in (None, ""):
                 return default
@@ -7209,8 +6629,12 @@ def create_construct():
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
-        existing = supabase_client.table('vault_files').select('id').eq('construct_id', callsign).ilike('filename', '%prompt.json').execute()
-        if existing.data:
+        existing_identity_rows = VAULT_FILE_REPOSITORY.list_construct_identity_rows(
+            callsign=callsign,
+            bare_name=_bare_name_from_callsign(callsign),
+            user_id=user_id,
+        )
+        if any(str(row.get('filename') or row.get('storage_path') or '').lower().endswith('/prompt.json') for row in existing_identity_rows):
             return jsonify({"success": False, "error": f"Construct {callsign} already exists (prompt.json found)"}), 409
 
         now = datetime.now(timezone.utc).isoformat()
@@ -7501,12 +6925,18 @@ def create_construct():
         return jsonify(response_data), 201
 
     except Exception as e:
-        logger.error(f"Error creating construct: {e}")
+        logger.error(f"Error creating construct: {type(e).__name__}")
         import traceback
         traceback.print_exc()
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/chatty/construct/create")
-        return jsonify({"success": False, "error": "Construct creation failed"}), 500
+        if _is_dependency_timeout(e):
+            return _dependency_timeout_write_response("/api/chatty/construct/create")
+        return jsonify({
+            "success": False,
+            "error": "Construct creation failed",
+            "error_code": type(e).__name__,
+            "storage_mode": "vvault_body",
+            "storage_owner": VAULT_FILE_OWNER,
+        }), 503
 
 
 @app.route('/api/chatty/constructs')
@@ -7518,13 +6948,15 @@ def get_chatty_constructs():
     'katana-001' transcripts exist, only 'katana-001' is returned.
     """
     try:
-        read_allowed, read_state = SUPABASE_STEWARD.allow_read()
+        body_payload, body_status = chatty_body_service.list_constructs().to_response()
+        return jsonify(body_payload), body_status
+        read_allowed, read_state = LEGACY_REMOTE_STEWARD.allow_read()
         if not read_allowed:
-            return _supabase_read_block_response("/api/chatty/constructs", state=read_state)
+            return _vvault_read_block_response("/api/chatty/constructs", state=read_state)
 
-        if not supabase_client:
-            return _supabase_unavailable_response(
-                "Supabase is not configured for this backend. Construct transcripts are temporarily unavailable.",
+        if not legacy_remote_client:
+            return _vvault_unavailable_response(
+                "legacy remote is not configured for this backend. Construct transcripts are temporarily unavailable.",
                 include_constructs=True,
             )
 
@@ -7535,7 +6967,7 @@ def get_chatty_constructs():
 
         if is_admin:
             rows = _fetch_all_rows(
-                lambda: supabase_client.table('vault_files').select('filename, metadata, created_at').ilike('filename', '%chat_with_%')
+                lambda: legacy_remote_client.table('vault_files').select('filename, metadata, created_at').ilike('filename', '%chat_with_%')
             )
         else:
             user_id = _get_authenticated_user_id()
@@ -7543,17 +6975,17 @@ def get_chatty_constructs():
             if not user_id:
                 return jsonify({
                     "success": True,
-                    "supabase_available": True,
+                    "legacy_remote_available": True,
                     "degraded": False,
                     "canonical": True,
-                    "storage_mode": "supabase",
-                    "connection_state": SUPABASE_STEWARD.snapshot().get("connection_state"),
+                    "storage_mode": "legacy_remote",
+                    "connection_state": LEGACY_REMOTE_STEWARD.snapshot().get("connection_state"),
                     "constructs": [],
                     "count": 0,
                 })
 
             rows = _fetch_all_rows(
-                lambda: supabase_client.table('vault_files')
+                lambda: legacy_remote_client.table('vault_files')
                 .select('filename, metadata, created_at')
                 .eq('user_id', user_id)
                 .ilike('filename', '%chat_with_%')
@@ -7601,18 +7033,18 @@ def get_chatty_constructs():
 
         return jsonify({
             "success": True,
-            "supabase_available": True,
+            "legacy_remote_available": True,
             "degraded": False,
             "canonical": True,
-            "storage_mode": "supabase",
-            "connection_state": SUPABASE_STEWARD.snapshot().get("connection_state"),
+            "storage_mode": "legacy_remote",
+            "connection_state": LEGACY_REMOTE_STEWARD.snapshot().get("connection_state"),
             "constructs": constructs,
             "count": len(constructs)
         })
     except Exception as e:
         logger.error(f"Error fetching chatty constructs: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_read_response(
+        if _is_dependency_timeout(e):
+            return _dependency_timeout_read_response(
                 "/api/chatty/constructs",
                 include_constructs=True,
             )
@@ -7638,8 +7070,9 @@ def chatty_message():
     4. Returns the assistant response
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        data = request.get_json(silent=True) or {}
+        body_payload, body_status = chatty_body_service.message(data.get('constructId'), data).to_response()
+        return jsonify(body_payload), body_status
         
         # Parse JSON with error handling
         data = request.get_json(silent=True)
@@ -7672,7 +7105,7 @@ def chatty_message():
             ollama_response = requests.post(
                 'http://localhost:11434/api/generate',
                 json={
-                    'model': 'qwen2.5:0.5b',
+                    'model': 'phi3:latest',
                     'prompt': user_message,
                     'system': system_prompt,
                     'stream': False
@@ -7732,7 +7165,7 @@ def chatty_message():
             callsign = _normalize_callsign(construct_id)
             bare = _bare_name_from_callsign(callsign)
             expected_filepath = target['storage_path']
-            existing = supabase_client.table('vault_files').select('id, content, filename, storage_path').or_(f'construct_id.eq.{callsign},construct_id.eq.{bare}').ilike('filename', f"%{target['filename']}%").execute()
+            existing = legacy_remote_client.table('vault_files').select('id, content, filename, storage_path').or_(f'construct_id.eq.{callsign},construct_id.eq.{bare}').ilike('filename', f"%{target['filename']}%").execute()
             existing_rows = existing.data or []
             logger.info(f"[Message] Service call for {construct_id} (user {user_email} not in users table), querying by construct_id")
 
@@ -7788,16 +7221,16 @@ def chatty_message():
         assistant_formatted = f"\n**{human_time_response} {timezone} - {construct_name}** [{iso_timestamp_response}]: {assistant_response}\n"
         new_content += assistant_formatted
         
-        # Backup before updating transcript in Supabase
+        # Backup before updating transcript in legacy remote
         _backup_before_write(file_id, actual_transcript_filename, current_content)
         
-        # Update transcript in Supabase
+        # Update transcript in legacy remote
         sha256 = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
         update_data = {
             'content': new_content,
             'sha256': sha256,
         }
-        supabase_client.table('vault_files').update(update_data).eq('id', file_id).execute()
+        legacy_remote_client.table('vault_files').update(update_data).eq('id', file_id).execute()
         
         logger.info(f"Message exchange with {construct_id}: user sent {len(user_message)} chars, got {len(assistant_response)} chars (before={len(current_content)} after={len(new_content)})")
         
@@ -7814,15 +7247,15 @@ def chatty_message():
         
     except Exception as e:
         logger.error(f"Error in chatty message: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/chatty/message")
+        if _is_dependency_timeout(e):
+            return _dependency_timeout_write_response("/api/chatty/message")
         return jsonify({"success": False, "error": "Chatty message failed"}), 500
 
 
 def _load_construct_identity(construct_id: str, construct_name: str) -> str:
     """Load the system prompt for a construct from its identity files.
 
-    Searches both callsign and bare name in Supabase to handle the
+    Searches both callsign and bare name in legacy remote to handle the
     construct_id column inconsistency (some files use 'katana', others
     use 'katana-001').
     """
@@ -7833,11 +7266,11 @@ def _load_construct_identity(construct_id: str, construct_name: str) -> str:
                 prompt_data = json.load(f)
                 return prompt_data.get('system_prompt', '') or prompt_data.get('prompt', '')
 
-        if supabase_client:
+        if legacy_remote_client:
             callsign = _normalize_callsign(construct_id)
             bare_name = _bare_name_from_callsign(callsign)
 
-            result = supabase_client.table('vault_files').select('content, filename, storage_path, created_at, updated_at').or_(
+            result = legacy_remote_client.table('vault_files').select('content, filename, storage_path, created_at, updated_at').or_(
                 f'construct_id.eq.{callsign},construct_id.eq.{bare_name}'
             ).not_.is_('content', 'null').execute()
 
@@ -8065,6 +7498,10 @@ def login():
         if not email or not password:
             log_auth_decision("login_attempt", email or "unknown", "/api/auth/login", "denied", "missing_credentials", ip)
             return jsonify({"success": False, "error": "Email and password are required"}), 400
+
+        if not _auth_repository_ready():
+            log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "auth_repository_unavailable", ip)
+            return _auth_repository_unavailable_response("/api/auth/login")
         
         user_data = db_get_user(email)
         
@@ -8072,7 +7509,8 @@ def login():
             log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "user_not_found", ip)
             return jsonify({"success": False, "error": "Invalid email or password"}), 401
 
-        has_vvault_pw = bool(user_data.get('password_hash'))
+        password_hash = user_data.get('password_hash')
+        has_vvault_pw = bool(password_hash and password_hash != vvault_auth_repository.OAUTH_DISABLED_PASSWORD_HASH)
         has_chatty_pw = bool(user_data.get('auth_password_hash'))
         auth_prov = (user_data.get('auth_provider') or '').strip().lower()
 
@@ -8104,8 +7542,7 @@ def login():
             }), 401
         
         password_valid = False
-        if user_data.get('password_hash'):
-            import bcrypt
+        if has_vvault_pw:
             try:
                 password_valid = bcrypt.checkpw(password.encode('utf-8'), user_data['password_hash'].encode('utf-8'))
             except Exception:
@@ -8125,7 +7562,11 @@ def login():
             expires_at = datetime.now() + timedelta(days=30)
         role = user_data.get('role', 'user')
         
-        db_create_session(email, role, session_token, expires_at, remember_me=remember_me)
+        try:
+            db_create_session(email, role, session_token, expires_at, remember_me=remember_me)
+        except Exception:
+            log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "session_persist_failed", ip)
+            return _auth_repository_unavailable_response("/api/auth/login")
         
         user_info = {
             'email': email,
@@ -8191,7 +7632,7 @@ def glyph_preview():
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
-    """User registration endpoint with bcrypt password hashing and Supabase storage"""
+    """User registration endpoint with bcrypt password hashing and VVAULT-native storage."""
     if _rate_limit_key("auth"):
         return jsonify({"success": False, "error": "rate_limit_exceeded"}), 429
     ip = request.headers.get('X-Forwarded-For', request.remote_addr)
@@ -8236,9 +7677,13 @@ def register():
         if len(password) < 8:
             log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'weak_password', ip)
             return jsonify({"success": False, "error": "Password must be at least 8 characters"}), 400
+
+        if not _auth_repository_ready():
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'auth_repository_unavailable', ip)
+            return _auth_repository_unavailable_response("/api/auth/register")
         
         existing_user = db_get_user(email)
-        if existing_user and existing_user.get('source') != 'fallback':
+        if existing_user:
             log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'user_exists', ip)
             return jsonify({"success": False, "error": "User already exists"}), 409
         
@@ -8248,61 +7693,27 @@ def register():
         
         password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         
-        user_stored = False
-        new_user_id = None
-        if supabase_client:
-            try:
-                insert_result = supabase_client.table('users').insert({
-                    'email': email,
-                    'password_hash': password_hash,
-                    'name': name,
-                    'role': 'user',
-                    'created_at': datetime.now().isoformat()
-                }).execute()
-                if insert_result.data:
-                    new_user_id = insert_result.data[0].get('id')
-                logger.info(f"User registered in Supabase: {email}")
-                user_stored = True
-            except Exception as e:
-                if 'password_hash' in str(e) or 'role' in str(e):
-                    logger.warning(f"Supabase schema missing columns, using basic insert: {e}")
-                    try:
-                        supabase_client.table('users').insert({
-                            'email': email,
-                            'name': name,
-                            'created_at': datetime.now().isoformat()
-                        }).execute()
-                        USERS_DB_FALLBACK[email] = {
-                            'password_hash': password_hash,
-                            'name': name,
-                            'role': 'user'
-                        }
-                        logger.info(f"User registered in Supabase (basic) + local fallback: {email}")
-                        user_stored = True
-                    except Exception as e2:
-                        if _is_supabase_upstream_timeout(e2):
-                            return _supabase_timeout_write_response("/api/auth/register")
-                        logger.error(f"Failed to register in Supabase: {e2}")
-                else:
-                    if _is_supabase_upstream_timeout(e):
-                        return _supabase_timeout_write_response("/api/auth/register")
-                    logger.error(f"Failed to register in Supabase: {e}")
-        
-        if not user_stored:
-            USERS_DB_FALLBACK[email] = {
-                'password_hash': password_hash,
-                'name': name,
-                'role': 'user'
-            }
-            logger.info(f"User registered in local fallback: {email}")
+        try:
+            user_row = AUTH_REPOSITORY.create_password_user(
+                email=email,
+                password_hash=password_hash,
+                name=name,
+                role='user',
+            )
+            new_user_id = str(user_row.get('id')) if user_row else None
+            logger.info(f"User registered in VVAULT auth DB: {email}")
+        except Exception as exc:
+            logger.warning(f"Failed to register in VVAULT auth DB for {email}: {type(exc).__name__}")
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'auth_user_persist_failed', ip)
+            return _auth_repository_unavailable_response("/api/auth/register")
         
         token = secrets.token_urlsafe(32)
         expires_at = datetime.now() + timedelta(days=30)
-        db_create_session(email, 'user', token, expires_at)
-        
-        # Create default folder structure for the new user
-        if new_user_id:
-            _create_default_user_folders(new_user_id, email)
+        try:
+            db_create_session(email, 'user', token, expires_at)
+        except Exception:
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'session_persist_failed', ip)
+            return _auth_repository_unavailable_response("/api/auth/register")
 
         glyph_data = None
         try:
@@ -8325,25 +7736,13 @@ def register():
                 'color_hex': glyph_color_hex,
                 'type': 'user_glyph',
             }
-            if supabase_client and new_user_id:
-                glyph_record = {
-                    'filename': glyph_filename,
-                    'file_type': 'binary',
-                    'content': glyph_b64,
-                    'construct_id': None,
-                    'user_id': new_user_id,
-                    'is_system': False,
-                    'sha256': glyph_sha,
-                    'metadata': json.dumps(glyph_meta),
-                    'created_at': datetime.now().isoformat(),
-                }
-                gr = supabase_client.table('vault_files').insert(glyph_record).execute()
-                if gr.data:
-                    logger.info(f"User glyph stored for {email}: {glyph_filename}")
             glyph_data = {
                 'glyph_base64': glyph_b64,
                 'number_rows': glyph_number_rows,
                 'color_hex': glyph_color_hex,
+                'sha256': glyph_sha,
+                'filename': glyph_filename,
+                'metadata': glyph_meta,
             }
         except Exception as ge:
             logger.warning(f"User glyph generation failed (non-fatal): {ge}")
@@ -8365,8 +7764,6 @@ def register():
         
     except Exception as e:
         logger.error(f"Registration error: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/auth/register")
         log_auth_decision('registration_error', 'unknown', '/api/auth/register', 'denied', str(e), ip)
         return jsonify({"success": False, "error": "Registration failed"}), 500
 
@@ -8391,8 +7788,6 @@ def logout():
         
     except Exception as e:
         logger.error(f"Logout error: {e}")
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/auth/logout")
         return jsonify({"success": False, "error": "Logout failed"}), 500
 
 @app.route('/api/auth/verify', methods=['GET'])
@@ -8735,8 +8130,8 @@ def get_construct_memories(construct_id):
         }
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
+        body_payload, body_status = chatty_body_service.memories(construct_id).to_response()
+        return jsonify(body_payload), body_status
         
         callsign = _normalize_callsign(construct_id)
         bare_name = _bare_name_from_callsign(callsign)
@@ -8750,7 +8145,7 @@ def get_construct_memories(construct_id):
         
         ledger_sessions = None
         try:
-            ledger_result = supabase_client.table('vault_files').select(
+            ledger_result = legacy_remote_client.table('vault_files').select(
                 'content'
             ).eq('filename', f'{callsign}_continuity_ledger.json').eq(
                 'construct_id', callsign
@@ -8922,16 +8317,16 @@ def get_construct_memories(construct_id):
 # ─── Continuity Ledger API ───────────────────────────────────────────────────
 
 def _get_transcript_files(callsign: str, bare_name: str) -> List[Dict]:
-    """Fetch transcript files from Supabase for a construct. Shared helper."""
-    result = supabase_client.table('vault_files').select(
-        'id, filename, storage_path, content, file_type, created_at, updated_at'
-    ).or_(
-        f'construct_id.eq.{callsign},construct_id.eq.{bare_name}'
-    ).not_.is_('content', 'null').execute()
-
+    """Fetch transcript files from VVAULT-native vault_files for a construct."""
+    rows = VAULT_FILE_REPOSITORY.list_construct_file_rows(
+        callsign=callsign,
+        bare_name=bare_name,
+        user_id=None,
+        include_content=True,
+    )
     transcript_keywords = ['transcript', 'character_ai', 'chatgpt', 'chat_with_', 'conversation', 'chat']
     candidates = []
-    for f in _dedupe_vault_rows(result.data or []):
+    for f in _dedupe_vault_rows(rows):
         fname = (f.get('filename') or '').lower()
         ftype = (f.get('file_type') or '').lower()
         if any(kw in fname for kw in transcript_keywords) or 'transcript' in ftype or 'markdown' in ftype or 'text' in ftype:
@@ -8949,7 +8344,7 @@ def generate_construct_ledger(construct_id):
     
     Processes all transcript files into structured session entries with
     chronological ordering, topic extraction, vibe detection, and
-    continuity hooks. Stores the ledger in Supabase vault_files.
+    continuity hooks. Stores the ledger in VVAULT vault_files.
     
     Query params:
         include_exchanges (bool): Include full exchange arrays (default false)
@@ -8966,13 +8361,13 @@ def generate_construct_ledger(construct_id):
         }
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         callsign = _normalize_callsign(construct_id)
         bare_name = _bare_name_from_callsign(callsign)
         include_exchanges = request.args.get('include_exchanges', 'false').lower() == 'true'
         output_format = request.args.get('format', 'json')
+        user_id = _get_authenticated_user_id() or _resolve_construct_owner_user_id(callsign)
+        if not user_id:
+            return jsonify({"success": False, "error": "Construct owner not found"}), 403
 
         transcript_files = _get_transcript_files(callsign, bare_name)
         if not transcript_files:
@@ -9004,32 +8399,31 @@ def generate_construct_ledger(construct_id):
         if output_format == 'markdown':
             ledger_md = parser.generate_ledger_markdown(entries)
             ledger_filename = f'{callsign}_continuity_ledger.md'
-            try:
-                existing = supabase_client.table('vault_files').select('id').eq(
-                    'filename', ledger_filename
-                ).eq('construct_id', callsign).execute()
-                ledger_record = {
+            now = datetime.now(timezone.utc).isoformat()
+            _upsert_vault_file_record(
+                {
                     'filename': ledger_filename,
+                    'storage_path': ledger_filename,
                     'content': ledger_md,
                     'file_type': 'ledger',
                     'construct_id': callsign,
+                    'user_id': user_id,
+                    'is_system': False,
+                    'sha256': _sha256_text(ledger_md),
                     'metadata': json.dumps({
                         'type': 'continuity_ledger',
                         'format': 'markdown',
                         'total_sessions': len(entries),
                         'total_exchanges': total_exchanges,
-                        'generated_at': datetime.utcnow().isoformat() + 'Z',
-                    })
-                }
-                if existing.data:
-                    supabase_client.table('vault_files').update(ledger_record).eq(
-                        'id', existing.data[0]['id']
-                    ).execute()
-                else:
-                    supabase_client.table('vault_files').insert(ledger_record).execute()
-                logger.info(f"[Ledger] Stored markdown ledger for {callsign}: {len(entries)} sessions")
-            except Exception as store_err:
-                logger.warning(f"[Ledger] Failed to store markdown ledger: {store_err}")
+                        'generated_at': now,
+                        'storage_owner': VAULT_FILE_OWNER,
+                    }),
+                    'created_at': now,
+                    'updated_at': now,
+                },
+                context='continuity_ledger',
+            )
+            logger.info(f"[Ledger] Stored markdown ledger for {callsign}: {len(entries)} sessions")
 
             return jsonify({
                 "success": True,
@@ -9044,32 +8438,32 @@ def generate_construct_ledger(construct_id):
         ledger_json = parser.generate_ledger_json(entries, include_exchanges=include_exchanges)
 
         ledger_filename = f'{callsign}_continuity_ledger.json'
-        try:
-            existing = supabase_client.table('vault_files').select('id').eq(
-                'filename', ledger_filename
-            ).eq('construct_id', callsign).execute()
-            ledger_record = {
+        now = datetime.now(timezone.utc).isoformat()
+        ledger_content = json.dumps(ledger_json)
+        _upsert_vault_file_record(
+            {
                 'filename': ledger_filename,
-                'content': json.dumps(ledger_json),
+                'storage_path': ledger_filename,
+                'content': ledger_content,
                 'file_type': 'ledger',
                 'construct_id': callsign,
+                'user_id': user_id,
+                'is_system': False,
+                'sha256': _sha256_text(ledger_content),
                 'metadata': json.dumps({
                     'type': 'continuity_ledger',
                     'format': 'json',
                     'total_sessions': len(entries),
                     'total_exchanges': total_exchanges,
-                    'generated_at': datetime.utcnow().isoformat() + 'Z',
-                })
-            }
-            if existing.data:
-                supabase_client.table('vault_files').update(ledger_record).eq(
-                    'id', existing.data[0]['id']
-                ).execute()
-            else:
-                supabase_client.table('vault_files').insert(ledger_record).execute()
-            logger.info(f"[Ledger] Stored JSON ledger for {callsign}: {len(entries)} sessions")
-        except Exception as store_err:
-            logger.warning(f"[Ledger] Failed to store JSON ledger: {store_err}")
+                    'generated_at': now,
+                    'storage_owner': VAULT_FILE_OWNER,
+                }),
+                'created_at': now,
+                'updated_at': now,
+            },
+            context='continuity_ledger',
+        )
+        logger.info(f"[Ledger] Stored JSON ledger for {callsign}: {len(entries)} sessions")
 
         return jsonify({
             "success": True,
@@ -9084,9 +8478,7 @@ def generate_construct_ledger(construct_id):
         logger.error(f"[Ledger] Error generating ledger for {construct_id}: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        if _is_supabase_upstream_timeout(e):
-            return _supabase_timeout_write_response("/api/chatty/construct/<construct_id>/ledger/generate")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e), "error_code": type(e).__name__}), 503
 
 
 @app.route('/api/chatty/construct/<construct_id>/ledger')
@@ -9098,9 +8490,6 @@ def get_construct_ledger(construct_id):
     If no ledger exists, returns empty with a hint to generate one.
     """
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-
         callsign = _normalize_callsign(construct_id)
         output_format = request.args.get('format', 'json')
 
@@ -9109,11 +8498,15 @@ def get_construct_ledger(construct_id):
         else:
             ledger_filename = f'{callsign}_continuity_ledger.json'
 
-        result = supabase_client.table('vault_files').select(
-            'content, metadata'
-        ).eq('filename', ledger_filename).eq('construct_id', callsign).execute()
+        row = VAULT_FILE_REPOSITORY.find_exact(
+            filename=ledger_filename,
+            storage_path=ledger_filename,
+            construct_id=callsign,
+            user_id=None,
+            is_admin=True,
+        )
 
-        if not result.data:
+        if not row:
             return jsonify({
                 "success": True,
                 "construct_id": callsign,
@@ -9122,8 +8515,8 @@ def get_construct_ledger(construct_id):
                 "sessions": [],
             })
 
-        content = result.data[0].get('content', '')
-        metadata = result.data[0].get('metadata', '{}')
+        content = row.get('content', '')
+        metadata = row.get('metadata', '{}')
         if isinstance(metadata, str):
             try:
                 metadata = json.loads(metadata)
@@ -9163,16 +8556,16 @@ def get_construct_ledger(construct_id):
 # Google OAuth Health Check
 @app.route('/api/auth/google/health')
 def google_oauth_health():
-    """Check if Google OAuth is configured"""
-    authority_available, authority_state = _oauth_identity_authority_available()
+    """Check if Google OAuth and VVAULT-native auth persistence are configured."""
+    auth_ready, auth_state = _oauth_identity_authority_available()
     oauth_ready = _google_oauth_ready()
     error = None
     if not oauth_ready:
         error = _google_oauth_config_error()
-    elif not authority_available:
-        error = "Supabase identity authority is currently unavailable. Sign-in is blocked to protect immutable LIFE identity."
+    elif not auth_ready:
+        error = "VVAULT auth storage is currently unavailable. Sign-in is blocked to protect local identity/session persistence."
 
-    status_code = 200 if oauth_ready and authority_available else 503
+    status_code = 200 if oauth_ready and auth_ready else 503
     return jsonify({
         "oauth_configured": _google_oauth_ready(),
         "client_id_set": bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_ID not in _OAUTH_PLACEHOLDER_VALUES),
@@ -9180,13 +8573,12 @@ def google_oauth_health():
         "provider": "google",
         "callback_url": f"{_get_backend_url()}/api/auth/google/callback",
         "frontend_url": _get_frontend_url(),
-        "supabase_mode": authority_state.get("connection_state") or "unknown",
-        "supabase_identity_authority_available": authority_available,
-        "connection_state": authority_state.get("connection_state"),
-        "canonical": authority_state.get("canonical") is True,
-        "storage_mode": authority_state.get("storage_mode") or "none",
-        "last_error_code": authority_state.get("last_error_code"),
-        "latency_ms": authority_state.get("latency_ms"),
+        "vvault_auth_ready": auth_ready,
+        "auth_owner": auth_state.get("auth_owner") or AUTH_OWNER,
+        "session_owner": auth_state.get("session_owner") or SESSION_OWNER,
+        "auth_status": auth_state.get("status") or "unknown",
+        "source_database": auth_state.get("source_database"),
+        "error_code": auth_state.get("error_code"),
         "error": error,
     }), status_code
 
@@ -9231,9 +8623,9 @@ def google_oauth_login():
         if not _allowed_redirect_base(frontend_origin):
             frontend_origin = _get_frontend_url()
 
-        authority_available, authority_state = _oauth_identity_authority_available()
-        if not authority_available:
-            return _oauth_identity_authority_redirect(frontend_origin, authority_state)
+        auth_available, auth_state = _oauth_identity_authority_available()
+        if not auth_available:
+            return _oauth_identity_authority_redirect(frontend_origin, auth_state)
 
         # Get Google's OAuth endpoints after identity authority is proven.
         google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
@@ -9304,9 +8696,9 @@ def google_oauth_callback():
         candidate_frontend = stored_frontend or oauth_origin_base
         frontend_url = _get_frontend_url(candidate_frontend) if _allowed_redirect_base(candidate_frontend) else _get_frontend_url()
 
-        authority_available, authority_state = _oauth_identity_authority_available()
-        if not authority_available:
-            return _oauth_identity_authority_redirect(frontend_url, authority_state)
+        auth_available, auth_state = _oauth_identity_authority_available()
+        if not auth_available:
+            return _oauth_identity_authority_redirect(frontend_url, auth_state)
 
         # Get Google's OAuth endpoints after identity authority is proven.
         google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
@@ -9361,56 +8753,32 @@ def google_oauth_callback():
         
         users_email = userinfo["email"]
         users_name = userinfo.get("given_name", userinfo.get("name", "User"))
-        fallback_user = USERS_DB_FALLBACK.get(users_email)
-        resolved_role = _resolve_user_role(users_email, fallback_user=fallback_user)
-
-        user_id = None
-        if supabase_client:
-            try:
-                existing = supabase_client.table('users').select('*').eq('email', users_email).execute()
-                if existing.data:
-                    supabase_user = existing.data[0]
-                    identity_receipt = _resolve_auth_life_identity(
-                        email=users_email,
-                        supabase_user=supabase_user,
-                        fallback_user=fallback_user,
-                    )
-                    if not identity_receipt.get("ok") and identity_receipt.get("error_code") == "IDENTITY_CONFLICT":
-                        return _auth_identity_failure_response(identity_receipt)
-                    user_id = supabase_user['id']
-                    resolved_role = _resolve_user_role(users_email, supabase_user=supabase_user, fallback_user=fallback_user)
-                    logger.info(f"OAuth user exists in Supabase: {users_email} (id={user_id})")
-                else:
-                    from datetime import timezone as tz
-                    ts = int(datetime.now(tz.utc).timestamp() * 1000)
-                    safe_name = re.sub(r'[^a-z0-9_]', '_', users_name.lower().strip())
-                    proposed_user_id = f"{safe_name}_{ts}"
-                    identity_receipt = _resolve_auth_life_identity(
-                        email=users_email,
-                        fallback_user=fallback_user,
-                        proposed_life_id=proposed_user_id,
-                    )
-                    if not identity_receipt.get("ok"):
-                        return _auth_identity_failure_response(identity_receipt)
-                    user_id = identity_receipt["life_user_id"]
-                    _upsert_supabase_user_record(user_id, users_email, users_name, resolved_role)
-                    logger.info(f"Created new OAuth user in Supabase: {users_email} (id={user_id})")
-            except Exception as db_err:
-                logger.warning(f"Supabase user upsert failed, using fallback: {db_err}")
-        
-        if users_email not in USERS_DB_FALLBACK:
-            USERS_DB_FALLBACK[users_email] = {
-                'password': None,
-                'name': users_name,
-                'role': resolved_role
-            }
-        else:
-            USERS_DB_FALLBACK[users_email]['role'] = resolved_role
+        resolved_role = _resolve_user_role(users_email, fallback_user=USERS_DB_FALLBACK.get(users_email))
+        try:
+            user_row = AUTH_REPOSITORY.upsert_oauth_user(
+                email=users_email,
+                name=users_name,
+                role=resolved_role,
+                oauth_provider="google",
+                oauth_subject=str(userinfo.get("sub") or users_email),
+                avatar_url=userinfo.get("picture"),
+            )
+            resolved_role = user_row.get("role") or resolved_role
+            logger.info(f"OAuth user persisted in VVAULT auth DB: {users_email} (id={user_row.get('id')})")
+        except Exception as db_err:
+            logger.warning(f"VVAULT auth user upsert failed: {type(db_err).__name__}")
+            error_message = quote("Google sign-in failed while storing VVAULT identity", safe='')
+            return redirect(f"{frontend_url}/?oauth_error={error_message}")
         
         session_token = secrets.token_urlsafe(32)
         expires_at = datetime.now() + timedelta(days=30)
         
-        db_create_session(users_email, resolved_role, session_token, expires_at, remember_me=True)
+        try:
+            db_create_session(users_email, resolved_role, session_token, expires_at, remember_me=True)
+        except Exception as session_err:
+            logger.warning(f"VVAULT auth session create failed: {type(session_err).__name__}")
+            error_message = quote("Google sign-in failed while storing VVAULT session", safe='')
+            return redirect(f"{frontend_url}/?oauth_error={error_message}")
         
         logger.info(f"Google OAuth login successful: {users_email}")
         
@@ -9478,8 +8846,10 @@ def main():
         logger.info("Pocketverse boot mode: %s", boot_mode)
         _run_pocketverse_boot(boot_mode)
 
-    SUPABASE_STEWARD.bootstrap()
-    supabase_status = _get_supabase_status()
+    runtime_status = _get_vvault_runtime_status()
+    body_status = runtime_status.get("body_database", {})
+    auth_status = runtime_status.get("auth", {})
+    storage_status = runtime_status.get("storage", {})
 
     print("🌐 VVAULT Web Server")
     print("=" * 50)
@@ -9487,15 +8857,17 @@ def main():
     print(f"📦 Capsules Directory: {CAPSULES_DIR}")
     print(f"🌐 Server Port: {port}")
     print(f"🏭 Production Mode: {is_production}")
-    print(f"🗄️ Supabase Mode: {supabase_status['mode']}")
+    print(f"🗄️ Body DB: {body_status.get('status')}")
+    print(f"🔐 Auth DB: {auth_status.get('status')}")
+    print(f"📦 Storage: {storage_status.get('status')}")
     print("=" * 50)
 
     try:
         logger.info(
-            "Supabase config: mode=%s service_role=%s anon_key=%s",
-            supabase_status["mode"],
-            supabase_status["using_service_role"],
-            bool(SUPABASE_ANON_KEY),
+            "VVAULT runtime config: body_database=%s auth=%s storage=%s",
+            body_status.get("status"),
+            auth_status.get("status"),
+            storage_status.get("status"),
         )
         logger.info(f"🚀 Starting VVAULT Web Server on {host}:{port}...")
         app.run(

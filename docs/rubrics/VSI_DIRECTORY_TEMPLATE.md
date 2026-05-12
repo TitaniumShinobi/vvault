@@ -1,6 +1,12 @@
 # VSI File Directory Template
 ## VVAULT Shard Instance - Construct Organization
 
+## Vectored Anatomy Context
+
+This template describes the current AI/VSI anatomy subtype inside VVAULT. A Vectored Anatomy is broader than a construct: it is a protected, identity-bearing directory body that can represent a human, AI, product, project, repository, place, object, organization, service, or system.
+
+Existing names such as construct, callsign, `construct_id`, and `instances/{callsign}` remain compatibility terms for AI/VSI anatomies. They must not be renamed in storage paths or APIs as part of product-language alignment.
+
 ### Canonical Root Path
 All user data lives under a sharded, timestamped path:
 ```
@@ -10,12 +16,12 @@ All user data lives under a sharded, timestamped path:
 - This is the absolute root for all of a user's vault data.
 
 ### Naming Convention
-- **Name**: The construct's display label (e.g., "Katana", "Zen", "Lin"). Used for display only.
-- **Callsign**: The instance ID, formatted as `{name}-{sequence}` (e.g., `katana-001`, `zen-001`). This is the canonical identifier used in **all** file paths, API calls, and database references.
+- **Name**: The AI/VSI anatomy display label (e.g., "Katana", "Zen", "Lin"). Used for display only.
+- **Callsign**: The current AI/VSI anatomy instance ID, formatted as `{name}-{sequence}` (e.g., `katana-001`, `zen-001`). This is the canonical identifier used in existing file paths, API calls, and database references.
 - **Metatag**: The `construct_metatag` in this template refers to the callsign (e.g., `katana-001`).
 
-### Construct ID Format (System-Level)
-Construct IDs use millisecond timestamps (not sequential numbers):
+### AI/VSI Anatomy ID Format (System-Level)
+Some system-level AI/VSI anatomy IDs use millisecond timestamps (not sequential numbers):
 - **Format**: `{name}-{milliseconds_timestamp}`
 - **Example**: `aurora-1769045516087` (not `aurora-001`)
 - **Why**: Guarantees uniqueness, encodes creation time, sortable
@@ -24,7 +30,7 @@ Construct IDs use millisecond timestamps (not sequential numbers):
 - **NEVER** write files using full internal paths as filenames. Files in the `vault_files` table use **flat filenames** (e.g., `chat_with_katana-001.md`) with the `construct_id` column set to the callsign.
 - **NEVER** create folder paths like `vvault/users/shard_0000/...` as a filename — that is the internal storage path, not a filename.
 - **ALWAYS** use the callsign in file paths (e.g., `instances/katana-001/`), never the bare name (`instances/katana/`).
-- **ALWAYS** use VVAULT's API endpoints to read/write construct data. Do not query Supabase directly.
+- **ALWAYS** use VVAULT's API endpoints to read/write construct data. Do not query legacy source systems directly.
 
 ### Full Directory Tree
 
@@ -44,7 +50,7 @@ Construct IDs use millisecond timestamps (not sequential numbers):
 ├── documents/*
 │   └── ...raw files w/folder organization*
 ├── frame/
-│   └── ...frame™ files...
+│   └── ...body/neural/memory anatomy components...
 ├── github_copilot/*
 ├── identity/
 │   ├── avatar.png
@@ -76,3 +82,10 @@ Construct IDs use millisecond timestamps (not sequential numbers):
 ```
 
 `*` = Manually organized
+
+## Compatibility Notes
+
+- `construct_id` is the current compatibility subject key for AI/VSI anatomies.
+- Capsules are anatomy snapshots, not the full product model.
+- Glyphs are identity marks attached to anatomy bodies.
+- Future neutral anatomy metadata such as `anatomy_type` and `anatomy_id` should be layered in without breaking this template.
