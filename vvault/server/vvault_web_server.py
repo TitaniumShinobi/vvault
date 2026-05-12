@@ -31,6 +31,8 @@ import mimetypes
 import time
 import secrets
 import jwt
+import base64
+import hmac
 from datetime import datetime, timedelta
 import requests  # For Turnstile verification
 from oauthlib.oauth2 import WebApplicationClient
@@ -422,6 +424,48 @@ def db_get_user(email: str) -> Optional[Dict]:
             return USERS_DB_FALLBACK[email]
         return None
 
+def _ensure_bridge_user(email: str, name: Optional[str] = None) -> Dict:
+    existing = db_get_user(email)
+    if existing:
+        return existing
+
+    display_name = (name or email.split('@')[0]).strip() or email.split('@')[0]
+    user_data = {
+        'email': email,
+        'name': display_name,
+        'role': 'user',
+        'source': 'fallback',
+    }
+
+    if supabase_client:
+        try:
+            from datetime import timezone as tz
+
+            ts = int(datetime.now(tz.utc).timestamp() * 1000)
+            safe_name = re.sub(r'[^a-z0-9_]', '_', display_name.lower().strip()) or 'user'
+            user_id = f"{safe_name}_{ts}"
+            supabase_client.table('users').insert({
+                'id': user_id,
+                'email': email,
+                'name': display_name,
+                'role': 'user'
+            }).execute()
+            user_data.update({
+                'id': user_id,
+                'source': 'supabase',
+            })
+            logger.info("Created bridge user in Supabase: %s (id=%s)", email, user_id)
+            return user_data
+        except Exception as exc:
+            logger.warning("Session bridge user upsert fell back to local cache for %s: %s", email, exc)
+
+    USERS_DB_FALLBACK[email] = {
+        'password': None,
+        'name': display_name,
+        'role': 'user'
+    }
+    return user_data
+
 def db_cleanup_expired_sessions():
     """Clean up expired sessions from database"""
     try:
@@ -456,6 +500,37 @@ def log_auth_decision(action: str, user_id: str, resource: str, result: str, rea
     
     log_level = logging.INFO if result == "allowed" else logging.WARNING
     logger.log(log_level, f"AUTH: {action} | user={user_id} | resource={resource} | result={result} | reason={reason}")
+
+def _b64url_decode_segment(segment: str) -> bytes:
+    pad = "=" * ((4 - len(segment) % 4) % 4)
+    return base64.urlsafe_b64decode(segment + pad)
+
+
+def verify_standalone_auth_session_token(raw_token: str, secret: str) -> Optional[Dict[str, Any]]:
+    """Verify a standalone shared-auth cookie token signed via HMAC."""
+    if not raw_token or not secret:
+        return None
+    try:
+        parts = raw_token.split(".")
+        if len(parts) != 2:
+            return None
+        encoded_payload, provided_sig_b64u = parts
+        msg = encoded_payload.encode("utf-8")
+        expected_mac = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).digest()
+        provided_sig = _b64url_decode_segment(provided_sig_b64u)
+        if len(provided_sig) != len(expected_mac) or not hmac.compare_digest(provided_sig, expected_mac):
+            return None
+        payload = json.loads(_b64url_decode_segment(encoded_payload).decode("utf-8"))
+        exp = int(payload.get("exp") or 0)
+        if exp < int(time.time()):
+            return None
+        email = (payload.get("email") or "").strip().lower()
+        if not email:
+            return None
+        return payload
+    except Exception as exc:
+        logger.debug("standalone auth token verify failed: %s", exc)
+        return None
 
 def get_current_user():
     """Extract and validate current user from request token (database-backed)"""
@@ -5160,6 +5235,45 @@ def google_oauth_callback():
     except Exception as e:
         logger.error(f"Google OAuth callback error: {e}")
         return jsonify({"success": False, "error": "OAuth callback failed"}), 500
+
+@app.route('/api/vault/session-bridge', methods=['POST', 'OPTIONS'])
+def session_bridge_from_standalone_auth():
+    """Mint a VVAULT session token from a valid standalone auth cookie."""
+    if request.method == 'OPTIONS':
+        return ("", 204)
+
+    secret = (os.environ.get('AUTH_SESSION_SECRET') or '').strip()
+    if not secret:
+        return jsonify({"success": False, "error": "Session bridge is not configured (AUTH_SESSION_SECRET)"}), 503
+
+    cookie_name = (os.environ.get('AUTH_COOKIE_NAME') or 'auth_sid').strip() or 'auth_sid'
+    raw_cookie = request.cookies.get(cookie_name)
+    if not raw_cookie:
+        return jsonify({"success": False, "error": "No auth session cookie"}), 401
+
+    payload = verify_standalone_auth_session_token(raw_cookie, secret)
+    if not payload:
+        return jsonify({"success": False, "error": "Invalid or expired auth session"}), 401
+
+    email = (payload.get('email') or '').strip().lower()
+    display_name = (payload.get('name') or email.split('@')[0]).strip()
+    user_row = _ensure_bridge_user(email, display_name)
+    role = user_row.get('role', 'user')
+
+    session_token = secrets.token_urlsafe(32)
+    expires_at = datetime.now() + timedelta(days=90)
+    db_create_session(email, role, session_token, expires_at, remember_me=True)
+
+    return jsonify({
+        "success": True,
+        "user": {
+            "email": email,
+            "name": user_row.get('name', display_name),
+            "role": role
+        },
+        "token": session_token,
+        "expires_at": expires_at.isoformat()
+    })
 
 # Error handlers
 @app.errorhandler(404)
