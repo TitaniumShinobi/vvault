@@ -320,10 +320,6 @@ function App() {
               <span>© 2025 VVAULT - Vectored Anatomy Vault</span>
             </div>
             <div className="footer-section">
-              <span>Backend: localhost:8000</span>
-              <span>Frontend: localhost:7784</span>
-            </div>
-            <div className="footer-section">
               <span>Version 1.0.0</span>
             </div>
           </div>

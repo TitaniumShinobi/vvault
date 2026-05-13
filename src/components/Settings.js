@@ -15,7 +15,7 @@ const Settings = ({ systemInfo, user }) => {
     blockchainNetwork: 'ethereum',
     debugLogging: false,
     apiTimeout: '30',
-    corsOrigins: 'http://localhost:7784'
+    corsOrigins: ''
   });
   
   const [config, setConfig] = useState(null);
@@ -32,6 +32,10 @@ const Settings = ({ systemInfo, user }) => {
       const response = await authFetch('/api/config');
       const data = await response.json();
       setConfig(data);
+      setSettings(prev => ({
+        ...prev,
+        corsOrigins: Array.isArray(data?.cors_origins) ? data.cors_origins.join(', ') : ''
+      }));
     } catch (error) {
       console.error('Failed to load config:', error);
     }
@@ -64,7 +68,7 @@ const Settings = ({ systemInfo, user }) => {
       blockchainNetwork: 'ethereum',
       debugLogging: false,
       apiTimeout: '30',
-      corsOrigins: 'http://localhost:7784'
+      corsOrigins: Array.isArray(config?.cors_origins) ? config.cors_origins.join(', ') : ''
     });
   };
 
@@ -271,7 +275,7 @@ const Settings = ({ systemInfo, user }) => {
                     className="form-input"
                     value={settings.corsOrigins}
                     onChange={(e) => handleSettingChange('corsOrigins', e.target.value)}
-                    placeholder="http://localhost:7784"
+                    placeholder="https://your-vvault-origin.example"
                   />
                   <p className="setting-description">
                     Allowed origins for cross-origin requests

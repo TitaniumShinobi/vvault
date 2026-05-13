@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from uuid import uuid4
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, has_request_context, request, jsonify, send_from_directory
 from flask_cors import CORS
 import hashlib
 import hmac
@@ -110,6 +110,78 @@ VAULT_PREVIEW_ROUTE_BUDGET_MS = max(0, int(os.environ.get("VVAULT_PREVIEW_ROUTE_
 VAULT_FAST_CAPSULE_PREVIEW_BUDGET_MS = max(0, int(os.environ.get("VVAULT_FAST_CAPSULE_PREVIEW_BUDGET_MS", "900")))
 VAULT_PREVIEW_MAX_TRANSCRIPTS = max(1, int(os.environ.get("VVAULT_PREVIEW_MAX_TRANSCRIPTS", "6")))
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
+CANONICAL_PRODUCTION_ORIGIN = "https://vvault.thewreck.org"
+
+
+def _normalize_origin(origin: Optional[str]) -> Optional[str]:
+    if not origin:
+        return None
+    text = str(origin).strip()
+    if not text or not text.startswith(("http://", "https://")):
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(text)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _split_origins(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _is_development_environment() -> bool:
+    return (
+        (os.environ.get("VVAULT_ENV", "") or "").strip().lower() in {"dev", "development", "local"}
+        or (os.environ.get("FLASK_ENV", "") or "").strip().lower() in {"dev", "development"}
+        or (os.environ.get("NODE_ENV", "") or "").strip().lower() == "development"
+    )
+
+
+def _request_origin() -> Optional[str]:
+    if not has_request_context():
+        return None
+    return _normalize_origin(request.url_root)
+
+
+def _build_cors_origins() -> List[str]:
+    origins: List[str] = []
+    seen = set()
+
+    def add(origin: Optional[str]) -> None:
+        normalized = _normalize_origin(origin)
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        origins.append(normalized)
+
+    for candidate in (
+        os.environ.get("VVAULT_FRONTEND_URL"),
+        os.environ.get("VVAULT_BACKEND_URL"),
+        os.environ.get("OAUTH_BASE_URL"),
+    ):
+        add(candidate)
+
+    for candidate in _split_origins(os.environ.get("CORS_ORIGINS")):
+        add(candidate)
+
+    if _is_development_environment():
+        for candidate in (
+            "http://localhost:7784",
+            "http://localhost:5173",
+            "http://localhost:5000",
+        ):
+            add(candidate)
+        replit_domain = os.environ.get("REPLIT_DEV_DOMAIN") or os.environ.get("REPL_SLUG")
+        if replit_domain:
+            add(f"https://{replit_domain}")
+    elif not origins:
+        add(CANONICAL_PRODUCTION_ORIGIN)
+
+    return origins
 
 
 def _get_pocketverse_boot_state() -> Dict[str, Any]:
@@ -173,11 +245,8 @@ PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.pat
 app = Flask(__name__, static_folder=DIST_DIR, static_url_path='')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'vvault-secret-key-change-in-production')
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
-_cors_origins = ["http://localhost:7784", "http://localhost:5173", "http://localhost:5000", "https://vvault.thewreck.org"]
-_replit_domain = os.environ.get("REPLIT_DEV_DOMAIN") or os.environ.get("REPL_SLUG")
-if _replit_domain:
-    _cors_origins.append(f"https://{_replit_domain}")
-CORS(app, origins=_cors_origins)
+_cors_origins = _build_cors_origins()
+CORS(app, origins=_cors_origins, always_send=False)
 
 # Security headers (resilience hardening)
 @app.after_request
@@ -357,8 +426,8 @@ def _log_privileged_event(
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
 GOOGLE_DISCOVERY_URL = "https://accounts.google.com/.well-known/openid-configuration"
-VVAULT_FRONTEND_URL = os.environ.get("VVAULT_FRONTEND_URL", "http://localhost:7784")
-VVAULT_BACKEND_URL = os.environ.get("VVAULT_BACKEND_URL", "http://localhost:8000")
+VVAULT_FRONTEND_URL = os.environ.get("VVAULT_FRONTEND_URL", "")
+VVAULT_BACKEND_URL = os.environ.get("VVAULT_BACKEND_URL", "")
 VVAULT_ADMIN_EMAILS = {
     email.strip().lower()
     for email in os.environ.get("VVAULT_ADMIN_EMAILS", "admin@vvault.com").split(",")
@@ -392,12 +461,25 @@ def _google_oauth_config_error() -> str:
 
 
 def _get_frontend_url(default: str = None) -> str:
-    frontend_url = VVAULT_FRONTEND_URL or default or "http://localhost:7784"
+    frontend_url = (
+        VVAULT_FRONTEND_URL
+        or _request_origin()
+        or default
+        or (None if _is_development_environment() else CANONICAL_PRODUCTION_ORIGIN)
+        or "http://localhost:7784"
+    )
     return frontend_url.rstrip("/")
 
 
 def _get_backend_url(default: str = None) -> str:
-    backend_url = OAUTH_BASE_URL or VVAULT_BACKEND_URL or default or "http://localhost:8000"
+    backend_url = (
+        OAUTH_BASE_URL
+        or VVAULT_BACKEND_URL
+        or _request_origin()
+        or default
+        or (None if _is_development_environment() else CANONICAL_PRODUCTION_ORIGIN)
+        or "http://localhost:8000"
+    )
     return backend_url.rstrip("/")
 
 
@@ -7454,11 +7536,10 @@ def eeccd_disclosure():
 def get_config():
     """Get configuration info"""
     return jsonify({
-        "backend_port": 8000,
-        "frontend_port": 7784,
-        "project_dir": PROJECT_DIR,
-        "capsules_dir": CAPSULES_DIR,
-        "cors_origins": ["http://localhost:7784"]
+        "backend_origin": _get_backend_url(),
+        "frontend_origin": _get_frontend_url(),
+        "cors_origins": list(_cors_origins),
+        "environment": "development" if _is_development_environment() else "production",
     })
 
 def _credential_login_unavailable_message(auth_provider: Optional[str]) -> str:
