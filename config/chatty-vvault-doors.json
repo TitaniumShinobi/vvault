@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "doors": {
+    "private": {
+      "name": "private",
+      "chattyPublicOrigin": "http://localhost:5173",
+      "chattyApiOrigin": "http://127.0.0.1:5050",
+      "vvaultOrigin": "http://127.0.0.1:8000",
+      "authApiOrigin": "http://127.0.0.1:1111",
+      "authPublicOrigin": "http://localhost:1111",
+      "authCookieName": "auth_sid",
+      "sessionBridgePath": "/api/vault/session-bridge",
+      "allowedBrowserOrigins": [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+      ],
+      "allowLegacyExchange": false
+    },
+    "public": {
+      "name": "public",
+      "chattyPublicOrigin": "https://chatty.thewreck.org",
+      "chattyApiOrigin": "https://chatty.thewreck.org",
+      "vvaultOrigin": "https://vvault.thewreck.org",
+      "authApiOrigin": "https://auth.thewreck.org",
+      "authPublicOrigin": "https://auth.thewreck.org",
+      "authCookieName": "auth_sid",
+      "sessionBridgePath": "/api/vault/session-bridge",
+      "allowedBrowserOrigins": [
+        "https://chatty.thewreck.org"
+      ],
+      "allowLegacyExchange": false
+    }
+  }
+}
