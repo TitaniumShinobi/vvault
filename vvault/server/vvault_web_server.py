@@ -64,13 +64,99 @@ DIST_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'assets')
 PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'public')
 
+
+def _normalize_origin(value: str) -> Optional[str]:
+    candidate = (value or "").strip()
+    if not candidate:
+        return None
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _is_local_origin(value: Optional[str]) -> bool:
+    origin = _normalize_origin(value or "")
+    if not origin:
+        return False
+    parsed = urlparse(origin)
+    return (parsed.hostname or "").strip().lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def _runtime_is_production() -> bool:
+    node_env = (os.environ.get("NODE_ENV") or "").strip().lower()
+    if node_env == "production":
+        return True
+    explicit_origins = [
+        os.environ.get("VVAULT_FRONTEND_URL"),
+        os.environ.get("VVAULT_BACKEND_URL"),
+        os.environ.get("OAUTH_BASE_URL"),
+    ]
+    return any(
+        origin and not _is_local_origin(origin)
+        for origin in explicit_origins
+    )
+
+
+def _resolve_frontend_origin() -> Optional[str]:
+    explicit = _normalize_origin(os.environ.get("VVAULT_FRONTEND_URL") or "")
+    if explicit and (not _runtime_is_production() or not _is_local_origin(explicit)):
+        return explicit
+    if _runtime_is_production():
+        return None
+    return "http://localhost:7784"
+
+
+def _resolve_backend_origin() -> Optional[str]:
+    explicit = _normalize_origin(os.environ.get("OAUTH_BASE_URL") or os.environ.get("VVAULT_BACKEND_URL") or "")
+    if explicit and (not _runtime_is_production() or not _is_local_origin(explicit)):
+        return explicit
+    if _runtime_is_production():
+        return None
+    return "http://localhost:8000"
+
+
+def _build_cors_origins():
+    origins = []
+    frontend_origin = _resolve_frontend_origin()
+    if frontend_origin:
+        origins.append(frontend_origin)
+
+    explicit_allowed = [
+        _normalize_origin(part)
+        for part in (os.environ.get("VVAULT_ALLOWED_ORIGINS") or "").split(",")
+    ]
+    for origin in explicit_allowed:
+        if origin and (not _runtime_is_production() or not _is_local_origin(origin)):
+            origins.append(origin)
+
+    if not _runtime_is_production():
+        origins.extend([
+            "http://localhost:5173",
+            "http://localhost:5000",
+        ])
+
+    replit_domain = os.environ.get("REPLIT_DEV_DOMAIN") or os.environ.get("REPL_SLUG")
+    if replit_domain and not _runtime_is_production():
+        origins.append(f"https://{replit_domain}")
+
+    deduped = []
+    seen = set()
+    for origin in origins:
+        normalized = _normalize_origin(origin or "")
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
 app = Flask(__name__, static_folder=DIST_DIR, static_url_path='')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'vvault-secret-key-change-in-production')
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
-_cors_origins = ["http://localhost:7784", "http://localhost:5000", "https://vvault.thewreck.org"]
-_replit_domain = os.environ.get("REPLIT_DEV_DOMAIN") or os.environ.get("REPL_SLUG")
-if _replit_domain:
-    _cors_origins.append(f"https://{_replit_domain}")
+_cors_origins = _build_cors_origins()
 CORS(app, origins=_cors_origins)
 
 # Google OAuth Configuration
@@ -85,7 +171,7 @@ if GOOGLE_CLIENT_ID:
 
 # Get Replit domain for OAuth callbacks
 REPLIT_DEV_DOMAIN = os.environ.get("REPLIT_DEV_DOMAIN", "localhost:5000")
-OAUTH_BASE_URL = os.environ.get("OAUTH_BASE_URL", "")
+OAUTH_BASE_URL = _resolve_backend_origin() or ""
 
 # Service API Configuration (for FXShinobi/Chatty backend-to-backend calls)
 VVAULT_SERVICE_TOKEN = os.environ.get("VVAULT_SERVICE_TOKEN")
@@ -3997,7 +4083,10 @@ def get_config():
         "frontend_port": 7784,
         "project_dir": PROJECT_DIR,
         "capsules_dir": CAPSULES_DIR,
-        "cors_origins": ["http://localhost:7784"]
+        "cors_origins": _cors_origins,
+        "runtime_environment": "production" if _runtime_is_production() else "development",
+        "frontend_origin": _resolve_frontend_origin(),
+        "backend_origin": _resolve_backend_origin(),
     })
 
 # Authentication endpoints
