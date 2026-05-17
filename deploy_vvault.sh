@@ -129,6 +129,20 @@ else
 fi
 run_step "frontend npm run build" npm run build
 
+restore_tracked_node_modules_after_build() {
+  if ! git -C "${REPO_DIR}" ls-files node_modules | grep -q .; then
+    return 0
+  fi
+  if git -C "${REPO_DIR}" diff --quiet -- node_modules && \
+     git -C "${REPO_DIR}" diff --cached --quiet -- node_modules; then
+    return 0
+  fi
+  git -C "${REPO_DIR}" restore --worktree -- node_modules
+}
+
+run_step "restore tracked node_modules after frontend build" \
+  restore_tracked_node_modules_after_build
+
 resolve_backend_dir() {
   if [ -d "${BACKEND_DIR}" ]; then
     return 0
