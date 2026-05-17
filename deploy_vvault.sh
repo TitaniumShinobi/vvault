@@ -159,6 +159,13 @@ publish_public_web_root() {
   require_cmd rsync
   mkdir -p "${PUBLIC_WEB_ROOT}" || return 1
   rsync -a --delete "${DIST_OUTPUT_DIR}/" "${PUBLIC_WEB_ROOT}/" || return 1
+  mkdir -p "${PUBLIC_WEB_ROOT}/assets" || return 1
+  if [ -d "${REPO_DIR}/public/assets" ]; then
+    rsync -a "${REPO_DIR}/public/assets/" "${PUBLIC_WEB_ROOT}/assets/" || return 1
+  fi
+  if [ -d "${REPO_DIR}/assets" ]; then
+    rsync -a "${REPO_DIR}/assets/" "${PUBLIC_WEB_ROOT}/assets/" || return 1
+  fi
 
   local doc
   for doc in \
