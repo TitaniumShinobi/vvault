@@ -22,6 +22,8 @@
 # - VVAULT_NGINX_SERVICE:     nginx systemd unit name (default: nginx)
 # - VVAULT_LOCAL_BASE_URL:    local backend probe URL (default: http://127.0.0.1:8000)
 # - VVAULT_PUBLIC_BASE_URL:   optional public HTTPS URL to probe after nginx reload
+# - VVAULT_PUBLIC_WEB_ROOT:   optional nginx static root to publish dist/ into
+# - VVAULT_DIST_DIR:          build output dir (default: <frontend>/dist)
 #
 
 set -u
@@ -57,9 +59,11 @@ VENV_DIR="${VVAULT_VENV_DIR:-${REPO_DIR}/venv}"
 NGINX_SERVICE="${VVAULT_NGINX_SERVICE:-nginx}"
 LOCAL_BASE_URL="${VVAULT_LOCAL_BASE_URL:-http://127.0.0.1:8000}"
 PUBLIC_BASE_URL="${VVAULT_PUBLIC_BASE_URL:-}"
+PUBLIC_WEB_ROOT="${VVAULT_PUBLIC_WEB_ROOT:-}"
 
 FRONTEND_DIR="${VVAULT_FRONTEND_DIR:-${REPO_DIR}}"
 BACKEND_DIR="${VVAULT_BACKEND_DIR:-${REPO_DIR}}"
+DIST_OUTPUT_DIR="${VVAULT_DIST_DIR:-${FRONTEND_DIR}/dist}"
 
 require_cmd git
 require_cmd npm
@@ -142,6 +146,35 @@ restore_tracked_node_modules_after_build() {
 
 run_step "restore tracked node_modules after frontend build" \
   restore_tracked_node_modules_after_build
+
+publish_public_web_root() {
+  if [ -z "${PUBLIC_WEB_ROOT}" ]; then
+    return 0
+  fi
+  if [ ! -d "${DIST_OUTPUT_DIR}" ]; then
+    printf 'Build output not found: %s\n' "${DIST_OUTPUT_DIR}" >&2
+    return 1
+  fi
+
+  require_cmd rsync
+  mkdir -p "${PUBLIC_WEB_ROOT}" || return 1
+  rsync -a --delete "${DIST_OUTPUT_DIR}/" "${PUBLIC_WEB_ROOT}/" || return 1
+
+  local doc
+  for doc in \
+    vvault-terms.html \
+    vvault-privacy.html \
+    vvault-eeccd.html \
+    terms-of-service.html \
+    privacy-notice.html \
+    european-electronic-communications-code-disclosure.html; do
+    if [ -f "${REPO_DIR}/html/${doc}" ]; then
+      cp "${REPO_DIR}/html/${doc}" "${PUBLIC_WEB_ROOT}/${doc}" || return 1
+    fi
+  done
+}
+
+run_step "publish frontend static root" publish_public_web_root
 
 resolve_backend_dir() {
   if [ -d "${BACKEND_DIR}" ]; then
