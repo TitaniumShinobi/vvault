@@ -35,7 +35,7 @@ const Dashboard = ({ systemInfo }) => {
     <div className="dashboard">
       <div className="page-header">
         <h1 className="page-title">🏠 Dashboard</h1>
-        <p className="page-subtitle">VVAULT system overview and status</p>
+        <p className="page-subtitle">VVAULT anatomy overview and status</p>
       </div>
       
       <div className="stats-grid">
@@ -87,11 +87,11 @@ const Dashboard = ({ systemInfo }) => {
             <div className="quick-actions">
               <button className="btn btn-primary">
                 <span>📦</span>
-                View All Capsules
+                View Anatomy Snapshots
               </button>
               <button className="btn btn-secondary">
                 <span>➕</span>
-                Create New Capsule
+                Create New Snapshot
               </button>
               <button className="btn btn-secondary">
                 <span>⛓️</span>

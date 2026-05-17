@@ -70,6 +70,30 @@ const DEFAULT_DEGRADED_MESSAGE = 'VVAULT local dependency is temporarily unavail
 
 const getPreviewPath = (file) => file?.display_path || file?.storage_path || file?.filename || '';
 
+const getDownloadFilename = (contentDisposition, fallbackName) => {
+  const fallback = fallbackName || 'vvault-file';
+  const encoded = (contentDisposition || '').match(/filename\*=UTF-8''([^;]+)/i);
+  if (encoded?.[1]) {
+    try {
+      return decodeURIComponent(encoded[1]);
+    } catch (err) {
+      return encoded[1];
+    }
+  }
+  const quoted = (contentDisposition || '').match(/filename="?([^";]+)"?/i);
+  return quoted?.[1] || fallback;
+};
+
+const isUnexpectedAppShellDownload = (response, fallbackName) => {
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const contentType = response.headers.get('Content-Type') || '';
+  return (
+    contentType.toLowerCase().includes('text/html') &&
+    /filename="?index\.html"?/i.test(disposition) &&
+    String(fallbackName || '').toLowerCase() !== 'index.html'
+  );
+};
+
 const normalizeDegradedMessage = (message) => {
   const value = String(message || '').trim();
   if (!value) return DEFAULT_DEGRADED_MESSAGE;
@@ -214,6 +238,7 @@ const VaultBrowser = ({ user }) => {
   const [refreshing, setRefreshing] = useState(false);
   const [degraded, setDegraded] = useState({ active: false, message: '', errorCode: '' });
   const [sessionExpired, setSessionExpired] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
   const fileInputRef = React.useRef(null);
 
   const showSessionExpiredState = useCallback(() => {
@@ -525,6 +550,7 @@ const VaultBrowser = ({ user }) => {
 
   const navigateToFolder = (folderName) => {
     setCurrentPath([...currentPath, folderName]);
+    setSearchTerm('');
     setSelectedFile(null);
     setFileContent(null);
     setPreviewKind(null);
@@ -533,6 +559,7 @@ const VaultBrowser = ({ user }) => {
 
   const navigateBack = () => {
     setCurrentPath(currentPath.slice(0, -1));
+    setSearchTerm('');
     setSelectedFile(null);
     setFileContent(null);
     setPreviewKind(null);
@@ -541,6 +568,7 @@ const VaultBrowser = ({ user }) => {
 
   const navigateHome = () => {
     setCurrentPath(DEFAULT_HOME_PATH);
+    setSearchTerm('');
     setSelectedFile(null);
     setFileContent(null);
     setPreviewKind(null);
@@ -563,6 +591,7 @@ const VaultBrowser = ({ user }) => {
 
   const navigateToBreadcrumb = (index) => {
     setCurrentPath(currentPath.slice(0, index + 1));
+    setSearchTerm('');
     setSelectedFile(null);
     setFileContent(null);
     setPreviewKind(null);
@@ -731,6 +760,42 @@ const VaultBrowser = ({ user }) => {
     }
   };
 
+  const downloadFile = async (file) => {
+    if (!file?.id || sessionExpired) return;
+    setNotice(null);
+    try {
+      const response = await authFetch(`/api/vault/files/${file.id}/download`);
+      const fallbackName = file.displayName || file.filename || 'vvault-file';
+      if (!response.ok) {
+        let message = 'Download failed';
+        try {
+          const payload = await response.json();
+          message = payload?.error || message;
+        } catch (err) {
+          message = response.statusText || message;
+        }
+        throw new Error(message);
+      }
+      if (isUnexpectedAppShellDownload(response, fallbackName)) {
+        throw new Error('Download route is not available from the current VVAULT backend. Restart the backend and try again.');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = getDownloadFilename(
+        response.headers.get('Content-Disposition'),
+        fallbackName
+      );
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (err) {
+      setNotice(err?.message || 'Download failed');
+    }
+  };
+
   const getFileIcon = (filename, isFolder = false, fileType = 'text') => {
     if (isFolder) return '📁';
     if (fileType === 'binary') {
@@ -769,7 +834,12 @@ const VaultBrowser = ({ user }) => {
 
   const currentFolder = getCurrentFolder();
   const isInstancesRoot = currentPath.length === 1 && currentPath[0] === 'instances';
-  const folderEntries = isInstancesRoot
+  const normalizedSearchTerm = searchTerm.trim().toLowerCase();
+  const matchesSearch = (...values) => {
+    if (!normalizedSearchTerm) return true;
+    return values.some((value) => String(value || '').toLowerCase().includes(normalizedSearchTerm));
+  };
+  const folderEntries = (isInstancesRoot
     ? [...constructs]
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((construct) => ({
@@ -783,10 +853,17 @@ const VaultBrowser = ({ user }) => {
           key: `folder-${folderName}`,
           name: folderName,
           displayName: folderName,
-        }));
-  const fileList = currentFolder.files.sort((a, b) => 
-    (a.displayName || a.filename).localeCompare(b.displayName || b.filename)
-  );
+        })))
+    .filter((folderEntry) => matchesSearch(folderEntry.displayName, folderEntry.name));
+  const fileList = [...currentFolder.files]
+    .sort((a, b) => (a.displayName || a.filename).localeCompare(b.displayName || b.filename))
+    .filter((file) => matchesSearch(
+      file.displayName,
+      file.filename,
+      file.storage_path,
+      file.display_path,
+      file.internal_path,
+    ));
 
   const favorites = [
     { name: 'All Files', icon: '📂', path: [] },
@@ -978,6 +1055,8 @@ const VaultBrowser = ({ user }) => {
               type="text" 
               placeholder="Search files..." 
               className="search-input"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
             />
             <div className="view-toggle">
               <button 
@@ -1114,7 +1193,8 @@ const VaultBrowser = ({ user }) => {
           <div className="file-preview">
             <div className="preview-header">
               <h3>{selectedFile.displayName || selectedFile.filename}</h3>
-              <button onClick={() => setSelectedFile(null)}>×</button>
+              <button type="button" onClick={() => downloadFile(selectedFile)}>Download</button>
+              <button type="button" onClick={() => setSelectedFile(null)}>×</button>
             </div>
             <div className="preview-content">
               {previewLoading ? (

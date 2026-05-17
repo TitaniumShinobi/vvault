@@ -295,10 +295,10 @@ const CinematicLogin = ({ onLogin, initialError = '' }) => {
         throw new Error(health.error || 'Google OAuth is not configured');
       }
 
-      if (!health.supabase_identity_authority_available) {
+      if (health.vvault_auth_ready === false) {
         throw new Error(
           health.error ||
-          'Google OAuth is configured, but Supabase identity authority is currently unavailable. Sign-in is blocked to protect immutable LIFE identity.'
+          'Google OAuth is configured, but VVAULT auth storage is currently unavailable. Sign-in is blocked to protect local identity and session persistence.'
         );
       }
 

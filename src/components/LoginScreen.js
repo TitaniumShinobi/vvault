@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { finalizeAuthServiceLogin, getResponseErrorMessage, readResponsePayload } from '../utils/authFetch';
 import './LoginScreen.css';
 
 const LoginScreen = ({ onLogin }) => {
@@ -36,23 +37,32 @@ const LoginScreen = ({ onLogin }) => {
         headers: {
           'Content-Type': 'application/json',
         },
+        credentials: 'include',
         body: JSON.stringify({ email, password, rememberMe }),
       });
 
-      const data = await response.json();
+      const data = await readResponsePayload(response, 'Login failed. Please try again.');
 
       if (response.ok) {
-        // Store user session
-        localStorage.setItem('vvault_user', JSON.stringify(data.user));
-        localStorage.setItem('vvault_token', data.token);
-        
-        // Call parent callback
-        onLogin(data.user);
+        if (data.token) {
+          localStorage.setItem('vvault_user', JSON.stringify(data.user));
+          localStorage.setItem('vvault_token', data.token);
+          onLogin(data.user);
+        } else if (data.ok === true && data.user) {
+          const user = await finalizeAuthServiceLogin();
+          if (!user) {
+            setError('Could not start vault session. Is AUTH_SESSION_SECRET set on Flask?');
+          } else {
+            onLogin(user);
+          }
+        } else {
+          setError(getResponseErrorMessage(response, data, 'Login failed. Please try again.'));
+        }
       } else {
-        setError(data.error || 'Login failed. Please try again.');
+        setError(getResponseErrorMessage(response, data, 'Login failed. Please try again.'));
       }
     } catch (err) {
-      setError('Network error. Please check your connection.');
+      setError(err instanceof Error && err.message ? err.message : 'Network error. Please check your connection.');
     } finally {
       setIsLoading(false);
     }
@@ -72,7 +82,7 @@ const LoginScreen = ({ onLogin }) => {
         
         {/* Title */}
         <h1 className="login-title">VVAULT</h1>
-        <p className="login-subtitle">Secure your constructs. Remember forever.</p>
+        <p className="login-subtitle">Protect identity-bearing directory bodies.</p>
 
         {/* Login Form */}
         <form className="login-form" onSubmit={handleLogin}>

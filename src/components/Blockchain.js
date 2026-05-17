@@ -124,7 +124,7 @@ const Blockchain = () => {
     <div className="blockchain">
       <div className="page-header">
         <h1 className="page-title">⛓️ Blockchain Integration</h1>
-        <p className="page-subtitle">Immutable storage and verification for your capsules</p>
+        <p className="page-subtitle">Immutable witness and verification support for anatomy artifacts</p>
       </div>
       
       <div className="stats-grid">
@@ -157,7 +157,7 @@ const Blockchain = () => {
               'Never'
             }
           </div>
-          <div className="stat-label">Last capsule synchronization</div>
+          <div className="stat-label">Last artifact synchronization</div>
         </div>
         
         <div className="card">
@@ -212,7 +212,7 @@ const Blockchain = () => {
                 ) : (
                   <>
                     <span>📦</span>
-                    Sync All Capsules
+                    Sync Anatomy Artifacts
                   </>
                 )}
               </button>
@@ -266,7 +266,7 @@ const Blockchain = () => {
                 <h4>📊 Statistics</h4>
                 <div className="info-grid">
                   <div className="info-item">
-                    <span className="info-label">Synced Capsules:</span>
+                    <span className="info-label">Synced Artifacts:</span>
                     <span className="info-value">0</span>
                   </div>
                   <div className="info-item">
@@ -313,7 +313,7 @@ const Blockchain = () => {
                 <span className="feature-icon">🔐</span>
                 <div className="feature-info">
                   <div className="feature-name">Immutable Storage</div>
-                  <div className="feature-desc">Capsules are stored immutably on blockchain</div>
+                  <div className="feature-desc">Anatomy artifacts can be witnessed immutably on blockchain</div>
                 </div>
               </div>
               
@@ -321,7 +321,7 @@ const Blockchain = () => {
                 <span className="feature-icon">🔍</span>
                 <div className="feature-info">
                   <div className="feature-name">Integrity Verification</div>
-                  <div className="feature-desc">Automatic hash verification for all capsules</div>
+                  <div className="feature-desc">Automatic hash verification for anatomy artifacts</div>
                 </div>
               </div>
               

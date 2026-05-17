@@ -184,10 +184,124 @@ class TestVVaultNativeAuthPersistence(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["vvault_auth_ready"])
+        self.assertTrue(payload["identity_authority_available"])
+        self.assertTrue(payload["canonical"])
+        self.assertEqual(payload["authority"], "vvault_auth")
+        self.assertEqual(payload["storage_mode"], "vvault_body")
+        self.assertEqual(payload["connection_state"], "connected")
         self.assertEqual(payload["auth_owner"], "ovvaults.users")
         self.assertEqual(payload["session_owner"], "ovvaults.sessions")
         self.assertNotIn("supabase_mode", payload)
         self.assertNotIn("supabase_identity_authority_available", payload)
+
+    def test_google_oauth_login_uses_request_host_when_backend_url_is_only_localhost_default(self):
+        repo = FakeAuthRepository()
+        google_client = Mock()
+        google_client.prepare_request_uri.return_value = "https://accounts.google.com/o/oauth2/v2/auth"
+        discovery_response = Mock()
+        discovery_response.json.return_value = {"authorization_endpoint": "https://oauth.example/authorize"}
+        auth_state = {"status": "healthy", "auth_owner": "ovvaults.users", "session_owner": "ovvaults.sessions"}
+
+        with self._patch_auth(repo), patch.object(server, "google_client", google_client), patch.object(
+            server, "GOOGLE_CLIENT_ID", "google-client-id"
+        ), patch.object(server, "GOOGLE_CLIENT_SECRET", "google-client-secret"), patch.object(
+            server, "OAUTH_BASE_URL", ""
+        ), patch.object(server, "VVAULT_BACKEND_URL", "http://localhost:8000"), patch.object(
+            server.requests, "get", return_value=discovery_response
+        ), patch.object(server, "_oauth_identity_authority_available", return_value=(True, auth_state)):
+            response = self.client.get(
+                "/api/auth/google",
+                headers={
+                    "Host": "vvault.thewreck.org",
+                    "Origin": "https://vvault.thewreck.org",
+                    "Referer": "https://vvault.thewreck.org/",
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        redirect_uri = google_client.prepare_request_uri.call_args.kwargs["redirect_uri"]
+        self.assertEqual(redirect_uri, "https://vvault.thewreck.org/api/auth/google/callback")
+        self.assertNotEqual(redirect_uri, "http://localhost:8000/api/auth/google/callback")
+        with self.client.session_transaction(base_url="https://vvault.thewreck.org") as flask_session:
+            self.assertEqual(flask_session["oauth_callback_url"], redirect_uri)
+
+    def test_google_oauth_callback_uses_request_host_when_no_stored_callback_and_backend_url_is_only_localhost_default(self):
+        repo = FakeAuthRepository()
+        google_client = Mock()
+        google_client.prepare_token_request.return_value = ("https://oauth.example/token", {}, "body")
+        google_client.add_token.return_value = ("https://oauth.example/userinfo", {}, None)
+        token_response = Mock(ok=True)
+        token_response.json.return_value = {"access_token": "token"}
+        discovery_response = Mock()
+        discovery_response.json.return_value = {
+            "token_endpoint": "https://oauth.example/token",
+            "userinfo_endpoint": "https://oauth.example/userinfo",
+        }
+        userinfo_response = Mock(ok=True)
+        userinfo_response.json.return_value = {
+            "email": "oauth@example.com",
+            "email_verified": True,
+            "given_name": "OAuth",
+            "sub": "google-subject",
+            "picture": "https://example.com/avatar.png",
+        }
+        auth_state = {"status": "healthy", "auth_owner": "ovvaults.users", "session_owner": "ovvaults.sessions"}
+
+        with self._patch_auth(repo), patch.object(server, "google_client", google_client), patch.object(
+            server, "GOOGLE_CLIENT_ID", "google-client-id"
+        ), patch.object(server, "GOOGLE_CLIENT_SECRET", "google-client-secret"), patch.object(
+            server, "OAUTH_BASE_URL", ""
+        ), patch.object(server, "VVAULT_BACKEND_URL", "http://localhost:8000"), patch.object(
+            server.requests, "get", side_effect=[discovery_response, userinfo_response]
+        ), patch.object(server.requests, "post", return_value=token_response), patch.object(
+            server, "_oauth_identity_authority_available", return_value=(True, auth_state)
+        ):
+            response = self.client.get(
+                "/api/auth/google/callback?code=test-code",
+                headers={"Host": "vvault.thewreck.org"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        redirect_url = google_client.prepare_token_request.call_args.kwargs["redirect_url"]
+        authorization_response = google_client.prepare_token_request.call_args.kwargs["authorization_response"]
+        self.assertEqual(redirect_url, "https://vvault.thewreck.org/api/auth/google/callback")
+        self.assertNotEqual(redirect_url, "http://localhost:8000/api/auth/google/callback")
+        self.assertTrue(
+            authorization_response.startswith(
+                "https://vvault.thewreck.org/api/auth/google/callback?code=test-code"
+            )
+        )
+        self.assertIn("oauth@example.com", repo.users)
+        self.assertTrue(repo.sessions)
+
+    def test_google_oauth_login_prefers_explicit_non_localhost_backend_override(self):
+        repo = FakeAuthRepository()
+        google_client = Mock()
+        google_client.prepare_request_uri.return_value = "https://accounts.google.com/o/oauth2/v2/auth"
+        discovery_response = Mock()
+        discovery_response.json.return_value = {"authorization_endpoint": "https://oauth.example/authorize"}
+        auth_state = {"status": "healthy", "auth_owner": "ovvaults.users", "session_owner": "ovvaults.sessions"}
+
+        with self._patch_auth(repo), patch.object(server, "google_client", google_client), patch.object(
+            server, "GOOGLE_CLIENT_ID", "google-client-id"
+        ), patch.object(server, "GOOGLE_CLIENT_SECRET", "google-client-secret"), patch.object(
+            server, "OAUTH_BASE_URL", ""
+        ), patch.object(server, "VVAULT_BACKEND_URL", "https://auth.vvault.example"), patch.object(
+            server.requests, "get", return_value=discovery_response
+        ), patch.object(server, "_oauth_identity_authority_available", return_value=(True, auth_state)):
+            response = self.client.get(
+                "/api/auth/google",
+                headers={
+                    "Host": "vvault.thewreck.org",
+                    "Origin": "https://vvault.thewreck.org",
+                    "Referer": "https://vvault.thewreck.org/",
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        redirect_uri = google_client.prepare_request_uri.call_args.kwargs["redirect_uri"]
+        self.assertEqual(redirect_uri, "https://auth.vvault.example/api/auth/google/callback")
+        self.assertNotEqual(redirect_uri, "https://vvault.thewreck.org/api/auth/google/callback")
 
     def test_oauth_callback_stores_identity_and_session_locally_without_supabase(self):
         repo = FakeAuthRepository()

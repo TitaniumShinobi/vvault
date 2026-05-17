@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import os
@@ -7,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from vvault.server.vvault_file_repository import VVaultFileRepository
 from vvault.server import vvault_web_server as server
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vvault" / "server"))
@@ -21,6 +23,42 @@ class _NoSupabaseRuntime:
         self.table = Mock(side_effect=AssertionError("Supabase table must not be used"))
         self.storage = Mock()
         self.storage.from_ = Mock(side_effect=AssertionError("Supabase Storage must not be used"))
+
+
+class _FakeCursor:
+    def __init__(self, row=None):
+        self.row = row or {"id": "system-file", "inserted": False}
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, sql, params=()):
+        self.calls.append((sql, params))
+
+    def fetchone(self):
+        return self.row
+
+
+class _FakeConnection:
+    def __init__(self, cursor):
+        self.cursor_instance = cursor
+        self.committed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def cursor(self):
+        return self.cursor_instance
+
+    def commit(self):
+        self.committed = True
 
 
 class TestVVaultFileRoutesNative(unittest.TestCase):
@@ -97,6 +135,127 @@ class TestVVaultFileRoutesNative(unittest.TestCase):
         fake_supabase.table.assert_not_called()
         fake_supabase.storage.from_.assert_not_called()
 
+    def test_markdown_file_downloads_native_utf8_bytes(self):
+        fake_supabase = _NoSupabaseRuntime()
+        row = {
+            "id": "file-md",
+            "user_id": USER_ID,
+            "filename": "notes.md",
+            "storage_path": "instances/lin-001/documents/notes.md",
+            "file_type": "text/markdown",
+            "content_type": "text/markdown",
+            "content": "# Notes\nBody\n",
+            "is_system": False,
+        }
+
+        with patch.object(server, "legacy_remote_client", fake_supabase, create=True), patch.object(
+            server, "db_get_session", return_value=self._session()
+        ), patch.object(server.VAULT_FILE_REPOSITORY, "get_by_id", return_value=row), patch.object(
+            server.VAULT_FILE_REPOSITORY, "load_bytes", return_value=None
+        ) as load_bytes:
+            response = self.client.get("/api/vault/files/file-md/download", headers=self._auth_headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"# Notes\nBody\n")
+        self.assertTrue(response.headers["Content-Type"].startswith("text/markdown"))
+        self.assertIn('attachment; filename="notes.md"', response.headers["Content-Disposition"])
+        self.assertEqual(response.headers["Content-Length"], str(len(response.data)))
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        load_bytes.assert_called_once_with(row)
+        fake_supabase.table.assert_not_called()
+        fake_supabase.storage.from_.assert_not_called()
+
+    def test_pdf_file_downloads_decoded_native_bytes(self):
+        fake_supabase = _NoSupabaseRuntime()
+        pdf_bytes = b"%PDF-1.4\nnative pdf bytes"
+        row = {
+            "id": "file-pdf",
+            "user_id": USER_ID,
+            "filename": "report.pdf",
+            "storage_path": "instances/lin-001/documents/report.pdf",
+            "file_type": "application/pdf",
+            "content_type": "application/pdf",
+            "content": base64.b64encode(pdf_bytes).decode("ascii"),
+            "is_system": False,
+        }
+
+        with patch.object(server, "legacy_remote_client", fake_supabase, create=True), patch.object(
+            server, "db_get_session", return_value=self._session()
+        ), patch.object(server.VAULT_FILE_REPOSITORY, "get_by_id", return_value=row), patch.object(
+            server.VAULT_FILE_REPOSITORY, "load_bytes", return_value=None
+        ) as load_bytes:
+            response = self.client.get("/api/vault/files/file-pdf/download", headers=self._auth_headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, pdf_bytes)
+        self.assertTrue(response.headers["Content-Type"].startswith("application/pdf"))
+        self.assertIn('attachment; filename="report.pdf"', response.headers["Content-Disposition"])
+        load_bytes.assert_called_once_with(row)
+        fake_supabase.table.assert_not_called()
+        fake_supabase.storage.from_.assert_not_called()
+
+    def test_download_prefers_repository_native_bytes_when_available(self):
+        row = {
+            "id": "file-native",
+            "user_id": USER_ID,
+            "filename": "image.png",
+            "storage_path": "instances/lin-001/documents/image.png",
+            "file_type": "image/png",
+            "content_type": "image/png",
+            "content": "not-db-content",
+            "is_system": False,
+        }
+
+        with patch.object(server, "db_get_session", return_value=self._session()), patch.object(
+            server.VAULT_FILE_REPOSITORY, "get_by_id", return_value=row
+        ), patch.object(
+            server.VAULT_FILE_REPOSITORY, "load_bytes", return_value=(b"\x89PNG\r\nnative", "image/png")
+        ):
+            response = self.client.get("/api/vault/files/file-native/download", headers=self._auth_headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"\x89PNG\r\nnative")
+        self.assertTrue(response.headers["Content-Type"].startswith("image/png"))
+
+    def test_file_download_denies_non_owner(self):
+        fake_supabase = _NoSupabaseRuntime()
+        row = {
+            "id": "file-other",
+            "user_id": "dc9d48a4-49ce-4d71-99b6-9a41380b92e0",
+            "filename": "notes.md",
+            "storage_path": "instances/lin-001/documents/notes.md",
+            "file_type": "text/markdown",
+            "content": "# Other\n",
+            "is_system": False,
+        }
+
+        with patch.object(server, "legacy_remote_client", fake_supabase, create=True), patch.object(
+            server, "db_get_session", return_value=self._session()
+        ), patch.object(server.VAULT_FILE_REPOSITORY, "get_by_id", return_value=row), patch.object(
+            server.VAULT_FILE_REPOSITORY, "load_bytes"
+        ) as load_bytes:
+            response = self.client.get("/api/vault/files/file-other/download", headers=self._auth_headers())
+
+        self.assertEqual(response.status_code, 403)
+        load_bytes.assert_not_called()
+        fake_supabase.table.assert_not_called()
+        fake_supabase.storage.from_.assert_not_called()
+
+    def test_file_download_missing_file_returns_404(self):
+        fake_supabase = _NoSupabaseRuntime()
+
+        with patch.object(server, "legacy_remote_client", fake_supabase, create=True), patch.object(
+            server, "db_get_session", return_value=self._session()
+        ), patch.object(server.VAULT_FILE_REPOSITORY, "get_by_id", return_value=None), patch.object(
+            server.VAULT_FILE_REPOSITORY, "load_bytes"
+        ) as load_bytes:
+            response = self.client.get("/api/vault/files/missing/download", headers=self._auth_headers())
+
+        self.assertEqual(response.status_code, 404)
+        load_bytes.assert_not_called()
+        fake_supabase.table.assert_not_called()
+        fake_supabase.storage.from_.assert_not_called()
+
     def test_system_file_upsert_is_synchronous_local_write(self):
         fake_supabase = _NoSupabaseRuntime()
         system_row = {
@@ -127,6 +286,336 @@ class TestVVaultFileRoutesNative(unittest.TestCase):
         self.assertFalse(hasattr(server, "SUPABASE_WRITE_OUTBOX"))
         fake_supabase.table.assert_not_called()
         fake_supabase.storage.from_.assert_not_called()
+
+    def test_system_file_upsert_infers_construct_id_from_instances_path(self):
+        fake_supabase = _NoSupabaseRuntime()
+        storage_path = "instances/zen-001/codex/foo.md"
+        system_row = {
+            "id": "system-file",
+            "filename": storage_path,
+            "storage_path": storage_path,
+            "construct_id": "zen-001",
+            "content": "# Foo\n",
+            "is_system": True,
+        }
+
+        with patch.object(server, "VVAULT_SERVICE_TOKEN", "svc-token"), patch.object(
+            server, "legacy_remote_client", fake_supabase, create=True
+        ), patch.object(
+            server.VAULT_FILE_REPOSITORY, "get_system_file", side_effect=[None, system_row]
+        ), patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "upsert",
+            return_value={"action": "created", "id": "system-file", "path": storage_path},
+        ) as upsert:
+            response = self.client.post(
+                "/api/vault/system-files",
+                headers=self._service_headers(),
+                json={"storage_path": storage_path, "content": "# Foo\n"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["storage_mode"], "vvault_body")
+        upsert.assert_called_once()
+        record = upsert.call_args.args[0]
+        self.assertEqual(record["storage_path"], storage_path)
+        self.assertEqual(record["filename"], storage_path)
+        self.assertEqual(record["construct_id"], "zen-001")
+        self.assertTrue(record["is_system"])
+        self.assertIsNone(record["user_id"])
+        fake_supabase.table.assert_not_called()
+        fake_supabase.storage.from_.assert_not_called()
+
+    def test_system_file_upsert_updates_existing_row_after_construct_inference(self):
+        fake_supabase = _NoSupabaseRuntime()
+        storage_path = "instances/zen-001/codex/foo.md"
+        existing_row = {
+            "id": "system-file",
+            "filename": storage_path,
+            "storage_path": storage_path,
+            "construct_id": None,
+            "content": "old body",
+            "created_at": "2026-05-09T00:00:00+00:00",
+            "is_system": True,
+        }
+        updated_row = {
+            **existing_row,
+            "construct_id": "zen-001",
+            "content": "new body",
+            "sha256": "new-sha",
+            "updated_at": "2026-05-09T00:01:00+00:00",
+        }
+
+        with patch.object(server, "VVAULT_SERVICE_TOKEN", "svc-token"), patch.object(
+            server, "legacy_remote_client", fake_supabase, create=True
+        ), patch.object(
+            server.VAULT_FILE_REPOSITORY, "get_system_file", side_effect=[existing_row, updated_row]
+        ), patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "upsert",
+            return_value={"action": "updated", "id": "system-file", "path": storage_path},
+        ) as upsert:
+            response = self.client.post(
+                "/api/vault/system-files",
+                headers=self._service_headers(),
+                json={"storage_path": storage_path, "content": "new body"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["action"], "updated")
+        self.assertEqual(payload["storage_mode"], "vvault_body")
+        self.assertEqual(payload["file"]["content"], "new body")
+        self.assertEqual(payload["file"]["construct_id"], "zen-001")
+        record = upsert.call_args.args[0]
+        self.assertEqual(record["created_at"], existing_row["created_at"])
+        self.assertEqual(record["construct_id"], "zen-001")
+        fake_supabase.table.assert_not_called()
+        fake_supabase.storage.from_.assert_not_called()
+
+    def test_system_file_readback_is_vvault_body(self):
+        storage_path = "instances/zen-001/codex/foo.md"
+        system_row = {
+            "id": "system-file",
+            "filename": storage_path,
+            "storage_path": storage_path,
+            "construct_id": "zen-001",
+            "content": "# Foo\n",
+            "is_system": True,
+            "storage_mode": "ignored-client-value",
+        }
+
+        with patch.object(server, "VVAULT_SERVICE_TOKEN", "svc-token"), patch.object(
+            server.VAULT_FILE_REPOSITORY, "get_system_file", return_value=system_row
+        ):
+            response = self.client.get(
+                f"/api/vault/system-files?storage_path={storage_path}",
+                headers=self._service_headers(),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["storage_mode"], "vvault_body")
+        self.assertEqual(payload["file"]["storage_path"], storage_path)
+
+    def test_repository_system_file_upsert_uses_bucket_object_key_conflict_update(self):
+        repo = VVaultFileRepository.__new__(VVaultFileRepository)
+        cursor = _FakeCursor({"id": "system-file", "inserted": False})
+        connection = _FakeConnection(cursor)
+
+        with patch.object(repo, "_system_user_id", return_value="system-user-id"), patch.object(
+            repo, "_connect", return_value=connection
+        ):
+            result = repo.upsert(
+                {
+                    "storage_path": "instances/zen-001/codex/foo.md",
+                    "content": "updated body",
+                    "metadata": {"sourceSessionId": "019e-test"},
+                    "sha256": "sha-updated",
+                    "construct_id": "zen-001",
+                    "is_system": True,
+                    "user_id": None,
+                    "created_at": "2026-05-10T00:00:00+00:00",
+                    "updated_at": "2026-05-10T00:01:00+00:00",
+                }
+            )
+
+        self.assertEqual(result["action"], "updated")
+        self.assertEqual(result["id"], "system-file")
+        self.assertTrue(connection.committed)
+        self.assertEqual(len(cursor.calls), 1)
+        sql, params = cursor.calls[0]
+        self.assertIn("ON CONFLICT (bucket, object_key) DO UPDATE", sql)
+        self.assertIn("created_at", sql)
+        self.assertNotIn("created_at = EXCLUDED.created_at", sql)
+        self.assertIn("content = EXCLUDED.content", sql)
+        self.assertIn("metadata = EXCLUDED.metadata", sql)
+        self.assertIn("construct_id = EXCLUDED.construct_id", sql)
+        self.assertEqual(params[0], "system-user-id")
+        self.assertEqual(params[1], "vvault-local")
+        self.assertEqual(params[2], "system/instances/zen-001/codex/foo.md")
+        self.assertEqual(params[8], "updated body")
+        self.assertEqual(params[10], "zen-001")
+
+    def test_admin_browser_listing_uses_construct_or_instances_path_prefix(self):
+        repo = VVaultFileRepository.__new__(VVaultFileRepository)
+        row = {
+            "id": "system-file",
+            "filename": "foo.md",
+            "storage_path": "instances/zen-001/codex/foo.md",
+            "construct_id": None,
+            "is_system": True,
+        }
+
+        with patch.object(repo, "_fetch", return_value=[row]) as fetch:
+            rows = repo.list_for_browser(
+                user_id=None,
+                is_admin=True,
+                requested_path="instances/zen-001/codex",
+            )
+
+        self.assertEqual(rows, [row])
+        sql, params = fetch.call_args.args
+        self.assertIn("construct_id = %s", sql)
+        self.assertIn("filename ILIKE %s", sql)
+        self.assertIn("storage_path ILIKE %s", sql)
+        self.assertEqual(
+            params,
+            ("zen-001", "instances/zen-001/codex/%", "instances/zen-001/codex/%"),
+        )
+
+    def test_non_admin_browser_listing_can_see_codex_system_thread_bank_only(self):
+        fake_supabase = _NoSupabaseRuntime()
+        codex_row = {
+            "id": "codex-thread",
+            "user_id": None,
+            "filename": "instances/zen-001/codex/Build cross-platform transcript sync.md",
+            "storage_path": "instances/zen-001/codex/Build cross-platform transcript sync.md",
+            "construct_id": "zen-001",
+            "file_type": "transcript",
+            "metadata": {"sourceProduct": "codex", "codexThreadArchiveSchemaVersion": 1},
+            "is_system": True,
+            "created_at": "2026-05-16T00:00:00+00:00",
+            "updated_at": "2026-05-17T00:00:00+00:00",
+        }
+        hidden_system_row = {
+            "id": "hidden-config",
+            "user_id": None,
+            "filename": "system/configs/auth/service.json",
+            "storage_path": "system/configs/auth/service.json",
+            "construct_id": None,
+            "file_type": "application/json",
+            "metadata": {"service": "auth"},
+            "is_system": True,
+            "created_at": "2026-05-16T00:00:00+00:00",
+        }
+
+        with patch.object(server, "legacy_remote_client", fake_supabase, create=True), patch.object(
+            server, "db_get_session", return_value=self._session()
+        ), patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "list_for_browser",
+            return_value=[codex_row, hidden_system_row],
+        ) as list_rows:
+            response = self.client.get(
+                "/api/vault/files?path=instances/zen-001/codex",
+                headers=self._auth_headers(),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["storage_mode"], "vvault_body")
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["files"][0]["id"], "codex-thread")
+        self.assertEqual(payload["files"][0]["display_name"], "Build cross-platform transcript sync.md")
+        list_rows.assert_called_once_with(
+            user_id=USER_ID,
+            is_admin=False,
+            requested_path="instances/zen-001/codex",
+        )
+        fake_supabase.table.assert_not_called()
+        fake_supabase.storage.from_.assert_not_called()
+
+    def test_non_admin_repository_listing_includes_only_codex_system_rows_for_codex_path(self):
+        repo = VVaultFileRepository.__new__(VVaultFileRepository)
+        row = {
+            "id": "codex-thread",
+            "filename": "instances/zen-001/codex/foo.md",
+            "storage_path": "instances/zen-001/codex/foo.md",
+            "construct_id": "zen-001",
+            "is_system": True,
+            "metadata": {"sourceProduct": "codex"},
+        }
+
+        with patch.object(repo, "_fetch", return_value=[row]) as fetch:
+            rows = repo.list_for_browser(
+                user_id=USER_ID,
+                is_admin=False,
+                requested_path="instances/zen-001/codex",
+            )
+
+        self.assertEqual(rows, [row])
+        sql, params = fetch.call_args.args
+        self.assertIn("coalesce(is_system, false) = true", sql)
+        self.assertIn("metadata->>'sourceProduct'", sql)
+        self.assertIn("codexThreadArchiveSchemaVersion", sql)
+        self.assertEqual(
+            params,
+            (
+                "zen-001",
+                "instances/zen-001/codex/%",
+                "instances/zen-001/codex/%",
+                USER_ID,
+                "instances/zen-001/codex/%",
+                "instances/zen-001/codex/%",
+            ),
+        )
+
+    def test_non_admin_can_open_and_download_visible_codex_system_thread(self):
+        fake_supabase = _NoSupabaseRuntime()
+        storage_path = "instances/zen-001/codex/Build cross-platform transcript sync.md"
+        row = {
+            "id": "codex-thread",
+            "user_id": "system-user-id",
+            "filename": storage_path,
+            "storage_path": storage_path,
+            "construct_id": "zen-001",
+            "file_type": "transcript",
+            "content": "# Build cross-platform transcript sync\n\n## User\nhello\n",
+            "metadata": {"sourceProduct": "codex", "codexThreadArchiveSchemaVersion": 1},
+            "is_system": True,
+            "created_at": "2026-05-16T00:00:00+00:00",
+            "updated_at": "2026-05-17T00:00:00+00:00",
+        }
+
+        with patch.object(server, "legacy_remote_client", fake_supabase, create=True), patch.object(
+            server, "db_get_session", return_value=self._session()
+        ), patch.object(server.VAULT_FILE_REPOSITORY, "get_by_id", return_value=row), patch.object(
+            server.VAULT_FILE_REPOSITORY, "load_bytes", return_value=None
+        ):
+            detail_response = self.client.get("/api/vault/files/codex-thread", headers=self._auth_headers())
+            download_response = self.client.get(
+                "/api/vault/files/codex-thread/download",
+                headers=self._auth_headers(),
+            )
+
+        self.assertEqual(detail_response.status_code, 200)
+        detail_payload = detail_response.get_json()
+        self.assertTrue(detail_payload["success"])
+        self.assertIn("Build cross-platform transcript sync", detail_payload["file"]["content"])
+        self.assertEqual(download_response.status_code, 200)
+        self.assertIn(b"Build cross-platform transcript sync", download_response.data)
+        fake_supabase.table.assert_not_called()
+        fake_supabase.storage.from_.assert_not_called()
+
+    def test_non_admin_cannot_open_unrelated_system_file_by_id(self):
+        row = {
+            "id": "hidden-config",
+            "user_id": None,
+            "filename": "system/configs/auth/service.json",
+            "storage_path": "system/configs/auth/service.json",
+            "file_type": "application/json",
+            "content": "{}",
+            "metadata": {"service": "auth"},
+            "is_system": True,
+        }
+
+        with patch.object(server, "db_get_session", return_value=self._session()), patch.object(
+            server.VAULT_FILE_REPOSITORY, "get_by_id", return_value=row
+        ):
+            detail_response = self.client.get("/api/vault/files/hidden-config", headers=self._auth_headers())
+            download_response = self.client.get(
+                "/api/vault/files/hidden-config/download",
+                headers=self._auth_headers(),
+            )
+
+        self.assertEqual(detail_response.status_code, 403)
+        self.assertEqual(download_response.status_code, 403)
 
     def test_system_file_outbox_replay_is_retired_noop(self):
         with patch.object(server, "VVAULT_SERVICE_TOKEN", "svc-token"):

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from uuid import uuid4
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 import hashlib
 import hmac
@@ -72,6 +72,11 @@ from vvault.security.pocketverse_guard import (
 import chatty_body_service
 import vvault_auth_repository
 import vvault_file_repository
+from avatar_canonicalization import (
+    AvatarCanonicalizationError,
+    is_png_base64_payload,
+    normalize_avatar_payload_to_png,
+)
 
 
 def _pocketverse_request_context():
@@ -110,6 +115,154 @@ VAULT_PREVIEW_ROUTE_BUDGET_MS = max(0, int(os.environ.get("VVAULT_PREVIEW_ROUTE_
 VAULT_FAST_CAPSULE_PREVIEW_BUDGET_MS = max(0, int(os.environ.get("VVAULT_FAST_CAPSULE_PREVIEW_BUDGET_MS", "900")))
 VAULT_PREVIEW_MAX_TRANSCRIPTS = max(1, int(os.environ.get("VVAULT_PREVIEW_MAX_TRANSCRIPTS", "6")))
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
+CANONICAL_PRODUCTION_ORIGIN = "https://vvault.thewreck.org"
+
+
+def _normalize_origin(origin: Optional[str]) -> Optional[str]:
+    if not origin:
+        return None
+    text = str(origin).strip()
+    if not text or not text.startswith(("http://", "https://")):
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(text)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _split_origins(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _is_local_origin(value: Optional[str]) -> bool:
+    origin = _normalize_origin(value)
+    if not origin:
+        return False
+    from urllib.parse import urlparse
+
+    parsed = urlparse(origin)
+    return (parsed.hostname or "").strip().lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+_door_contract_cache = None
+
+
+def _load_chatty_vvault_door_contract() -> Dict[str, Any]:
+    global _door_contract_cache
+    if _door_contract_cache is not None:
+        return _door_contract_cache
+    contract_path = Path(__file__).resolve().parent.parent.parent / "config" / "chatty-vvault-doors.json"
+    with contract_path.open("r", encoding="utf-8") as handle:
+        _door_contract_cache = json.load(handle)
+    return _door_contract_cache
+
+
+def _runtime_is_production() -> bool:
+    node_env = (os.environ.get("NODE_ENV") or "").strip().lower()
+    if node_env == "production":
+        return True
+    explicit_origins = [
+        os.environ.get("VVAULT_FRONTEND_URL"),
+        os.environ.get("VVAULT_BACKEND_URL"),
+        os.environ.get("OAUTH_BASE_URL"),
+    ]
+    return any(origin and not _is_local_origin(origin) for origin in explicit_origins)
+
+
+def _resolve_chatty_vvault_door_name() -> str:
+    explicit = (os.environ.get("CHATTY_VVAULT_DOOR") or os.environ.get("VVAULT_RUNTIME_DOOR") or "").strip()
+    if explicit in {"private", "public"}:
+        return explicit
+    return "public" if _runtime_is_production() else "private"
+
+
+def _resolve_chatty_vvault_door() -> Dict[str, Any]:
+    contract = _load_chatty_vvault_door_contract()
+    selected_door = _resolve_chatty_vvault_door_name()
+    raw_door = (contract.get("doors") or {}).get(selected_door) or {}
+    allowed_browser_origins = [
+        origin for origin in (_normalize_origin(value) for value in raw_door.get("allowedBrowserOrigins", [])) if origin
+    ]
+    door = {
+        "version": contract.get("version"),
+        "selected_door": selected_door,
+        "chatty_origin": _normalize_origin(raw_door.get("chattyPublicOrigin") or ""),
+        "chatty_api_origin": _normalize_origin(raw_door.get("chattyApiOrigin") or ""),
+        "vvault_origin": _normalize_origin(raw_door.get("vvaultOrigin") or ""),
+        "auth_origin": _normalize_origin(raw_door.get("authApiOrigin") or ""),
+        "auth_public_origin": _normalize_origin(raw_door.get("authPublicOrigin") or raw_door.get("authApiOrigin") or ""),
+        "auth_cookie_name": (raw_door.get("authCookieName") or "auth_sid").strip(),
+        "session_bridge_path": raw_door.get("sessionBridgePath") or "/api/vault/session-bridge",
+        "allowed_browser_origins": allowed_browser_origins,
+        "allow_legacy_exchange": raw_door.get("allowLegacyExchange") is True,
+        "problems": [],
+    }
+
+    if not door["chatty_origin"]:
+        door["problems"].append("chatty_origin_missing")
+    if not door["vvault_origin"]:
+        door["problems"].append("vvault_origin_missing")
+    if not door["auth_origin"]:
+        door["problems"].append("auth_origin_missing")
+    if not door["allowed_browser_origins"]:
+        door["problems"].append("allowed_browser_origins_missing")
+
+    all_origins = [
+        door["chatty_origin"],
+        door["chatty_api_origin"],
+        door["vvault_origin"],
+        door["auth_origin"],
+        door["auth_public_origin"],
+        *door["allowed_browser_origins"],
+    ]
+    if selected_door == "public" and any(_is_local_origin(origin) for origin in all_origins if origin):
+        door["problems"].append("door_public_with_localhost_target")
+    if selected_door == "private" and any(not _is_local_origin(origin) for origin in all_origins if origin):
+        door["problems"].append("door_private_with_production_target")
+
+    door["problems"] = list(dict.fromkeys(door["problems"]))
+    door["ok"] = len(door["problems"]) == 0
+    return door
+
+
+def _resolve_frontend_origin() -> Optional[str]:
+    explicit = _normalize_origin(os.environ.get("VVAULT_FRONTEND_URL") or "")
+    selected_door = _resolve_chatty_vvault_door_name()
+    if explicit:
+        if selected_door == "public" and not _is_local_origin(explicit):
+            return explicit
+        if selected_door == "private" and _is_local_origin(explicit):
+            return explicit
+    if selected_door == "public":
+        return _resolve_chatty_vvault_door().get("vvault_origin")
+    return "http://localhost:7784"
+
+
+def _resolve_backend_origin() -> Optional[str]:
+    return _resolve_chatty_vvault_door().get("vvault_origin")
+
+
+def _build_cors_origins() -> List[str]:
+    door = _resolve_chatty_vvault_door()
+    origins: List[str] = []
+    frontend_origin = _resolve_frontend_origin()
+    if frontend_origin:
+        origins.append(frontend_origin)
+    origins.extend(door.get("allowed_browser_origins") or [])
+
+    deduped: List[str] = []
+    seen = set()
+    for origin in origins:
+        normalized = _normalize_origin(origin)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
 
 
 def _get_pocketverse_boot_state() -> Dict[str, Any]:
@@ -169,14 +322,12 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 DIST_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'dist')
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'assets')
 PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'public')
+HTML_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'html')
 
 app = Flask(__name__, static_folder=DIST_DIR, static_url_path='')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'vvault-secret-key-change-in-production')
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
-_cors_origins = ["http://localhost:7784", "http://localhost:5173", "http://localhost:5000", "https://vvault.thewreck.org"]
-_replit_domain = os.environ.get("REPLIT_DEV_DOMAIN") or os.environ.get("REPL_SLUG")
-if _replit_domain:
-    _cors_origins.append(f"https://{_replit_domain}")
+_cors_origins = _build_cors_origins()
 CORS(app, origins=_cors_origins)
 
 # Security headers (resilience hardening)
@@ -392,13 +543,50 @@ def _google_oauth_config_error() -> str:
 
 
 def _get_frontend_url(default: str = None) -> str:
-    frontend_url = VVAULT_FRONTEND_URL or default or "http://localhost:7784"
+    frontend_url = _resolve_frontend_origin() or default or "http://localhost:7784"
     return frontend_url.rstrip("/")
 
 
 def _get_backend_url(default: str = None) -> str:
-    backend_url = OAUTH_BASE_URL or VVAULT_BACKEND_URL or default or "http://localhost:8000"
+    backend_url = _resolve_backend_origin() or default or "http://localhost:8000"
     return backend_url.rstrip("/")
+
+
+def _is_localhost_equivalent_host(host: Optional[str]) -> bool:
+    if not host:
+        return False
+    from urllib.parse import urlparse
+
+    normalized = host.split(",", 1)[0].strip()
+    parsed = urlparse(normalized if "://" in normalized else f"//{normalized}")
+    hostname = (parsed.hostname or normalized).strip().strip("[]").lower()
+    return hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def _resolve_google_oauth_callback_url() -> str:
+    """Return the Google OAuth callback URL for the current request."""
+    origin = request.headers.get('Origin', '')
+    referer = request.headers.get('Referer', '')
+    fwd_host = request.headers.get('X-Forwarded-Host', '')
+    req_host = request.headers.get('Host', request.host)
+    is_replit = 'replit.dev' in origin or 'replit.dev' in referer or 'replit.dev' in fwd_host or 'replit.dev' in req_host
+
+    if is_replit and REPLIT_DEV_DOMAIN:
+        return f"https://{REPLIT_DEV_DOMAIN}/api/auth/oauth/google/callback"
+
+    explicit_backend_base = None
+    for candidate in (OAUTH_BASE_URL, VVAULT_BACKEND_URL):
+        candidate_base = (candidate or "").rstrip("/")
+        if candidate_base and not _is_localhost_equivalent_host(candidate_base):
+            explicit_backend_base = candidate_base
+            break
+
+    if explicit_backend_base:
+        return f"{explicit_backend_base}/api/auth/google/callback"
+
+    host = fwd_host.split(",", 1)[0].strip() or req_host
+    callback_scheme = "http" if _is_localhost_equivalent_host(host) else "https"
+    return f"{callback_scheme}://{host}/api/auth/google/callback"
 
 
 def _dependency_error_code(exc: Exception) -> str:
@@ -413,11 +601,17 @@ def _body_database_dependency_status() -> Dict[str, Any]:
         "ready": False,
         "status": "unhealthy",
         "configured": False,
+        "authority": "vvault_body",
+        "storage_mode": "vvault_body",
+        "canonical": False,
+        "connection_state": "unavailable",
         "schema": getattr(chatty_body_service, "BODY_SCHEMA", "ovvaults"),
         "source_database": None,
         "checks": {
             "vault_files_readable": False,
+            "vault_files_runtime_columns": False,
             "transcripts_readable": False,
+            "transcript_content_column": False,
         },
     }
     try:
@@ -431,14 +625,28 @@ def _body_database_dependency_status() -> Dict[str, Any]:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1 FROM vault_files LIMIT 1")
                 status["checks"]["vault_files_readable"] = True
+                cur.execute(
+                    """
+                    SELECT id, content, metadata, construct_id, storage_path, file_type
+                    FROM vault_files
+                    LIMIT 1
+                    """
+                )
+                status["checks"]["vault_files_runtime_columns"] = True
                 cur.execute("SELECT 1 FROM transcripts LIMIT 1")
                 status["checks"]["transcripts_readable"] = True
+                cur.execute("SELECT id, content FROM transcripts LIMIT 1")
+                status["checks"]["transcript_content_column"] = True
 
         status["ready"] = True
         status["status"] = "healthy"
+        status["canonical"] = True
+        status["connection_state"] = "connected"
     except Exception as exc:
         status["ready"] = False
         status["status"] = "unhealthy"
+        status["canonical"] = False
+        status["connection_state"] = "degraded" if status["configured"] else "unconfigured"
         status["error_code"] = _dependency_error_code(exc)
     return status
 
@@ -461,10 +669,16 @@ def _auth_dependency_metadata() -> Dict[str, Any]:
     service_api_configured = bool(globals().get("VVAULT_SERVICE_TOKEN"))
     google_oauth_configured = _google_oauth_ready()
     auth_status = _auth_repository_status()
+    auth_ready = bool(auth_status.get("ready"))
     return {
         "required_for_readiness": False,
         "status": auth_status.get("status") or "unknown",
-        "ready": bool(auth_status.get("ready")),
+        "ready": auth_ready,
+        "authority": "vvault_auth",
+        "storage_mode": "vvault_body",
+        "canonical": auth_ready,
+        "connection_state": "connected" if auth_ready else "degraded",
+        "identity_authority_available": auth_ready,
         "auth_owner": auth_status.get("auth_owner") or AUTH_OWNER,
         "session_owner": auth_status.get("session_owner") or SESSION_OWNER,
         "source_database": auth_status.get("source_database"),
@@ -494,6 +708,10 @@ def _get_vvault_runtime_status() -> Dict[str, Any]:
     return {
         "ready": ready,
         "status": "ready" if ready else "not_ready",
+        "authority": "vvault_body",
+        "storage_mode": "vvault_body",
+        "canonical": ready,
+        "connection_state": body_database.get("connection_state") or ("connected" if ready else "degraded"),
         "runtime": _runtime_metadata(),
         "body_database": body_database,
         "storage": _storage_dependency_metadata(),
@@ -702,6 +920,13 @@ def _dedupe_vault_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return ordered
 
 
+def _construct_id_from_instances_path(logical_path: str) -> Optional[str]:
+    parts = str(logical_path or '').strip().strip('/').split('/')
+    if len(parts) >= 2 and parts[0] == 'instances' and parts[1].strip():
+        return _normalize_callsign(parts[1].strip())
+    return None
+
+
 def _upsert_vault_file_record(record: Dict[str, Any], *, context: str) -> Dict[str, Any]:
     logical_path = (record.get('storage_path') or record.get('filename') or '').strip()
     if not logical_path:
@@ -710,6 +935,9 @@ def _upsert_vault_file_record(record: Dict[str, Any], *, context: str) -> Dict[s
     record = dict(record)
     record['filename'] = logical_path
     record['storage_path'] = logical_path
+    inferred_construct_id = _construct_id_from_instances_path(logical_path)
+    if inferred_construct_id and not str(record.get('construct_id') or '').strip():
+        record['construct_id'] = inferred_construct_id
     result = VAULT_FILE_REPOSITORY.upsert(record)
     logger.info(
         "VFILE_LOCAL_UPSERT: context=%s action=%s path=%s id=%s",
@@ -2582,6 +2810,122 @@ def _upsert_binary_construct_file(callsign: str, user_id: Optional[str], filenam
     }
     return _upsert_vault_file_record(record, context=f'construct_editor_{filename}')
 
+
+AVATAR_CANONICAL_NAME = 'avatar.png'
+AVATAR_COMPAT_NAMES = {'avatar.jpg', 'avatar.jpeg', 'avatar.webp', 'avatar.gif', 'avatar.avif'}
+
+
+def _avatar_row_filename(row: Optional[Dict[str, Any]]) -> str:
+    return os.path.basename((row or {}).get('filename') or (row or {}).get('storage_path') or '').lower()
+
+
+def _avatar_row_content_type(row: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not row:
+        return None
+    metadata = _metadata_to_dict(row.get('metadata'))
+    value = metadata.get('mimeType') or metadata.get('contentType') or row.get('content_type')
+    return value if isinstance(value, str) else None
+
+
+def _avatar_row_has_valid_png(row: Optional[Dict[str, Any]]) -> bool:
+    return bool(row and is_png_base64_payload(row.get('content')))
+
+
+def _upsert_canonical_avatar_png(
+    callsign: str,
+    user_id: Optional[str],
+    avatar_payload: str,
+    *,
+    source_filename: Optional[str] = None,
+    source_content_type: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    normalized = normalize_avatar_payload_to_png(
+        avatar_payload,
+        source_content_type=source_content_type,
+        source_filename=source_filename,
+    )
+    merged_metadata = {
+        **normalized.metadata,
+        **(metadata or {}),
+        "contentType": "image/png",
+        "mimeType": "image/png",
+        "folder": "identity",
+    }
+    row = _upsert_binary_construct_file(
+        callsign,
+        user_id,
+        AVATAR_CANONICAL_NAME,
+        normalized.content_base64,
+        merged_metadata,
+    )
+    row["sha256"] = row.get("sha256") or normalized.sha256
+    row["pngMagicOk"] = True
+    row["normalizedAvatar"] = normalized
+    return row
+
+
+def _select_avatar_canonicalization_source(rows: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
+    rows_with_content = [row for row in rows if isinstance(row.get('content'), str) and row.get('content')]
+    png_rows = [row for row in rows_with_content if _avatar_row_filename(row) == AVATAR_CANONICAL_NAME]
+    for row in png_rows:
+        if _avatar_row_has_valid_png(row):
+            return None, "avatar.png already contains PNG bytes"
+
+    if png_rows:
+        return _pick_latest_vault_row(png_rows), "avatar.png exists but does not contain PNG bytes"
+
+    compat_rows = [
+        row for row in rows_with_content
+        if _avatar_row_filename(row) in AVATAR_COMPAT_NAMES
+    ]
+    if compat_rows:
+        return _pick_latest_vault_row(compat_rows), "promoting latest compatibility avatar"
+
+    return None, "no avatar source with materialized content"
+
+
+def _canonicalize_construct_avatar(callsign: str, user_id: Optional[str], rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    source_row, reason = _select_avatar_canonicalization_source(rows)
+    if not source_row:
+        already_ok = reason.startswith("avatar.png already")
+        return {
+            "success": already_ok,
+            "status": "already_canonical" if already_ok else "blocked",
+            "reason": reason,
+            "constructId": callsign,
+            "target": f"instances/{callsign}/identity/{AVATAR_CANONICAL_NAME}",
+            "pngMagicOk": already_ok,
+        }
+
+    source_filename = source_row.get('filename') or source_row.get('storage_path') or _avatar_row_filename(source_row)
+    row = _upsert_canonical_avatar_png(
+        callsign,
+        user_id,
+        source_row.get('content'),
+        source_filename=source_filename,
+        source_content_type=_avatar_row_content_type(source_row),
+        metadata={
+            "source": "vvault_avatar_canonicalize",
+            "sourceRowId": source_row.get('id'),
+            "sourceFilename": source_filename,
+            "repairReason": reason,
+        },
+    )
+    normalized = row.get("normalizedAvatar")
+    return {
+        "success": True,
+        "status": "canonicalized",
+        "constructId": callsign,
+        "reason": reason,
+        "source": source_filename,
+        "sourceRowId": source_row.get('id'),
+        "target": f"instances/{callsign}/identity/{AVATAR_CANONICAL_NAME}",
+        "sha256": normalized.sha256 if normalized else row.get("sha256"),
+        "pngMagicOk": True,
+        "storageOwner": user_id,
+    }
+
 # Initialize Google OAuth client
 google_client = None
 if GOOGLE_CLIENT_ID:
@@ -2589,7 +2933,7 @@ if GOOGLE_CLIENT_ID:
 
 # Get Replit domain for OAuth callbacks
 REPLIT_DEV_DOMAIN = os.environ.get("REPLIT_DEV_DOMAIN", "localhost:5000")
-OAUTH_BASE_URL = os.environ.get("OAUTH_BASE_URL", "")
+OAUTH_BASE_URL = _resolve_backend_origin() or ""
 
 # Service API Configuration (for FXShinobi/Chatty backend-to-backend calls)
 VVAULT_SERVICE_TOKEN = os.environ.get("VVAULT_SERVICE_TOKEN")
@@ -3519,6 +3863,10 @@ def readiness_check():
     return jsonify({
         "ready": ready,
         "status": "ready" if ready else "not_ready",
+        "authority": runtime_status["authority"],
+        "storage_mode": runtime_status["storage_mode"],
+        "canonical": runtime_status["canonical"],
+        "connection_state": runtime_status["connection_state"],
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "service": "vvault-backend",
         "runtime": runtime_status["runtime"],
@@ -3766,7 +4114,8 @@ def map_to_vsi_folder(filename: str, construct_id: str = '', metadata: dict = No
     DOC_EXTS = {'.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt'}
     IDENTITY_FILES = {
         'prompt.txt', 'prompt.json', 'conditioning.txt', 'definition.txt',
-        'physical_features.json', 'voice.json', 'avatar.png', 'avatar.jpeg', 'avatar.jpg'
+        'physical_features.json', 'voice.json', 'avatar.png', 'avatar.jpeg',
+        'avatar.jpg', 'avatar.webp', 'avatar.gif', 'avatar.avif'
     }
     CONFIG_FILES = {'metadata.json', 'personality.json', 'tone_profile.json', 'voice.md'}
     LOG_NAMES = {'chat.log', 'capsule.log', 'server.log', 'identity_guard.log', 'independence.log',
@@ -3827,7 +4176,7 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
     
     transformed = []
     for f in _dedupe_vault_rows(files):
-        if f.get('is_system') and not is_admin:
+        if f.get('is_system') and not is_admin and not _is_user_visible_codex_system_file(f):
             continue
         
         file_copy = dict(f)
@@ -3870,6 +4219,50 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
         
         transformed.append(file_copy)
     return transformed
+
+
+def _system_file_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = row.get('metadata') or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except Exception:
+            metadata = {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _is_user_visible_codex_system_file(row: Dict[str, Any]) -> bool:
+    if not row or not row.get('is_system'):
+        return False
+    raw_path = str(row.get('storage_path') or row.get('filename') or '').strip().strip("/")
+    parts = raw_path.split("/")
+    if len(parts) < 4 or parts[0] != "instances" or parts[2] != "codex":
+        return False
+    metadata = _system_file_metadata(row)
+    file_type = str(row.get('file_type') or '').strip().lower()
+    return (
+        str(metadata.get('sourceProduct') or '').strip().lower() == 'codex'
+        or file_type in {'transcript', 'codex-thread'}
+        or 'codexThreadArchiveSchemaVersion' in metadata
+    )
+
+
+def _authorized_vault_file_for_user(row: Dict[str, Any], *, user_id: str, user_email: str, route: str) -> bool:
+    file_user_id = row.get('user_id')
+    is_system = row.get('is_system', False)
+
+    if is_system and _is_user_visible_codex_system_file(row):
+        return True
+
+    if file_user_id is None:
+        log_auth_decision("file_access", user_email, route, "denied", "unassigned_or_hidden_system_file")
+        return False
+
+    if file_user_id != user_id:
+        log_auth_decision("file_access", user_email, route, "denied", "not_owner")
+        return False
+
+    return True
 
 
 def _filter_transformed_vault_files_for_path(files: List[Dict[str, Any]], requested_path: str) -> List[Dict[str, Any]]:
@@ -4154,6 +4547,19 @@ def _guess_file_type(filename):
 
 BINARY_EXTS = {'.pdf', '.doc', '.docx', '.xlsx', '.xls', '.pptx', '.ppt',
                '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.rtf', '.zip'}
+
+DOWNLOAD_TEXT_EXTS = {
+    '.txt', '.md', '.json', '.csv', '.yaml', '.yml', '.log', '.capsule',
+    '.py', '.js', '.ts', '.sh', '.cfg', '.ini', '.toml', '.html', '.htm',
+    '.xml',
+}
+
+DOWNLOAD_TEXT_MIME_TYPES = {
+    'application/json',
+    'application/javascript',
+    'application/xml',
+    'application/x-yaml',
+}
 
 def _read_file_content(raw_bytes, filename):
     ext = os.path.splitext(filename)[1].lower()
@@ -4896,6 +5302,116 @@ def simdrive_inject():
         return jsonify({"success": False, "error": str(e), "error_code": type(e).__name__}), 503
 
 
+def _vault_download_filename(row: Dict[str, Any]) -> str:
+    raw = row.get('storage_path') or row.get('filename') or 'vvault-file'
+    filename = os.path.basename(str(raw).replace('\\', '/')).strip()
+    filename = re.sub(r'[\r\n"]+', '_', filename)
+    return filename or 'vvault-file'
+
+
+def _vault_download_content_type(row: Dict[str, Any], filename: str) -> str:
+    for candidate in (row.get('content_type'), row.get('file_type')):
+        if isinstance(candidate, str) and '/' in candidate:
+            return candidate.strip()
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or _guess_file_type(filename)
+
+
+def _is_text_download_type(content_type: str, filename: str) -> bool:
+    mime = (content_type or '').split(';', 1)[0].strip().lower()
+    ext = os.path.splitext(filename)[1].lower()
+    return mime.startswith('text/') or mime in DOWNLOAD_TEXT_MIME_TYPES or ext in DOWNLOAD_TEXT_EXTS
+
+
+def _decode_base64_download_content(value: str) -> Optional[bytes]:
+    compact = ''.join(str(value).split())
+    if not compact:
+        return b''
+    try:
+        return base64.b64decode(compact, validate=True)
+    except Exception:
+        return None
+
+
+def _load_vault_download_bytes(row: Dict[str, Any], filename: str) -> Tuple[Optional[bytes], str, str]:
+    content_type = _vault_download_content_type(row, filename)
+    stored = VAULT_FILE_REPOSITORY.load_bytes(row)
+    if stored:
+        body, stored_content_type = stored
+        return body, stored_content_type or content_type, 'object_storage'
+
+    content = row.get('content')
+    if content is None:
+        return None, content_type, 'missing_content'
+    if isinstance(content, bytes):
+        return content, content_type, 'db_content_bytes'
+    if isinstance(content, bytearray):
+        return bytes(content), content_type, 'db_content_bytes'
+
+    content_text = content if isinstance(content, str) else str(content)
+    if _is_text_download_type(content_type, filename):
+        return content_text.encode('utf-8'), content_type, 'db_content_text'
+
+    decoded = _decode_base64_download_content(content_text)
+    if decoded is not None:
+        return decoded, content_type, 'db_content_base64'
+    return None, content_type, 'unrecoverable_content'
+
+
+def _get_authorized_vault_download_row(file_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Any]]:
+    current_user = request.current_user
+    user_email = current_user.get('email')
+    user_role = current_user.get('role', 'user')
+    route = f"/api/vault/files/{file_id}/download"
+
+    row = VAULT_FILE_REPOSITORY.get_by_id(file_id)
+    if not row:
+        return None, (jsonify({"success": False, "error": "File not found"}), 404)
+
+    if user_role != 'admin':
+        user_id = _get_authenticated_user_id()
+        if not _authorized_vault_file_for_user(row, user_id=user_id, user_email=user_email, route=route):
+            return None, (jsonify({"success": False, "error": "Access denied"}), 403)
+
+    return row, None
+
+
+@app.route('/api/vault/files/<file_id>/download')
+@require_auth
+def download_vault_file(file_id):
+    """Download a vault file as native bytes using VVAULT/Postgres authority."""
+    try:
+        row, error_response = _get_authorized_vault_download_row(file_id)
+        if error_response:
+            return error_response
+
+        filename = _vault_download_filename(row)
+        body, content_type, source = _load_vault_download_bytes(row, filename)
+        if body is None:
+            return jsonify({
+                "success": False,
+                "error": "File body is not available for download",
+                "error_code": "VVAULT_FILE_BODY_UNAVAILABLE",
+            }), 422
+
+        response = Response(body, content_type=content_type)
+        response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response.headers['Content-Length'] = str(len(body))
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        logger.info(
+            "VAULT_FILE_DOWNLOAD: id=%s path=%s content_type=%s size=%s source=%s",
+            file_id,
+            row.get('storage_path') or row.get('filename') or '',
+            content_type,
+            len(body),
+            source,
+        )
+        return response
+    except Exception as e:
+        logger.error(f"Error downloading vault file: {e}")
+        return jsonify({"success": False, "error": str(e), "error_code": type(e).__name__}), 503
+
+
 @app.route('/api/vault/files/<file_id>')
 @require_auth
 def get_vault_file(file_id):
@@ -4914,16 +5430,12 @@ def get_vault_file(file_id):
         effective_user_id = row.get('user_id')
         if user_role != 'admin':
             user_id = _get_authenticated_user_id()
-            
-            file_user_id = row.get('user_id')
-            is_system = row.get('is_system', False)
-            
-            if file_user_id is None and not is_system:
-                log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "unassigned_file")
-                return jsonify({"success": False, "error": "Access denied"}), 403
-            
-            if file_user_id is not None and file_user_id != user_id:
-                log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "not_owner")
+            if not _authorized_vault_file_for_user(
+                row,
+                user_id=user_id,
+                user_email=user_email,
+                route=f"/api/vault/files/{file_id}",
+            ):
                 return jsonify({"success": False, "error": "Access denied"}), 403
             effective_user_id = user_id
 
@@ -5939,20 +6451,59 @@ def update_construct_editor(construct_id):
         avatar_data_url = payload.get('avatarDataUrl') or payload.get('avatar') or None
         if isinstance(avatar_data_url, str) and avatar_data_url.startswith('data:image/'):
             try:
-                match = re.match(r'^data:image/[^;]+;base64,(.+)$', avatar_data_url)
-                if match:
-                    _upsert_binary_construct_file(callsign, user_id, 'avatar.png', match.group(1), {
-                        "contentType": "image/png",
-                        "mimeType": "image/png",
-                    })
+                _upsert_canonical_avatar_png(
+                    callsign,
+                    user_id,
+                    avatar_data_url,
+                    source_filename='avatarDataUrl',
+                    metadata={
+                        "source": "vvault_construct_editor",
+                        "provider": "vvault_construct_editor",
+                    },
+                )
+            except AvatarCanonicalizationError as avatar_error:
+                logger.warning(f"CONSTRUCT_EDITOR_AVATAR_UPDATE_REJECTED: {callsign}: {avatar_error}")
+                return jsonify({"success": False, "error": str(avatar_error), "code": "invalid_avatar"}), 400
             except Exception as avatar_error:
                 logger.warning(f"CONSTRUCT_EDITOR_AVATAR_UPDATE_WARN: {callsign}: {avatar_error}")
+                raise
 
         return jsonify(_build_construct_editor_payload(callsign, user_id))
     except Exception as e:
         logger.error(f"CONSTRUCT_EDITOR_UPDATE_ERROR: {e}")
         if _is_dependency_timeout(e):
             return _dependency_timeout_write_response("/api/vault/constructs/<construct_id>/editor")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/vault/constructs/<construct_id>/avatar/canonicalize', methods=['POST'])
+@require_chatty_auth
+def canonicalize_construct_avatar(construct_id):
+    """Promote an existing identity avatar variant into canonical avatar.png."""
+    try:
+        callsign = _normalize_callsign(construct_id)
+        user_id = _get_authenticated_user_id()
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
+
+        rows = _query_construct_file_rows(callsign, user_id, include_content=True)
+        avatar_rows = [
+            row for row in rows
+            if _avatar_row_filename(row) == AVATAR_CANONICAL_NAME
+            or _avatar_row_filename(row) in AVATAR_COMPAT_NAMES
+        ]
+        result = _canonicalize_construct_avatar(callsign, user_id, avatar_rows)
+        status = result.get("status")
+        if status == "blocked":
+            return jsonify(result), 409
+        return jsonify(result)
+    except AvatarCanonicalizationError as avatar_error:
+        logger.warning(f"CONSTRUCT_AVATAR_CANONICALIZE_REJECTED: {construct_id}: {avatar_error}")
+        return jsonify({"success": False, "error": str(avatar_error), "code": "invalid_avatar"}), 400
+    except Exception as e:
+        logger.error(f"CONSTRUCT_AVATAR_CANONICALIZE_ERROR: {e}")
+        if _is_dependency_timeout(e):
+            return _dependency_timeout_write_response("/api/vault/constructs/<construct_id>/avatar/canonicalize")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ============================================================================
@@ -6692,42 +7243,31 @@ def create_construct():
         avatar_created = False
         avatar_file_entry = None
         if avatar_b64:
-            import base64 as b64mod_av
             try:
-                avatar_bytes = b64mod_av.b64decode(avatar_b64)
-                if len(avatar_bytes) > 5 * 1024 * 1024:
-                    logger.warning(f"Avatar too large for {callsign}, skipping")
-                else:
-                    avatar_sha = hashlib.sha256(avatar_bytes).hexdigest()
-                    avatar_meta = {
+                avatar_result = _upsert_canonical_avatar_png(
+                    callsign,
+                    user_id,
+                    avatar_b64,
+                    source_filename='avatar_base64',
+                    metadata={
                         'construct_id': callsign,
                         'provider': 'vvault_construct_create',
+                        'source': 'vvault_construct_create',
                         'folder': 'identity',
                     }
-                    avatar_vsi_path = f'instances/{callsign}/identity/avatar.png'
-                    avatar_record = {
-                        'filename': avatar_vsi_path,
+                )
+                if avatar_result.get('id'):
+                    avatar_created = True
+                    avatar_file_entry = {
+                        'id': avatar_result.get('id'),
+                        'filename': f'instances/{callsign}/identity/avatar.png',
                         'file_type': 'binary',
-                        'content': avatar_b64,
-                        'construct_id': callsign,
-                        'user_id': user_id,
-                        'is_system': False,
-                        'sha256': avatar_sha,
-                        'metadata': json.dumps(avatar_meta),
-                        'storage_path': avatar_vsi_path,
-                        'created_at': now,
-                        'updated_at': now,
+                        'folder': 'identity',
+                        'action': avatar_result.get('action'),
+                        'pngMagicOk': True,
                     }
-                    avatar_result = _upsert_vault_file_record(avatar_record, context='construct_avatar')
-                    if avatar_result.get('id'):
-                        avatar_created = True
-                        avatar_file_entry = {
-                            'id': avatar_result.get('id'),
-                            'filename': avatar_vsi_path,
-                            'file_type': 'binary',
-                            'folder': 'identity',
-                            'action': avatar_result.get('action'),
-                        }
+            except AvatarCanonicalizationError as av_err:
+                return jsonify({"success": False, "error": str(av_err), "code": "invalid_avatar"}), 400
             except Exception as av_err:
                 logger.warning(f"Avatar insert failed for {callsign}: {av_err}")
 
@@ -7435,30 +7975,46 @@ def get_security_summary():
     })
 
 # Legal document routes
+def _serve_html_document(filename: str):
+    """Serve explicit public HTML documents before the SPA fallback."""
+    path = os.path.join(HTML_DIR, filename)
+    if os.path.exists(path):
+        return send_from_directory(HTML_DIR, filename)
+    return jsonify({"success": False, "error": "Legal document not found"}), 404
+
+
+@app.route('/vvault-terms.html')
 @app.route('/terms-of-service.html')
 def terms_of_service():
     """Serve the Terms of Service HTML page."""
-    return send_from_directory('.', 'terms-of-service.html')
+    return _serve_html_document('vvault-terms.html')
 
+@app.route('/vvault-privacy.html')
 @app.route('/privacy-notice.html')
 def privacy_notice():
     """Serve the Privacy Notice HTML page."""
-    return send_from_directory('.', 'privacy-notice.html')
+    return _serve_html_document('vvault-privacy.html')
 
+@app.route('/vvault-eeccd.html')
 @app.route('/european-electronic-communications-code-disclosure.html')
 def eeccd_disclosure():
     """Serve the EECCD Disclosure HTML page."""
-    return send_from_directory('.', 'european-electronic-communications-code-disclosure.html')
+    return _serve_html_document('vvault-eeccd.html')
 
 @app.route('/api/config')
 def get_config():
     """Get configuration info"""
+    door = _resolve_chatty_vvault_door()
     return jsonify({
         "backend_port": 8000,
         "frontend_port": 7784,
         "project_dir": PROJECT_DIR,
         "capsules_dir": CAPSULES_DIR,
-        "cors_origins": ["http://localhost:7784"]
+        "cors_origins": list(_cors_origins),
+        "backend_origin": _resolve_backend_origin(),
+        "frontend_origin": _resolve_frontend_origin(),
+        "environment": "development" if door.get("selected_door") == "private" else "production",
+        "door_contract": door,
     })
 
 def _credential_login_unavailable_message(auth_provider: Optional[str]) -> str:
@@ -8574,6 +9130,11 @@ def google_oauth_health():
         "callback_url": f"{_get_backend_url()}/api/auth/google/callback",
         "frontend_url": _get_frontend_url(),
         "vvault_auth_ready": auth_ready,
+        "authority": "vvault_auth",
+        "storage_mode": "vvault_body",
+        "canonical": auth_ready,
+        "connection_state": "connected" if auth_ready else "degraded",
+        "identity_authority_available": auth_ready,
         "auth_owner": auth_state.get("auth_owner") or AUTH_OWNER,
         "session_owner": auth_state.get("session_owner") or SESSION_OWNER,
         "auth_status": auth_state.get("status") or "unknown",
@@ -8602,18 +9163,7 @@ def google_oauth_login():
         req_host = request.headers.get('Host', request.host)
         logger.info(f"OAuth login headers - Origin: {origin}, Referer: {referer}, X-Forwarded-Host: {fwd_host}, Host: {req_host}")
 
-        is_replit = 'replit.dev' in origin or 'replit.dev' in referer or 'replit.dev' in fwd_host or 'replit.dev' in req_host
-        is_localhost = 'localhost' in req_host or '127.0.0.1' in req_host
-
-        # Use http for local development, https for production
-        callback_scheme = "http" if is_localhost else "https"
-
-        if is_replit and REPLIT_DEV_DOMAIN:
-            callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/oauth/google/callback"
-        elif OAUTH_BASE_URL or VVAULT_BACKEND_URL:
-            callback_url = f"{_get_backend_url()}/api/auth/google/callback"
-        else:
-            callback_url = f"{callback_scheme}://{req_host}/api/auth/google/callback"
+        callback_url = _resolve_google_oauth_callback_url()
 
         frontend_origin = origin or ""
         if not frontend_origin and referer:
@@ -8677,15 +9227,8 @@ def google_oauth_callback():
         
         if stored_callback:
             callback_url = stored_callback
-        elif '/api/auth/oauth/google/callback' in request.path and REPLIT_DEV_DOMAIN:
-            callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/oauth/google/callback"
-        elif OAUTH_BASE_URL or VVAULT_BACKEND_URL:
-            callback_url = f"{_get_backend_url()}/api/auth/google/callback"
         else:
-            host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
-            is_localhost = 'localhost' in host or '127.0.0.1' in host
-            callback_scheme = "http" if is_localhost else "https"
-            callback_url = f"{callback_scheme}://{host}/api/auth/google/callback"
+            callback_url = _resolve_google_oauth_callback_url()
         
         from urllib.parse import urlparse
         parsed = urlparse(callback_url)

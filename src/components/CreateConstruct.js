@@ -165,7 +165,7 @@ const CreateConstruct = ({ user }) => {
     <div className="create-construct">
       <div className="page-header">
         <h1 className="page-title">🛠️ Create Construct</h1>
-        <p className="page-subtitle">Initialize a new AI construct in the VVAULT system</p>
+        <p className="page-subtitle">Initialize a new AI/VSI anatomy in the VVAULT system</p>
       </div>
 
       {result ? (
@@ -177,7 +177,7 @@ const CreateConstruct = ({ user }) => {
             <div className="stat-value" style={{ color: '#4caf50', fontSize: '18px', marginBottom: '8px' }}>
               {result.callsign || callsign} initialized successfully
             </div>
-            <div className="stat-label">New construct is ready for activation</div>
+            <div className="stat-label">New AI/VSI anatomy is ready for activation</div>
           </div>
 
           {result.file_count !== undefined && (
@@ -285,7 +285,7 @@ const CreateConstruct = ({ user }) => {
         <form onSubmit={handleSubmit} style={{ marginTop: '20px' }}>
           <div className="card">
             <div className="card-header">
-              <h3 className="card-title">🧬 Construct Identity</h3>
+                <h3 className="card-title">🧬 AI/VSI Anatomy Identity</h3>
             </div>
 
             <div style={fieldGroupStyle}>
@@ -325,7 +325,7 @@ const CreateConstruct = ({ user }) => {
               <textarea
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Brief description of the construct's purpose..."
+                placeholder="Brief description of this anatomy's purpose..."
                 style={textareaStyle}
               />
             </div>
@@ -335,7 +335,7 @@ const CreateConstruct = ({ user }) => {
               <textarea
                 value={instructions}
                 onChange={(e) => setInstructions(e.target.value)}
-                placeholder="System prompt body for the construct..."
+                placeholder="System prompt body for this AI/VSI anatomy..."
                 style={{ ...textareaStyle, minHeight: '150px' }}
               />
             </div>

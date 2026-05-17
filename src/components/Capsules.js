@@ -71,7 +71,7 @@ const Capsules = ({ user }) => {
     <div className="capsules">
       <div className="page-header">
         <h1 className="page-title">📦 Capsules</h1>
-        <p className="page-subtitle">Manage your AI construct memory capsules</p>
+        <p className="page-subtitle">Manage capsule snapshots for protected anatomies</p>
       </div>
       
       {error && (
@@ -109,7 +109,7 @@ const Capsules = ({ user }) => {
               <div className="empty-state">
                 <div className="empty-icon">📦</div>
                 <h3>No capsules found</h3>
-                <p>Create your first capsule to get started</p>
+                <p>Create your first anatomy snapshot to get started</p>
                 <button className="btn btn-primary">
                   <span>➕</span>
                   Create Capsule
@@ -199,10 +199,10 @@ const Capsules = ({ user }) => {
                 <br />
                 <h4>Capsule Types:</h4>
                 <ul>
-                  <li><strong>Memory:</strong> AI conversation history</li>
+                  <li><strong>Memory:</strong> Conversation and continuity history</li>
                   <li><strong>Data:</strong> Structured information</li>
                   <li><strong>Config:</strong> System configurations</li>
-                  <li><strong>Backup:</strong> Archived snapshots</li>
+                  <li><strong>Backup:</strong> Archived anatomy snapshots</li>
                 </ul>
               </div>
             </div>

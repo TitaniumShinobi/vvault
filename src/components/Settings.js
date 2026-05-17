@@ -132,7 +132,7 @@ const Settings = ({ systemInfo, user }) => {
     <div className="settings">
       <div className="page-header">
         <h1 className="page-title">⚙️ Settings</h1>
-        <p className="page-subtitle">Configure your VVAULT system preferences</p>
+        <p className="page-subtitle">Configure your VVAULT anatomy vault preferences</p>
       </div>
       
       <div className="content-grid">
@@ -153,7 +153,7 @@ const Settings = ({ systemInfo, user }) => {
                     <span className="setting-title">Auto Sync to Blockchain</span>
                   </label>
                   <p className="setting-description">
-                    Automatically sync new capsules to the blockchain
+                    Automatically sync new anatomy snapshots to the blockchain
                   </p>
                 </div>
                 
@@ -190,7 +190,7 @@ const Settings = ({ systemInfo, user }) => {
                     max="1000"
                   />
                   <p className="setting-description">
-                    Maximum size limit for individual capsules
+                    Maximum size limit for individual anatomy snapshots
                   </p>
                 </div>
               </div>
@@ -213,7 +213,7 @@ const Settings = ({ systemInfo, user }) => {
                     <span className="setting-title">Enable Encryption</span>
                   </label>
                   <p className="setting-description">
-                    Encrypt capsule data before storage
+                    Encrypt anatomy artifacts before storage
                   </p>
                 </div>
                 
@@ -232,7 +232,7 @@ const Settings = ({ systemInfo, user }) => {
                     <option value="local">Local Testnet</option>
                   </select>
                   <p className="setting-description">
-                    Choose the blockchain network for storage
+                    Choose the blockchain network for witness storage
                   </p>
                 </div>
               </div>
@@ -306,14 +306,14 @@ const Settings = ({ systemInfo, user }) => {
 
           <div className="card mt-4">
             <div className="card-header">
-              <h3 className="card-title">🧭 Identity & Personalization Capsule</h3>
+              <h3 className="card-title">🧭 Identity & Personalization Anatomy</h3>
             </div>
             <div className="settings-section">
               <div className="setting-group">
                 <div className="setting-item">
                   <p className="setting-description">
                     Export the centralized Chatty personalization schema and a default
-                    VVAULT-ready human capsule (links Chatty, VVAULT, and neat identities).
+                    VVAULT-ready human anatomy snapshot (links Chatty, VVAULT, and neat identities).
                   </p>
                   <div className="settings-actions">
                     <button className="btn btn-secondary" onClick={exportSchema}>
@@ -322,7 +322,7 @@ const Settings = ({ systemInfo, user }) => {
                     </button>
                     <button className="btn btn-primary" onClick={exportHumanCapsule}>
                       <span>🧠</span>
-                      {capsuleExported ? 'Capsule Exported' : 'Export Human Capsule'}
+                      {capsuleExported ? 'Snapshot Exported' : 'Export Human Snapshot'}
                     </button>
                   </div>
                 </div>
@@ -378,7 +378,7 @@ const Settings = ({ systemInfo, user }) => {
                       <span className="info-value">{config.project_dir}</span>
                     </div>
                     <div className="info-item">
-                      <span className="info-label">Capsules Directory:</span>
+                      <span className="info-label">Capsule Snapshot Directory:</span>
                       <span className="info-value">{config.capsules_dir}</span>
                     </div>
                   </div>
@@ -404,7 +404,7 @@ const Settings = ({ systemInfo, user }) => {
                     </span>
                   </div>
                   <div className="info-item">
-                    <span className="info-label">Capsules Loaded:</span>
+                    <span className="info-label">Snapshots Loaded:</span>
                     <span className="info-value">{systemInfo.capsules_loaded}</span>
                   </div>
                 </div>
@@ -420,7 +420,7 @@ const Settings = ({ systemInfo, user }) => {
               <div className="tip-item">
                 <span className="tip-icon">🔒</span>
                 <div className="tip-text">
-                  <strong>Security:</strong> Always enable encryption for sensitive capsules
+                  <strong>Security:</strong> Always enable encryption for sensitive anatomy artifacts
                 </div>
               </div>
               
@@ -434,7 +434,7 @@ const Settings = ({ systemInfo, user }) => {
               <div className="tip-item">
                 <span className="tip-icon">📦</span>
                 <div className="tip-text">
-                  <strong>Storage:</strong> Monitor capsule sizes to optimize performance
+                  <strong>Storage:</strong> Monitor anatomy snapshot sizes to optimize performance
                 </div>
               </div>
               

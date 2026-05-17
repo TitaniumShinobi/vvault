@@ -45,6 +45,31 @@ class TestVaultBrowserCapsulePreviewStatic(unittest.TestCase):
         self.assertIn("await authFetch('/api/vault/files/preview'", self.source)
         self.assertIn("const isFastCapsulePreview = isCapsuleFile(file);", self.source)
 
+    def test_existing_preview_pane_has_authenticated_download_action(self):
+        self.assertIn("const downloadFile = async (file) =>", self.source)
+        self.assertIn("await authFetch(`/api/vault/files/${file.id}/download`)", self.source)
+        self.assertIn("const blob = await response.blob();", self.source)
+        self.assertIn("URL.createObjectURL(blob)", self.source)
+        self.assertIn("link.download = getDownloadFilename(", self.source)
+        self.assertIn('onClick={() => downloadFile(selectedFile)}>Download</button>', self.source)
+        self.assertIn("isUnexpectedAppShellDownload(response, fallbackName)", self.source)
+        self.assertIn("Download route is not available from the current VVAULT backend.", self.source)
+        self.assertNotIn("download-browser-home", self.source)
+
+    def test_search_box_filters_visible_folder_and_file_entries(self):
+        self.assertIn("const [searchTerm, setSearchTerm] = useState('');", self.source)
+        self.assertIn("const normalizedSearchTerm = searchTerm.trim().toLowerCase();", self.source)
+        self.assertIn("const matchesSearch = (...values) => {", self.source)
+        self.assertIn(".filter((folderEntry) => matchesSearch(folderEntry.displayName, folderEntry.name));", self.source)
+        self.assertIn(".filter((file) => matchesSearch(", self.source)
+        self.assertIn("file.displayName,", self.source)
+        self.assertIn("file.filename,", self.source)
+        self.assertIn("file.storage_path,", self.source)
+        self.assertIn("file.display_path,", self.source)
+        self.assertIn("file.internal_path,", self.source)
+        self.assertIn("value={searchTerm}", self.source)
+        self.assertIn("onChange={(event) => setSearchTerm(event.target.value)}", self.source)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

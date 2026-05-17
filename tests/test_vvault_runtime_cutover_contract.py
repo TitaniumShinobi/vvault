@@ -24,6 +24,10 @@ def _vvault_runtime_status(*, ready=True):
     return {
         "ready": ready,
         "status": "ready" if ready else "not_ready",
+        "authority": "vvault_body",
+        "storage_mode": "vvault_body",
+        "canonical": ready,
+        "connection_state": "connected" if ready else "degraded",
         "runtime": {
             "server_pid": 1234,
             "repo_root": str(REPO_ROOT),
@@ -35,11 +39,17 @@ def _vvault_runtime_status(*, ready=True):
             "ready": ready,
             "status": "healthy" if ready else "unhealthy",
             "configured": True,
+            "authority": "vvault_body",
+            "storage_mode": "vvault_body",
+            "canonical": ready,
+            "connection_state": "connected" if ready else "degraded",
             "schema": "ovvaults",
             "source_database": "vvault_body_test",
             "checks": {
                 "vault_files_readable": ready,
+                "vault_files_runtime_columns": ready,
                 "transcripts_readable": ready,
+                "transcript_content_column": ready,
             },
         },
         "storage": {
@@ -52,6 +62,12 @@ def _vvault_runtime_status(*, ready=True):
         "auth": {
             "required_for_readiness": False,
             "status": "unconfigured",
+            "ready": False,
+            "authority": "vvault_auth",
+            "storage_mode": "vvault_body",
+            "canonical": False,
+            "connection_state": "degraded",
+            "identity_authority_available": False,
             "service_api": {"configured": False},
             "google_oauth": {
                 "configured": False,
@@ -73,9 +89,14 @@ class TestVvaultRuntimeCutoverStatic(unittest.TestCase):
         self.assertIn("def _body_database_dependency_status", self.server)
         self.assertIn("chatty_body_service.database_url()", self.server)
         self.assertIn("SELECT 1 FROM vault_files LIMIT 1", self.server)
+        self.assertIn("SELECT id, content, metadata, construct_id, storage_path, file_type", self.server)
         self.assertIn("SELECT 1 FROM transcripts LIMIT 1", self.server)
+        self.assertIn("SELECT id, content FROM transcripts LIMIT 1", self.server)
         self.assertIn("runtime_status = _get_vvault_runtime_status()", self.server)
         self.assertIn("\"body_database\": runtime_status[\"body_database\"]", self.server)
+        self.assertIn("\"authority\": runtime_status[\"authority\"]", self.server)
+        self.assertIn("\"canonical\": runtime_status[\"canonical\"]", self.server)
+        self.assertIn("\"connection_state\": runtime_status[\"connection_state\"]", self.server)
         health_route = self.server.split("@app.route('/api/health')", 1)[1].split("@app.route('/api/ready')", 1)[0]
         ready_route = self.server.split("@app.route('/api/ready')", 1)[1].split("USER_PATH_PATTERN", 1)[0]
         self.assertNotIn("SUPABASE_STEWARD.snapshot()", health_route)
@@ -101,6 +122,12 @@ class TestVvaultRuntimeCutoverStatic(unittest.TestCase):
     def test_frontend_script_survives_detached_launcher_stdin(self):
         self.assertIn("webpack-dev-server --mode development --no-watch-options-stdin", self.package)
 
+    def test_dev_server_serves_public_html_documents_before_spa_fallback(self):
+        self.assertIn("path.join(__dirname, 'html')", self.server + self.package + (REPO_ROOT / "webpack.config.js").read_text(encoding="utf-8"))
+        webpack = (REPO_ROOT / "webpack.config.js").read_text(encoding="utf-8")
+        html_static = webpack.split("path.join(__dirname, 'html')", 1)[1].split("]", 1)[0]
+        self.assertIn("publicPath: '/'", html_static)
+
 
 class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
     def setUp(self):
@@ -113,7 +140,15 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
         self.assertEqual(connected.status_code, 200)
         connected_payload = connected.get_json()
         self.assertTrue(connected_payload["ready"])
+        self.assertEqual(connected_payload["authority"], "vvault_body")
+        self.assertEqual(connected_payload["storage_mode"], "vvault_body")
+        self.assertTrue(connected_payload["canonical"])
+        self.assertEqual(connected_payload["connection_state"], "connected")
         self.assertEqual(connected_payload["body_database"]["status"], "healthy")
+        self.assertTrue(connected_payload["body_database"]["canonical"])
+        self.assertEqual(connected_payload["body_database"]["connection_state"], "connected")
+        self.assertTrue(connected_payload["body_database"]["checks"]["vault_files_runtime_columns"])
+        self.assertTrue(connected_payload["body_database"]["checks"]["transcript_content_column"])
         self.assertNotIn("supabase", connected_payload)
 
         with patch.object(server, "_get_vvault_runtime_status", return_value=_vvault_runtime_status(ready=False)):
@@ -121,7 +156,12 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
         self.assertEqual(blocked.status_code, 503)
         blocked_payload = blocked.get_json()
         self.assertFalse(blocked_payload["ready"])
+        self.assertEqual(blocked_payload["authority"], "vvault_body")
+        self.assertFalse(blocked_payload["canonical"])
+        self.assertEqual(blocked_payload["connection_state"], "degraded")
         self.assertEqual(blocked_payload["body_database"]["status"], "unhealthy")
+        self.assertFalse(blocked_payload["body_database"]["checks"]["vault_files_runtime_columns"])
+        self.assertFalse(blocked_payload["body_database"]["checks"]["transcript_content_column"])
         self.assertFalse(blocked_payload["storage"]["required_for_readiness"])
         self.assertFalse(blocked_payload["auth"]["required_for_readiness"])
         self.assertNotIn("supabase", blocked_payload)
@@ -134,8 +174,13 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["status"], "healthy")
         self.assertEqual(payload["body_database"]["status"], "healthy")
+        self.assertTrue(payload["body_database"]["canonical"])
+        self.assertEqual(payload["body_database"]["connection_state"], "connected")
+        self.assertTrue(payload["body_database"]["checks"]["vault_files_runtime_columns"])
+        self.assertTrue(payload["body_database"]["checks"]["transcript_content_column"])
         self.assertFalse(payload["storage"]["required_for_readiness"])
         self.assertFalse(payload["auth"]["required_for_readiness"])
+        self.assertEqual(payload["auth"]["authority"], "vvault_auth")
         self.assertNotIn("supabase", payload)
         self.assertNotIn("supabase_mode", payload)
 
@@ -153,6 +198,26 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
         self.assertEqual(payload["storage_owner"], "ovvaults.vault_files")
         self.assertNotIn("supabase", payload)
         self.assertNotIn("supabase_mode", payload)
+
+    def test_public_legal_documents_do_not_fall_through_to_spa_shell(self):
+        expected = {
+            "/vvault-terms.html": "VVAULT Terms of Service",
+            "/terms-of-service.html": "VVAULT Terms of Service",
+            "/vvault-privacy.html": "VVAULT Privacy Notice",
+            "/privacy-notice.html": "VVAULT Privacy Notice",
+            "/vvault-eeccd.html": "VVAULT European Electronic Communications Code Disclosure",
+            "/european-electronic-communications-code-disclosure.html": "VVAULT European Electronic Communications Code Disclosure",
+        }
+
+        for path, title in expected.items():
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                body = response.get_data(as_text=True)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(f"<title>{title}</title>", body)
+                self.assertNotIn('id="root"', body)
+                self.assertNotIn("Welcome Back", body)
 
     def test_service_credentials_are_encrypted_local_system_files(self):
         stored_rows = []

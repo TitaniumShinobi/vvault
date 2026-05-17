@@ -68,6 +68,10 @@ module.exports = (_, argv = {}) => {
         {
           directory: path.join(__dirname, 'public'),
           publicPath: '/'
+        },
+        {
+          directory: path.join(__dirname, 'html'),
+          publicPath: '/'
         }
       ],
       compress: true,
