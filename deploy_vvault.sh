@@ -203,6 +203,19 @@ check_url_status() {
   local expected="$2"
   local tmp_body
   local status
+  local attempt
+
+  for attempt in {1..30}; do
+    tmp_body="$(mktemp)"
+    status="$(curl -sS -o "${tmp_body}" -w '%{http_code}' "${url}")" && [ "${status}" = "${expected}" ] && {
+      cat "${tmp_body}"
+      rm -f "${tmp_body}"
+      return 0
+    }
+    rm -f "${tmp_body}"
+    sleep 1
+  done
+
   tmp_body="$(mktemp)"
   status="$(curl -sS -o "${tmp_body}" -w '%{http_code}' "${url}")" || {
     rm -f "${tmp_body}"
