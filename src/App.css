@@ -8,14 +8,15 @@
 .navbar {
   background-color: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
-  padding: 0 20px;
+  padding: 0 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 60px;
+  min-height: 64px;
   position: sticky;
   top: 0;
   z-index: 100;
+  gap: 16px;
 }
 
 .nav-brand {
@@ -24,27 +25,38 @@
   gap: 12px;
 }
 
+.nav-logo-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-primary);
+  text-decoration: none;
+  min-width: max-content;
+}
+
+.nav-logo-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.nav-logo-link.active .nav-logo-label,
+.nav-logo-link:hover .nav-logo-label {
+  color: var(--text-primary);
+}
+
 .nav-logo {
-  width: 32px;
-  height: 32px;
+  width: 48px;
+  height: 48px;
   object-fit: contain;
-}
-
-.nav-title {
-  font-size: 24px;
-  font-weight: bold;
-  color: var(--primary-color);
-}
-
-.nav-subtitle {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-left: 8px;
 }
 
 .nav-links {
   display: flex;
   gap: 8px;
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
 }
 
 .nav-link {
@@ -69,10 +81,6 @@
   color: white;
 }
 
-.nav-icon {
-  font-size: 16px;
-}
-
 .nav-label {
   font-size: 14px;
 }
@@ -80,7 +88,9 @@
 .nav-user-section {
   display: flex;
   align-items: center;
-  gap: 16px;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
 }
 
 .nav-user-info {
@@ -91,7 +101,10 @@
 .nav-user-email {
   font-size: 12px;
   color: var(--text-secondary);
-  margin-right: 8px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nav-logout-button {
@@ -147,10 +160,11 @@
 /* Main content */
 .main-content {
   flex: 1;
-  padding: 20px;
-  max-width: 1200px;
-  margin: 0 auto;
+  padding: 16px;
+  max-width: none;
+  margin: 0;
   width: 100%;
+  min-height: 0;
 }
 
 /* Loading screen */
@@ -186,35 +200,6 @@
 .loading-content p {
   color: var(--text-secondary);
   font-size: 16px;
-}
-
-/* Footer */
-.footer {
-  background-color: var(--bg-secondary);
-  border-top: 1px solid var(--border-color);
-  padding: 16px 20px;
-  margin-top: auto;
-}
-
-.footer-content {
-  max-width: 1200px;
-  margin: 0 auto;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 16px;
-}
-
-.footer-section {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-}
-
-.footer-section span {
-  font-size: 12px;
-  color: var(--text-muted);
 }
 
 /* Page headers */
@@ -254,46 +239,48 @@
   .navbar {
     padding: 0 16px;
     height: auto;
-    flex-direction: column;
-    gap: 12px;
+    min-height: 64px;
+    flex-wrap: wrap;
+    gap: 10px 12px;
     padding: 12px 16px;
   }
   
   .nav-brand {
-    align-self: flex-start;
+    flex: 1;
+    min-width: 150px;
   }
   
   .nav-links {
+    order: 3;
     width: 100%;
-    justify-content: space-around;
+    justify-content: flex-start;
+    overflow-x: auto;
   }
   
   .nav-link {
-    flex-direction: column;
-    gap: 4px;
     padding: 8px 12px;
+    white-space: nowrap;
   }
   
   .nav-label {
     font-size: 12px;
   }
+
+  .nav-user-section {
+    flex: 0 1 auto;
+  }
+
+  .nav-user-email,
+  .nav-status {
+    display: none;
+  }
   
   .main-content {
-    padding: 16px;
+    padding: 10px;
   }
   
   .content-grid {
     grid-template-columns: 1fr;
   }
   
-  .footer-content {
-    flex-direction: column;
-    text-align: center;
-    gap: 8px;
-  }
-  
-  .footer-section {
-    flex-direction: column;
-    gap: 4px;
-  }
 }

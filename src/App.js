@@ -1,11 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import Dashboard from './components/Dashboard';
 import Capsules from './components/Capsules';
 import VaultBrowser from './components/VaultBrowser';
-import Blockchain from './components/Blockchain';
 import Settings from './components/Settings';
-import CreateConstruct from './components/CreateConstruct';
 import CinematicLogin from './components/CinematicLogin';
 import { validateSession, SESSION_EXPIRED_EVENT } from './utils/authFetch';
 import './App.css';
@@ -15,12 +13,9 @@ const Navigation = ({ user, onLogout }) => {
   const location = useLocation();
   
   const navItems = [
-    { path: '/', label: 'Dashboard', icon: '🏠' },
-    { path: '/vault', label: 'Vault', icon: '🔒' },
-    { path: '/capsules', label: 'Capsules', icon: '📦' },
-    { path: '/blockchain', label: 'Blockchain', icon: '⛓️' },
-    { path: '/create', label: 'Create', icon: '✦' },
-    { path: '/settings', label: 'Settings', icon: '⚙️' }
+    { path: '/vault', label: 'Vault' },
+    { path: '/capsules', label: 'Capsules' },
+    { path: '/settings', label: 'Settings' }
   ];
   
   const handleLogout = () => {
@@ -30,12 +25,17 @@ const Navigation = ({ user, onLogout }) => {
   return (
     <nav className="navbar">
       <div className="nav-brand">
-        <img 
-          src="/assets/vvault_glyph.png" 
-          alt="VVAULT" 
-          className="nav-logo"
-          style={{ width: '32px', height: '32px' }}
-        />
+        <Link
+          to="/"
+          className={`nav-logo-link ${location.pathname === '/' ? 'active' : ''}`}
+          aria-label="Open dashboard"
+        >
+          <img 
+            src="/assets/vvaultlogo_inverted.svg" 
+            alt="" 
+            className="nav-logo"
+          />
+        </Link>
       </div>
       
       <div className="nav-links">
@@ -45,7 +45,6 @@ const Navigation = ({ user, onLogout }) => {
             to={item.path}
             className={`nav-link ${location.pathname === item.path ? 'active' : ''}`}
           >
-            <span className="nav-icon">{item.icon}</span>
             <span className="nav-label">{item.label}</span>
           </Link>
         ))}
@@ -56,7 +55,6 @@ const Navigation = ({ user, onLogout }) => {
           <span className="nav-user-email">{user?.email}</span>
         </div>
         <button className="nav-logout-button" onClick={handleLogout}>
-          <span className="nav-icon">🚪</span>
           <span className="nav-label">Logout</span>
         </button>
         <div className="nav-status">
@@ -195,7 +193,7 @@ function App() {
         <div className="loading-content">
           <div className="loading-spinner"></div>
           <h2>Loading VVAULT...</h2>
-          <p>Initializing AI construct memory vault...</p>
+          <p>Opening your vault...</p>
         </div>
       </div>
     );
@@ -216,26 +214,12 @@ function App() {
             <Route path="/" element={<Dashboard systemInfo={systemInfo} user={user} />} />
             <Route path="/vault" element={<VaultBrowser user={user} />} />
             <Route path="/capsules" element={<Capsules user={user} />} />
-            <Route path="/blockchain" element={<Blockchain user={user} />} />
-            <Route path="/create" element={<CreateConstruct user={user} />} />
             <Route path="/settings" element={<Settings systemInfo={systemInfo} user={user} />} />
+            <Route path="/blockchain" element={<Navigate to="/vault" replace />} />
+            <Route path="/create" element={<Navigate to="/vault" replace />} />
+            <Route path="*" element={<Navigate to="/vault" replace />} />
           </Routes>
         </main>
-        
-        <footer className="footer">
-          <div className="footer-content">
-            <div className="footer-section">
-              <span>© 2025 VVAULT - AI Construct Memory Vault</span>
-            </div>
-            <div className="footer-section">
-              <span>Backend: localhost:8000</span>
-              <span>Frontend: localhost:7784</span>
-            </div>
-            <div className="footer-section">
-              <span>Version 1.0.0</span>
-            </div>
-          </div>
-        </footer>
       </div>
     </Router>
   );
