@@ -1714,6 +1714,22 @@ def _guess_file_type(filename):
 BINARY_EXTS = {'.pdf', '.doc', '.docx', '.xlsx', '.xls', '.pptx', '.ppt',
                '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.rtf', '.zip'}
 
+IMAGE_PREVIEW_MIME_BY_EXT = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.svg': 'image/svg+xml',
+}
+BODY_DB_STORAGE_BUCKET = (
+    os.environ.get("VVAULT_BODY_DB_STORAGE_BUCKET")
+    or os.environ.get("VVAULT_STORAGE_BUCKET")
+    or os.environ.get("SUPABASE_STORAGE_BUCKET")
+    or "vault-files"
+).strip() or "vault-files"
+IMAGE_PREVIEW_MAX_BYTES = int(os.environ.get("VVAULT_IMAGE_PREVIEW_MAX_BYTES", str(10 * 1024 * 1024)))
+
 def _read_file_content(raw_bytes, filename):
     ext = os.path.splitext(filename)[1].lower()
     if ext in BINARY_EXTS:
@@ -2393,41 +2409,192 @@ def simdrive_inject():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+def _get_authorized_vault_file(file_id):
+    if not supabase_client:
+        return None, (jsonify({"success": False, "error": "Body database not configured"}), 500)
+
+    current_user = request.current_user
+    user_email = current_user.get('email')
+    user_role = current_user.get('role', 'user')
+    result = supabase_client.table('vault_files').select('*').eq('id', file_id).single().execute()
+    if not result.data:
+        return None, (jsonify({"success": False, "error": "File not found"}), 404)
+
+    if user_role != 'admin':
+        user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
+        user_id = user_result.data[0]['id'] if user_result.data else None
+        file_user_id = result.data.get('user_id')
+        is_system = result.data.get('is_system', False)
+
+        if file_user_id is None and not is_system:
+            log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "unassigned_file")
+            return None, (jsonify({"success": False, "error": "Access denied"}), 403)
+        if file_user_id is not None and file_user_id != user_id:
+            log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "not_owner")
+            return None, (jsonify({"success": False, "error": "Access denied"}), 403)
+
+    return result.data, None
+
+
+def _preview_unavailable_response(file_row, reason, status_code=422):
+    metadata = file_row.get('metadata') or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except Exception:
+            metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    return jsonify({
+        "success": False,
+        "error": "preview_unavailable",
+        "reason": reason,
+        "file_id": file_row.get('id'),
+        "filename": file_row.get('filename'),
+        "file_type": file_row.get('file_type'),
+        "metadata": {
+            "size": metadata.get("size"),
+            "construct_id": metadata.get("construct_id") or file_row.get("construct_id"),
+        },
+    }), status_code
+
+
+def _get_body_database_object_bytes(bucket, object_path, max_bytes=IMAGE_PREVIEW_MAX_BYTES):
+    clean_path = (object_path or "").strip().lstrip("/")
+    if not clean_path:
+        return None, "missing_storage_path"
+
+    base_url = (
+        os.environ.get("VVAULT_BODY_DB_URL")
+        or os.environ.get("SUPABASE_URL")
+        or ""
+    ).rstrip("/")
+    api_key = (
+        os.environ.get("VVAULT_BODY_DB_SERVICE_ROLE_KEY")
+        or os.environ.get("VVAULT_BODY_DB_ANON_KEY")
+        or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        or os.environ.get("SUPABASE_ANON_KEY")
+        or ""
+    )
+    if not base_url or not api_key:
+        return None, "body_database_not_configured"
+    if base_url.endswith("/rest/v1"):
+        base_url = base_url[:-8]
+
+    from urllib.parse import quote
+    encoded_bucket = quote((bucket or "").strip(), safe="")
+    encoded_path = "/".join(quote(part, safe="") for part in clean_path.split("/") if part)
+    response = requests.get(
+        f"{base_url}/storage/v1/object/{encoded_bucket}/{encoded_path}",
+        headers={"apikey": api_key, "Authorization": f"Bearer {api_key}"},
+        timeout=20,
+        stream=True,
+    )
+    if response.status_code == 404:
+        return None, "storage_object_not_found"
+    if not response.ok:
+        logger.warning(
+            "Body database object read failed with status %s for %s",
+            response.status_code,
+            clean_path,
+        )
+        return None, "storage_unavailable"
+
+    chunks = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            response.close()
+            return None, "image_too_large"
+        chunks.append(chunk)
+    return b"".join(chunks), None
+
+
+def _image_preview_data_url(file_row):
+    filename = file_row.get('filename') or ''
+    ext = os.path.splitext(filename)[1].lower()
+    mime = IMAGE_PREVIEW_MIME_BY_EXT.get(ext)
+    file_type = (file_row.get('file_type') or '').strip().lower()
+    if not mime and file_type in IMAGE_PREVIEW_MIME_BY_EXT.values():
+        mime = file_type
+    if not mime:
+        return None, "unsupported_image_type"
+
+    content = file_row.get('content')
+    if content is None:
+        content = ''
+    if content:
+        if not isinstance(content, str):
+            content = str(content)
+        content = content.strip()
+        if content.startswith('data:image/'):
+            return content, None
+        if mime == 'image/svg+xml' and content.lstrip().startswith('<svg'):
+            encoded = base64.b64encode(content.encode('utf-8')).decode('ascii')
+            return f"data:{mime};base64,{encoded}", None
+        compact = re.sub(r'\s+', '', content)
+        if re.fullmatch(r'[A-Za-z0-9+/]+={0,2}', compact or ''):
+            return f"data:{mime};base64,{compact}", None
+
+    storage_path = (file_row.get('storage_path') or '').strip()
+    metadata = file_row.get('metadata') or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except Exception:
+            metadata = {}
+    bucket = metadata.get('storage_bucket') or BODY_DB_STORAGE_BUCKET if isinstance(metadata, dict) else BODY_DB_STORAGE_BUCKET
+    if not storage_path:
+        return None, "missing_content"
+
+    image_bytes, storage_reason = _get_body_database_object_bytes(bucket, storage_path)
+    if storage_reason:
+        return None, storage_reason
+    if not image_bytes:
+        return None, "empty_content"
+
+    encoded = base64.b64encode(image_bytes).decode('ascii')
+    return f"data:{mime};base64,{encoded}", None
+
+
 @app.route('/api/vault/files/<file_id>')
 @require_auth
 def get_vault_file(file_id):
-    """Get a single vault file by ID (multi-tenant: users can only access their files)"""
+    """Get a single vault file by ID."""
     try:
-        if not supabase_client:
-            return jsonify({"success": False, "error": "Supabase not configured"}), 500
-        
-        current_user = request.current_user
-        user_email = current_user.get('email')
-        user_role = current_user.get('role', 'user')
-        
-        result = supabase_client.table('vault_files').select('*').eq('id', file_id).single().execute()
-        
-        if not result.data:
-            return jsonify({"success": False, "error": "File not found"}), 404
-        
-        if user_role != 'admin':
-            user_result = supabase_client.table('users').select('id').eq('email', user_email).execute()
-            user_id = user_result.data[0]['id'] if user_result.data else None
-            
-            file_user_id = result.data.get('user_id')
-            is_system = result.data.get('is_system', False)
-            
-            if file_user_id is None and not is_system:
-                log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "unassigned_file")
-                return jsonify({"success": False, "error": "Access denied"}), 403
-            
-            if file_user_id is not None and file_user_id != user_id:
-                log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "not_owner")
-                return jsonify({"success": False, "error": "Access denied"}), 403
-        
-        return jsonify({"success": True, "file": result.data})
+        file_row, error_response = _get_authorized_vault_file(file_id)
+        if error_response:
+            return error_response
+        return jsonify({"success": True, "file": file_row})
     except Exception as e:
         logger.error(f"Error fetching vault file: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/vault/files/<file_id>/data-url')
+@require_auth
+def get_vault_file_data_url(file_id):
+    """Return a browser-safe data URL for supported image previews."""
+    try:
+        file_row, error_response = _get_authorized_vault_file(file_id)
+        if error_response:
+            return error_response
+        data_url, unavailable_reason = _image_preview_data_url(file_row)
+        if unavailable_reason:
+            return _preview_unavailable_response(file_row, unavailable_reason)
+        return jsonify({
+            "success": True,
+            "file_id": file_row.get('id'),
+            "filename": file_row.get('filename'),
+            "file_type": file_row.get('file_type'),
+            "data_url": data_url,
+        })
+    except Exception as e:
+        logger.error(f"Error fetching vault file preview: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ============================================================================

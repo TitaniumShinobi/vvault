@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { generateManifest } from 'material-icon-theme';
 import { authFetch } from '../utils/authFetch';
 import './VaultBrowser.css';
 
@@ -13,6 +14,74 @@ const CONSTRUCT_COLORS = {
 const getConstructColor = (constructId) => {
   const name = constructId.toLowerCase().replace(/-\d+$/, '');
   return CONSTRUCT_COLORS[name] || CONSTRUCT_COLORS.default;
+};
+
+const materialIconManifest = generateManifest({ activeIconPack: 'react' });
+const materialIconContext = require.context('material-icon-theme/icons', false, /\.svg$/);
+const materialIconUrlsByFileName = materialIconContext.keys().reduce((acc, key) => {
+  const fileName = key.split('/').pop();
+  if (fileName) acc[fileName] = materialIconContext(key);
+  return acc;
+}, {});
+const materialDefaultFileIcon = materialIconManifest.file || 'file';
+const materialDefaultFolderIcon = materialIconManifest.folder || 'folder';
+const materialFileExtensionKeys = Object.keys(materialIconManifest.fileExtensions || {})
+  .sort((left, right) => right.length - left.length);
+const materialFileNameIconOverrides = {
+  'package-lock.json': 'npm',
+  'package.json': 'npm',
+  'readme.md': 'markdown'
+};
+
+const materialIconUrlForIconId = (iconId) => {
+  const definition = materialIconManifest.iconDefinitions?.[iconId]
+    || materialIconManifest.iconDefinitions?.[materialDefaultFileIcon];
+  const iconFile = definition?.iconPath?.split('/').pop() || 'file.svg';
+  return materialIconUrlsByFileName[iconFile] || materialIconUrlsByFileName['file.svg'] || '';
+};
+
+const getBaseName = (path = '') => {
+  const normalized = String(path).replace(/\\/g, '/');
+  return normalized.split('/').filter(Boolean).pop() || normalized;
+};
+
+const getExtension = (path = '') => {
+  const basename = getBaseName(path).toLowerCase();
+  const match = /\.([^.]+)$/.exec(basename);
+  return match ? match[1] : '';
+};
+
+const materialIconIdForFile = (path = '') => {
+  const lowerPath = String(path).toLowerCase();
+  const basename = getBaseName(lowerPath);
+  const byName = materialFileNameIconOverrides[basename]
+    || materialIconManifest.fileNames?.[basename]
+    || materialIconManifest.fileNames?.[lowerPath];
+  if (byName) return byName;
+
+  const extensionKey = materialFileExtensionKeys.find((key) => basename === key || basename.endsWith(`.${key}`));
+  if (extensionKey) return materialIconManifest.fileExtensions?.[extensionKey] || materialDefaultFileIcon;
+
+  return materialDefaultFileIcon;
+};
+
+const materialIconIdForFolder = (folderName = '') => {
+  const normalized = getBaseName(folderName).toLowerCase();
+  return materialIconManifest.folderNames?.[normalized] || materialDefaultFolderIcon;
+};
+
+const MaterialVaultIcon = ({ filename, isFolder = false }) => {
+  const iconId = isFolder ? materialIconIdForFolder(filename) : materialIconIdForFile(filename);
+  const iconUrl = materialIconUrlForIconId(iconId);
+  return (
+    <span
+      className="material-file-icon"
+      data-material-icon={iconId}
+      aria-hidden="true"
+    >
+      {iconUrl ? <img src={iconUrl} alt="" draggable={false} /> : null}
+    </span>
+  );
 };
 
 const getLogicalPath = (file) => {
@@ -50,6 +119,109 @@ const getLogicalPath = (file) => {
   return path || filename;
 };
 
+const getFileExtension = (filename = '') => {
+  const cleanName = filename.split('?')[0].split('#')[0];
+  const parts = cleanName.split('.');
+  return parts.length > 1 ? parts.pop().toLowerCase() : '';
+};
+
+const IMAGE_PREVIEW_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg']);
+
+const getPreviewKind = (file = {}) => {
+  const filename = file.displayName || file.filename || '';
+  const ext = getFileExtension(filename);
+  const fileType = (file.file_type || '').toLowerCase();
+
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext) || fileType.startsWith('image/')) return 'image';
+  if (ext === 'pdf' || fileType === 'application/pdf') return 'pdf';
+  if (['mp3', 'wav', 'ogg', 'm4a'].includes(ext) || fileType.startsWith('audio/')) return 'audio';
+  if (['mp4', 'webm', 'mov'].includes(ext) || fileType.startsWith('video/')) return 'video';
+  if (ext === 'json' || fileType.includes('json') || ext === 'capsule') return 'json';
+  if (ext === 'csv' || fileType.includes('csv')) return 'csv';
+  if (['md', 'markdown'].includes(ext) || fileType.includes('markdown')) return 'markdown';
+  if (['py', 'js', 'ts', 'jsx', 'tsx', 'css', 'html', 'sql', 'sh', 'yaml', 'yml'].includes(ext)) return 'code';
+  if (['txt', 'log'].includes(ext) || fileType.startsWith('text/') || ['text', 'conversation', 'transcript', 'prompt', 'config', 'identity', 'ledger', 'simdrive'].includes(fileType)) return 'text';
+  if (['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'].includes(ext)) return 'office';
+  return 'metadata';
+};
+
+const canPreviewImage = (file = {}) => {
+  const filename = file.displayName || file.filename || '';
+  const ext = getFileExtension(filename);
+  const fileType = (file.file_type || '').toLowerCase();
+  return IMAGE_PREVIEW_EXTENSIONS.has(ext) || fileType.startsWith('image/');
+};
+
+const parseMetadata = (metadata) => {
+  if (!metadata) return {};
+  if (typeof metadata === 'string') {
+    try { return JSON.parse(metadata); } catch (e) { return {}; }
+  }
+  return typeof metadata === 'object' ? metadata : {};
+};
+
+const getContentText = (content) => {
+  if (content === null || content === undefined) return '';
+  if (typeof content === 'string') return content;
+  try {
+    return JSON.stringify(content, null, 2);
+  } catch (e) {
+    return String(content);
+  }
+};
+
+const looksLikeBase64 = (value) => {
+  const text = (value || '').trim();
+  return text.length > 32 && /^[A-Za-z0-9+/=\s]+$/.test(text);
+};
+
+const toDataUrl = (content, file) => {
+  const text = getContentText(content).trim();
+  if (!text) return '';
+  if (text.startsWith('data:')) return text;
+  if (!looksLikeBase64(text)) return '';
+
+  const ext = getFileExtension(file.displayName || file.filename || '');
+  const fileType = file.file_type && file.file_type !== 'binary' ? file.file_type : '';
+  const mimeByExt = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+    pdf: 'application/pdf',
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    ogg: 'audio/ogg',
+    m4a: 'audio/mp4',
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    mov: 'video/quicktime'
+  };
+  const mime = fileType || mimeByExt[ext] || 'application/octet-stream';
+  return `data:${mime};base64,${text.replace(/\s+/g, '')}`;
+};
+
+const formatJsonPreview = (content) => {
+  const text = getContentText(content);
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch (e) {
+    return text;
+  }
+};
+
+const parseCsvPreview = (content) => {
+  const rows = getContentText(content)
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .slice(0, 51)
+    .map(row => row.split(',').map(cell => cell.trim()));
+  if (rows.length === 0) return { headers: [], rows: [] };
+  return { headers: rows[0], rows: rows.slice(1) };
+};
+
 const VaultBrowser = ({ user }) => {
   const [files, setFiles] = useState([]);
   const [currentPath, setCurrentPath] = useState([]);
@@ -57,6 +229,9 @@ const VaultBrowser = ({ user }) => {
   const [error, setError] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [fileContent, setFileContent] = useState(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState('');
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState(null);
   const [viewMode, setViewMode] = useState('list');
   const [constructs, setConstructs] = useState([]);
   const [userInfo, setUserInfo] = useState({ root_label: 'Vault', is_admin: false });
@@ -269,71 +444,76 @@ const VaultBrowser = ({ user }) => {
     setCurrentPath([...currentPath, folderName]);
     setSelectedFile(null);
     setFileContent(null);
+    setImagePreviewUrl('');
+    setPreviewError(null);
   };
 
   const navigateBack = () => {
     setCurrentPath(currentPath.slice(0, -1));
     setSelectedFile(null);
     setFileContent(null);
+    setImagePreviewUrl('');
+    setPreviewError(null);
   };
 
   const navigateHome = () => {
     setCurrentPath([]);
     setSelectedFile(null);
     setFileContent(null);
+    setImagePreviewUrl('');
+    setPreviewError(null);
   };
 
   const navigateToBreadcrumb = (index) => {
     setCurrentPath(currentPath.slice(0, index + 1));
     setSelectedFile(null);
     setFileContent(null);
+    setImagePreviewUrl('');
+    setPreviewError(null);
   };
 
   const selectFile = async (file) => {
     setSelectedFile(file);
-    const textTypes = ['text', 'text/plain', 'text/markdown', 'conversation', 'transcript', 'prompt', 'config', 'identity'];
-    const isTextLike = !file.file_type || textTypes.includes(file.file_type) || file.file_type.startsWith('text/');
-    if (isTextLike) {
-      if (file.content) {
-        setFileContent(file.content);
+    setFileContent(file.content ?? null);
+    setImagePreviewUrl('');
+    setPreviewError(null);
+    setPreviewLoading(true);
+
+    try {
+      const isImage = canPreviewImage(file);
+      const response = await authFetch(isImage ? `/api/vault/files/${file.id}/data-url` : `/api/vault/files/${file.id}`);
+      const data = await response.json();
+      if (isImage && data.success && data.data_url) {
+        setImagePreviewUrl(data.data_url);
+        setSelectedFile(prev => prev?.id === file.id ? {
+          ...prev,
+          file_type: data.file_type || prev.file_type,
+          filename: data.filename || prev.filename
+        } : prev);
+        setFileContent(null);
+      } else if (isImage) {
+        setPreviewError(data.error === 'preview_unavailable'
+          ? `preview_unavailable: ${data.reason || 'image bytes unavailable'}`
+          : (data.error || 'Preview is unavailable'));
+        setFileContent(null);
+      } else if (data.success && data.file) {
+        setSelectedFile(prev => prev?.id === file.id ? { ...prev, ...data.file } : prev);
+        setFileContent(data.file.content ?? null);
       } else {
-        try {
-          const response = await authFetch(`/api/vault/files/${file.id}`);
-          const data = await response.json();
-          if (data.success && data.file && data.file.content) {
-            setFileContent(data.file.content);
-          } else {
-            setFileContent(null);
-          }
-        } catch (err) {
-          console.error('Failed to fetch file content:', err);
-          setFileContent(null);
-        }
+        setPreviewError(data.error || 'Preview is unavailable');
+        setFileContent(file.content ?? null);
       }
-    } else {
-      setFileContent(null);
+    } catch (err) {
+      console.error('Failed to fetch file preview:', err);
+      setPreviewError('Preview request failed');
+      setFileContent(file.content ?? null);
+    } finally {
+      setPreviewLoading(false);
     }
   };
 
   const getFileIcon = (filename, isFolder = false, fileType = 'text') => {
-    if (isFolder) return '📁';
-    if (fileType === 'binary') {
-      const ext = filename.split('.').pop()?.toLowerCase();
-      const icons = {
-        pdf: '📄', png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', webp: '🖼️',
-        mp4: '🎬', mp3: '🎵', wav: '🎵', mov: '🎬',
-        doc: '📝', docx: '📝', xls: '📊', xlsx: '📊', ppt: '📽️', pptx: '📽️',
-        zip: '📦', tar: '📦', gz: '📦'
-      };
-      return icons[ext] || '📎';
-    }
-    const ext = filename.split('.').pop()?.toLowerCase();
-    const icons = {
-      md: '📝', json: '📋', txt: '📄', yaml: '⚙️', yml: '⚙️',
-      py: '🐍', js: '💛', ts: '💙', jsx: '⚛️', tsx: '⚛️',
-      css: '🎨', html: '🌐', sql: '🗃️', sh: '⚡'
-    };
-    return icons[ext] || '📄';
+    return <MaterialVaultIcon filename={filename} isFolder={isFolder} fileType={fileType} />;
   };
 
   const formatDate = (dateStr) => {
@@ -349,6 +529,118 @@ const VaultBrowser = ({ user }) => {
     const kb = bytes / 1024;
     if (kb < 1024) return `${kb.toFixed(1)} KB`;
     return `${(kb / 1024).toFixed(1)} MB`;
+  };
+
+  const renderMetadataPreview = (file, message = 'Preview content is not available for this file.') => {
+    const metadata = parseMetadata(file.metadata);
+    const rows = [
+      ['Type', file.file_type || '-'],
+      ['Construct', file.construct_id || '-'],
+      ['Path', file.display_path || file.storage_path || file.filename || '-'],
+      ['Size', formatSize(metadata.size)],
+      ['Created', formatDate(file.created_at || metadata.migrated_at)]
+    ];
+
+    return (
+      <div className="metadata-preview">
+        <p>{message}</p>
+        <div className="metadata-grid">
+          {rows.map(([label, value]) => (
+            <React.Fragment key={label}>
+              <span className="metadata-label">{label}</span>
+              <span className="metadata-value">{value}</span>
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderFilePreview = () => {
+    if (!selectedFile) return null;
+    if (previewLoading) {
+      return (
+        <div className="preview-state">
+          <div className="loading-spinner small"></div>
+          <span>Loading preview...</span>
+        </div>
+      );
+    }
+
+    const kind = getPreviewKind(selectedFile);
+    const content = fileContent;
+    const contentText = getContentText(content);
+
+    if (previewError && !contentText) {
+      return renderMetadataPreview(selectedFile, previewError);
+    }
+
+    if (kind === 'image') {
+      const src = imagePreviewUrl || toDataUrl(content, selectedFile);
+      return src
+        ? <img className="image-preview" src={src} alt={selectedFile.displayName || selectedFile.filename} />
+        : renderMetadataPreview(selectedFile, previewError || 'preview_unavailable: image bytes unavailable');
+    }
+
+    if (kind === 'pdf') {
+      const src = toDataUrl(content, selectedFile);
+      return src
+        ? <object className="pdf-preview" data={src} type="application/pdf"><p>PDF preview is unavailable in this browser.</p></object>
+        : renderMetadataPreview(selectedFile, 'PDF bytes are not available in the body database row.');
+    }
+
+    if (kind === 'audio') {
+      const src = toDataUrl(content, selectedFile);
+      return src
+        ? <audio className="media-preview" controls src={src} />
+        : renderMetadataPreview(selectedFile, 'Audio bytes are not available in the body database row.');
+    }
+
+    if (kind === 'video') {
+      const src = toDataUrl(content, selectedFile);
+      return src
+        ? <video className="media-preview" controls src={src} />
+        : renderMetadataPreview(selectedFile, 'Video bytes are not available in the body database row.');
+    }
+
+    if (kind === 'json') {
+      return contentText
+        ? <pre className="code-preview">{formatJsonPreview(content)}</pre>
+        : renderMetadataPreview(selectedFile);
+    }
+
+    if (kind === 'csv') {
+      const parsed = parseCsvPreview(content);
+      if (parsed.headers.length === 0) return renderMetadataPreview(selectedFile);
+      return (
+        <div className="csv-preview">
+          <table>
+            <thead>
+              <tr>{parsed.headers.map((header, index) => <th key={index}>{header || `Column ${index + 1}`}</th>)}</tr>
+            </thead>
+            <tbody>
+              {parsed.rows.map((row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {parsed.headers.map((_, cellIndex) => <td key={cellIndex}>{row[cellIndex] || ''}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
+    if (kind === 'office') {
+      return renderMetadataPreview(selectedFile, 'Office document previews are metadata-only until document extraction is available.');
+    }
+
+    if (['markdown', 'code', 'text'].includes(kind)) {
+      return contentText
+        ? <pre className={kind === 'markdown' ? 'markdown-preview' : 'code-preview'}>{contentText}</pre>
+        : renderMetadataPreview(selectedFile);
+    }
+
+    return renderMetadataPreview(selectedFile);
   };
 
   const currentFolder = getCurrentFolder();
@@ -654,19 +946,14 @@ const VaultBrowser = ({ user }) => {
         {selectedFile && (
           <div className="file-preview">
             <div className="preview-header">
-              <h3>{selectedFile.displayName || selectedFile.filename}</h3>
-              <button onClick={() => setSelectedFile(null)}>×</button>
+              <div className="preview-title">
+                <h3>{selectedFile.displayName || selectedFile.filename}</h3>
+                <span>{getPreviewKind(selectedFile).toUpperCase()}</span>
+              </div>
+              <button onClick={() => { setSelectedFile(null); setFileContent(null); setImagePreviewUrl(''); setPreviewError(null); }}>×</button>
             </div>
             <div className="preview-content">
-              {selectedFile.file_type === 'binary' ? (
-                <div className="binary-preview">
-                  <span className="binary-icon">📎</span>
-                  <p>Binary file - {selectedFile.filename}</p>
-                  <p className="binary-info">Stored in cloud storage</p>
-                </div>
-              ) : (
-                <pre>{fileContent || 'No content available'}</pre>
-              )}
+              {renderFilePreview()}
             </div>
           </div>
         )}
