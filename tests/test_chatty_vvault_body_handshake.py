@@ -54,21 +54,9 @@ def test_code_vvault_handshake_endpoint_exposes_body_database_contract(monkeypat
             "transcripts_readable": False,
         },
     }
-    private_door = {
-        "ok": True,
-        "selected_door": "private",
-        "code_origin": "http://localhost:2048",
-        "code_api_origin": "http://127.0.0.1:2048",
-        "vvault_origin": "http://127.0.0.1:8000",
-        "session_bridge_path": "/api/vault/session-bridge",
-        "auth_cookie_name": "auth_sid",
-        "storage_owner": "ovvaults.vault_files",
-        "transcript_owner": "ovvaults.transcripts",
-        "transcript_compatibility_owner": "ovvaults.vault_files",
-    }
-
     monkeypatch.setattr(server, "_body_database_dependency_status", lambda: body_status)
-    monkeypatch.setattr(server, "_resolve_chatty_vvault_door", lambda: private_door, raising=False)
+    monkeypatch.setenv("CHATTY_VVAULT_DOOR", "private")
+    monkeypatch.setattr(server, "_door_contract_cache", None)
     response = client.get("/api/code/handshake")
 
     assert response.status_code == 200
@@ -81,4 +69,6 @@ def test_code_vvault_handshake_endpoint_exposes_body_database_contract(monkeypat
     assert payload["storage_owner"] == "ovvaults.vault_files"
     assert payload["transcript_owner"] == "ovvaults.transcripts"
     assert payload["transcript_compatibility_owner"] == "ovvaults.vault_files"
+    assert payload["door_contract"]["database_authority"] == "vvault_body"
+    assert payload["door_contract"]["ok"] is True
     assert payload["body_database"]["checks"]["vault_files_readable"] is True

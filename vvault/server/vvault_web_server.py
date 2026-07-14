@@ -50,6 +50,7 @@ import bcrypt
 from datetime import datetime, timedelta, timezone
 import requests  # For Turnstile verification
 from oauthlib.oauth2 import WebApplicationClient
+from urllib.parse import urlparse
 
 _server_dir = os.path.dirname(os.path.abspath(__file__))
 if _server_dir not in sys.path:
@@ -170,14 +171,215 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 DIST_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'dist')
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'assets')
 PUBLIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'public')
+DOOR_CONTRACT_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'config',
+    'chatty-vvault-doors.json',
+)
+
+
+def _normalize_origin(value: str) -> Optional[str]:
+    candidate = (value or "").strip()
+    if not candidate:
+        return None
+    if any(token in candidate for token in ("*", "\\", "[", "]", "?", "$", "^", "(", ")")):
+        return None
+    try:
+        parsed = urlparse(candidate)
+        parsed_port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    port_suffix = f":{parsed_port}" if parsed_port is not None else ""
+    return f"{parsed.scheme}://{parsed.hostname}{port_suffix}"
+
+
+def _is_local_origin(value: Optional[str]) -> bool:
+    origin = _normalize_origin(value or "")
+    if not origin:
+        return False
+    parsed = urlparse(origin)
+    return (parsed.hostname or "").strip().lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+_door_contract_cache = None
+
+
+def _load_chatty_vvault_door_contract() -> Dict[str, Any]:
+    global _door_contract_cache
+    if _door_contract_cache is not None:
+        return _door_contract_cache
+    with open(DOOR_CONTRACT_PATH, 'r', encoding='utf-8') as handle:
+        _door_contract_cache = json.load(handle)
+    return _door_contract_cache
+
+
+def _runtime_is_production() -> bool:
+    node_env = (os.environ.get("NODE_ENV") or "").strip().lower()
+    replit_deployment = (os.environ.get("REPL_DEPLOYMENT") or "").strip() == "1"
+    production_port = (os.environ.get("PORT") or "").strip() == "5000"
+    if node_env == "production" or replit_deployment or production_port:
+        return True
+    explicit_origins = [
+        os.environ.get("VVAULT_FRONTEND_URL"),
+        os.environ.get("VVAULT_BACKEND_URL"),
+        os.environ.get("OAUTH_BASE_URL"),
+    ]
+    return any(origin and not _is_local_origin(origin) for origin in explicit_origins)
+
+
+def _resolve_chatty_vvault_door_name() -> str:
+    explicit = (os.environ.get("CHATTY_VVAULT_DOOR") or os.environ.get("VVAULT_RUNTIME_DOOR") or "").strip()
+    if explicit in {"private", "public"}:
+        return explicit
+    return "public" if _runtime_is_production() else "private"
+
+
+def _resolve_chatty_vvault_door() -> Dict[str, Any]:
+    contract = _load_chatty_vvault_door_contract()
+    selected_door = _resolve_chatty_vvault_door_name()
+    raw_door = (contract.get("doors") or {}).get(selected_door) or {}
+    allowed_browser_origins = [
+        origin
+        for origin in (_normalize_origin(value) for value in raw_door.get("allowedBrowserOrigins", []))
+        if origin
+    ]
+    door = {
+        "version": contract.get("version"),
+        "name": raw_door.get("name"),
+        "selected_door": selected_door,
+        "chatty_origin": _normalize_origin(raw_door.get("chattyPublicOrigin") or ""),
+        "chatty_api_origin": _normalize_origin(raw_door.get("chattyApiOrigin") or ""),
+        "code_origin": _normalize_origin(raw_door.get("codePublicOrigin") or ""),
+        "code_api_origin": _normalize_origin(raw_door.get("codeApiOrigin") or ""),
+        "vvault_origin": _normalize_origin(raw_door.get("vvaultOrigin") or ""),
+        "auth_origin": _normalize_origin(raw_door.get("authApiOrigin") or ""),
+        "auth_public_origin": _normalize_origin(raw_door.get("authPublicOrigin") or raw_door.get("authApiOrigin") or ""),
+        "auth_cookie_name": str(raw_door.get("authCookieName") or "").strip(),
+        "session_bridge_path": str(raw_door.get("sessionBridgePath") or "").strip(),
+        "database_authority": raw_door.get("databaseAuthority"),
+        "runtime_memory_authority": raw_door.get("runtimeMemoryAuthority"),
+        "canonical_schema": raw_door.get("canonicalSchema"),
+        "storage_owner": raw_door.get("storageOwner"),
+        "transcript_owner": raw_door.get("transcriptOwner"),
+        "transcript_compatibility_owner": raw_door.get("transcriptCompatibilityOwner"),
+        "allowed_browser_origins": allowed_browser_origins,
+        "allow_legacy_exchange": raw_door.get("allowLegacyExchange") is True,
+        "problems": [],
+    }
+
+    required_origins = {
+        "chatty_origin": "chatty_origin_missing",
+        "chatty_api_origin": "chatty_api_origin_missing",
+        "code_origin": "code_origin_missing",
+        "code_api_origin": "code_api_origin_missing",
+        "vvault_origin": "vvault_origin_missing",
+        "auth_origin": "auth_origin_missing",
+        "auth_public_origin": "auth_public_origin_missing",
+    }
+    for field, problem in required_origins.items():
+        if not door[field]:
+            door["problems"].append(problem)
+    if not door["allowed_browser_origins"]:
+        door["problems"].append("allowed_browser_origins_missing")
+
+    expected_authority = {
+        "database_authority": "vvault_body",
+        "runtime_memory_authority": "vvault_body",
+        "canonical_schema": "ovvaults",
+        "storage_owner": "ovvaults.vault_files",
+        "transcript_owner": "ovvaults.transcripts",
+        "transcript_compatibility_owner": "ovvaults.vault_files",
+    }
+    for field, expected in expected_authority.items():
+        if door[field] != expected:
+            door["problems"].append(f"{field}_invalid")
+    if door["version"] != 1:
+        door["problems"].append("contract_version_invalid")
+    if door["name"] != selected_door:
+        door["problems"].append("door_name_invalid")
+    if door["auth_cookie_name"] != "auth_sid":
+        door["problems"].append("auth_cookie_name_invalid")
+    if door["session_bridge_path"] != "/api/vault/session-bridge":
+        door["problems"].append("session_bridge_path_invalid")
+    if door["allow_legacy_exchange"]:
+        door["problems"].append("legacy_exchange_not_allowed")
+
+    all_origins = [
+        door["chatty_origin"],
+        door["chatty_api_origin"],
+        door["code_origin"],
+        door["code_api_origin"],
+        door["vvault_origin"],
+        door["auth_origin"],
+        door["auth_public_origin"],
+        *door["allowed_browser_origins"],
+    ]
+    if selected_door == "public" and any(_is_local_origin(origin) for origin in all_origins if origin):
+        door["problems"].append("door_public_with_localhost_target")
+    if selected_door == "public" and any(not origin.startswith("https://") for origin in all_origins if origin):
+        door["problems"].append("door_public_requires_https")
+    if selected_door == "private" and any(not _is_local_origin(origin) for origin in all_origins if origin):
+        door["problems"].append("door_private_with_production_target")
+
+    door["problems"] = list(dict.fromkeys(door["problems"]))
+    door["ok"] = len(door["problems"]) == 0
+    return door
+
+
+def _resolve_frontend_origin() -> Optional[str]:
+    explicit = _normalize_origin(os.environ.get("VVAULT_FRONTEND_URL") or "")
+    selected_door = _resolve_chatty_vvault_door_name()
+    if explicit:
+        if selected_door == "public" and not _is_local_origin(explicit):
+            return explicit
+        if selected_door == "private" and _is_local_origin(explicit):
+            return explicit
+    if selected_door == "public":
+        return _resolve_chatty_vvault_door().get("vvault_origin")
+    return "http://localhost:7784"
+
+
+def _resolve_backend_origin() -> Optional[str]:
+    return _resolve_chatty_vvault_door().get("vvault_origin")
+
+
+def _build_cors_origins() -> List[str]:
+    door = _resolve_chatty_vvault_door()
+    if door.get("ok") is not True:
+        problems = ", ".join(door.get("problems") or ["unknown_contract_error"])
+        raise RuntimeError(f"Invalid Chatty-VVAULT door contract: {problems}")
+    origins = []
+    frontend_origin = _resolve_frontend_origin()
+    if frontend_origin:
+        origins.append(frontend_origin)
+    origins.extend(door.get("allowed_browser_origins") or [])
+
+    deduped = []
+    seen = set()
+    for origin in origins:
+        normalized = _normalize_origin(origin or "")
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
 
 app = Flask(__name__, static_folder=DIST_DIR, static_url_path='')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'vvault-secret-key-change-in-production')
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
-_cors_origins = ["http://localhost:7784", "http://localhost:5173", "http://localhost:5000", "https://vvault.thewreck.org"]
-_replit_domain = os.environ.get("REPLIT_DEV_DOMAIN") or os.environ.get("REPL_SLUG")
-if _replit_domain:
-    _cors_origins.append(f"https://{_replit_domain}")
+_cors_origins = _build_cors_origins()
 CORS(app, origins=_cors_origins)
 
 # Security headers (resilience hardening)
@@ -358,8 +560,8 @@ def _log_privileged_event(
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
 GOOGLE_DISCOVERY_URL = "https://accounts.google.com/.well-known/openid-configuration"
-VVAULT_FRONTEND_URL = os.environ.get("VVAULT_FRONTEND_URL", "http://localhost:7784")
-VVAULT_BACKEND_URL = os.environ.get("VVAULT_BACKEND_URL", "http://localhost:8000")
+VVAULT_FRONTEND_URL = _resolve_frontend_origin() or "http://localhost:7784"
+VVAULT_BACKEND_URL = _resolve_backend_origin() or "http://localhost:8000"
 VVAULT_ADMIN_EMAILS = {
     email.strip().lower()
     for email in os.environ.get("VVAULT_ADMIN_EMAILS", "admin@vvault.com").split(",")
@@ -393,12 +595,12 @@ def _google_oauth_config_error() -> str:
 
 
 def _get_frontend_url(default: str = None) -> str:
-    frontend_url = VVAULT_FRONTEND_URL or default or "http://localhost:7784"
+    frontend_url = _resolve_frontend_origin() or default or "http://localhost:7784"
     return frontend_url.rstrip("/")
 
 
 def _get_backend_url(default: str = None) -> str:
-    backend_url = OAUTH_BASE_URL or VVAULT_BACKEND_URL or default or "http://localhost:8000"
+    backend_url = _resolve_backend_origin() or default or "http://localhost:8000"
     return backend_url.rstrip("/")
 
 
@@ -2649,9 +2851,7 @@ google_client = None
 if GOOGLE_CLIENT_ID:
     google_client = WebApplicationClient(GOOGLE_CLIENT_ID)
 
-# Get Replit domain for OAuth callbacks
-REPLIT_DEV_DOMAIN = os.environ.get("REPLIT_DEV_DOMAIN", "localhost:5000")
-OAUTH_BASE_URL = os.environ.get("OAUTH_BASE_URL", "")
+OAUTH_BASE_URL = _resolve_backend_origin() or ""
 
 # Service API Configuration (for FXShinobi/Chatty backend-to-backend calls)
 VVAULT_SERVICE_TOKEN = os.environ.get("VVAULT_SERVICE_TOKEN")
@@ -3581,7 +3781,8 @@ def health_check():
 def readiness_check():
     """Readiness requires VVAULT-native body database health."""
     runtime_status = _get_vvault_runtime_status()
-    ready = runtime_status["ready"]
+    door = _resolve_chatty_vvault_door()
+    ready = bool(runtime_status["ready"] and door.get("ok"))
     return jsonify({
         "ready": ready,
         "status": "ready" if ready else "not_ready",
@@ -3595,6 +3796,10 @@ def readiness_check():
         "body_database": runtime_status["body_database"],
         "storage": runtime_status["storage"],
         "auth": runtime_status["auth"],
+        "storage_owner": door.get("storage_owner"),
+        "transcript_owner": door.get("transcript_owner"),
+        "transcript_compatibility_owner": door.get("transcript_compatibility_owner"),
+        "door_contract": door,
     }), 200 if ready else 503
 
 def _current_vvault_user_id() -> tuple[str | None, tuple[Any, int] | None]:
@@ -7831,12 +8036,17 @@ def eeccd_disclosure():
 @app.route('/api/config')
 def get_config():
     """Get configuration info"""
+    door = _resolve_chatty_vvault_door()
     return jsonify({
         "backend_port": 8000,
         "frontend_port": 7784,
         "project_dir": PROJECT_DIR,
         "capsules_dir": CAPSULES_DIR,
-        "cors_origins": ["http://localhost:7784"]
+        "cors_origins": _cors_origins,
+        "runtime_environment": "production" if door.get("selected_door") == "public" else "development",
+        "frontend_origin": _resolve_frontend_origin(),
+        "backend_origin": _resolve_backend_origin(),
+        "door_contract": door,
     })
 
 def _credential_login_unavailable_message(auth_provider: Optional[str]) -> str:
@@ -8980,18 +9190,7 @@ def google_oauth_login():
         req_host = request.headers.get('Host', request.host)
         logger.info(f"OAuth login headers - Origin: {origin}, Referer: {referer}, X-Forwarded-Host: {fwd_host}, Host: {req_host}")
 
-        is_replit = 'replit.dev' in origin or 'replit.dev' in referer or 'replit.dev' in fwd_host or 'replit.dev' in req_host
-        is_localhost = 'localhost' in req_host or '127.0.0.1' in req_host
-
-        # Use http for local development, https for production
-        callback_scheme = "http" if is_localhost else "https"
-
-        if is_replit and REPLIT_DEV_DOMAIN:
-            callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/oauth/google/callback"
-        elif OAUTH_BASE_URL or VVAULT_BACKEND_URL:
-            callback_url = f"{_get_backend_url()}/api/auth/google/callback"
-        else:
-            callback_url = f"{callback_scheme}://{req_host}/api/auth/google/callback"
+        callback_url = f"{_get_backend_url()}/api/auth/google/callback"
 
         frontend_origin = origin or ""
         if not frontend_origin and referer:
@@ -9055,15 +9254,8 @@ def google_oauth_callback():
         
         if stored_callback:
             callback_url = stored_callback
-        elif '/api/auth/oauth/google/callback' in request.path and REPLIT_DEV_DOMAIN:
-            callback_url = f"https://{REPLIT_DEV_DOMAIN}/api/auth/oauth/google/callback"
-        elif OAUTH_BASE_URL or VVAULT_BACKEND_URL:
-            callback_url = f"{_get_backend_url()}/api/auth/google/callback"
         else:
-            host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.host))
-            is_localhost = 'localhost' in host or '127.0.0.1' in host
-            callback_scheme = "http" if is_localhost else "https"
-            callback_url = f"{callback_scheme}://{host}/api/auth/google/callback"
+            callback_url = f"{_get_backend_url()}/api/auth/google/callback"
         
         from urllib.parse import urlparse
         parsed = urlparse(callback_url)
@@ -9212,7 +9404,7 @@ def main():
 
     port = int(os.environ.get("PORT", 8000))
     host = os.environ.get("VVAULT_BACKEND_HOST", "0.0.0.0")
-    is_production = os.environ.get("REPL_DEPLOYMENT") == "1" or port == 5000
+    is_production = _runtime_is_production()
 
     requested_boot_mode = (os.environ.get("VVAULT_POCKETVERSE_BOOT_MODE") or "").strip().lower()
     skip_boot = (os.environ.get("VVAULT_SKIP_POCKETVERSE_BOOT") or "").strip().lower() in (

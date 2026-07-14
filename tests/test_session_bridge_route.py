@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from vvault.server import vvault_web_server as server
+
 
 def _source() -> str:
     repo_root = Path(__file__).resolve().parents[1]
@@ -7,9 +9,15 @@ def _source() -> str:
 
 
 def test_session_bridge_route_is_mounted():
-    source = _source()
-    assert "@app.route('/api/vault/session-bridge', methods=['POST', 'OPTIONS'])" in source
-    assert "def session_bridge_from_standalone_auth():" in source
+    rules = [
+        rule
+        for rule in server.app.url_map.iter_rules()
+        if rule.rule == "/api/vault/session-bridge"
+    ]
+
+    assert len(rules) == 1
+    assert rules[0].endpoint == "session_bridge_from_standalone_auth"
+    assert {"POST", "OPTIONS"} <= rules[0].methods
 
 
 def test_session_bridge_route_fails_closed_with_json_contract():
