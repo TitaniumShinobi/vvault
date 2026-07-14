@@ -257,3 +257,9 @@ node_modules
 # Ignore system files
 .DS_Store
 node_modules/
+
+# Local runtime and generated state
+.local/
+vvault/data/audit.db
+vvault/data/vvault_continuity_ledger.json
+vvault/layers/layer1_*_higher_plane.json

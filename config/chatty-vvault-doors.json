@@ -5,14 +5,24 @@
       "name": "private",
       "chattyPublicOrigin": "http://localhost:5173",
       "chattyApiOrigin": "http://127.0.0.1:5050",
+      "codePublicOrigin": "http://localhost:2048",
+      "codeApiOrigin": "http://127.0.0.1:2048",
       "vvaultOrigin": "http://127.0.0.1:8000",
       "authApiOrigin": "http://127.0.0.1:1111",
       "authPublicOrigin": "http://localhost:1111",
       "authCookieName": "auth_sid",
       "sessionBridgePath": "/api/vault/session-bridge",
+      "databaseAuthority": "vvault_body",
+      "runtimeMemoryAuthority": "vvault_body",
+      "canonicalSchema": "ovvaults",
+      "storageOwner": "ovvaults.vault_files",
+      "transcriptOwner": "ovvaults.transcripts",
+      "transcriptCompatibilityOwner": "ovvaults.vault_files",
       "allowedBrowserOrigins": [
         "http://localhost:5173",
-        "http://127.0.0.1:5173"
+        "http://127.0.0.1:5173",
+        "http://localhost:2048",
+        "http://127.0.0.1:2048"
       ],
       "allowLegacyExchange": false
     },
@@ -20,13 +30,22 @@
       "name": "public",
       "chattyPublicOrigin": "https://chatty.thewreck.org",
       "chattyApiOrigin": "https://chatty.thewreck.org",
+      "codePublicOrigin": "https://code.thewreck.org",
+      "codeApiOrigin": "https://code.thewreck.org",
       "vvaultOrigin": "https://vvault.thewreck.org",
       "authApiOrigin": "https://auth.thewreck.org",
       "authPublicOrigin": "https://auth.thewreck.org",
       "authCookieName": "auth_sid",
       "sessionBridgePath": "/api/vault/session-bridge",
+      "databaseAuthority": "vvault_body",
+      "runtimeMemoryAuthority": "vvault_body",
+      "canonicalSchema": "ovvaults",
+      "storageOwner": "ovvaults.vault_files",
+      "transcriptOwner": "ovvaults.transcripts",
+      "transcriptCompatibilityOwner": "ovvaults.vault_files",
       "allowedBrowserOrigins": [
-        "https://chatty.thewreck.org"
+        "https://chatty.thewreck.org",
+        "https://code.thewreck.org"
       ],
       "allowLegacyExchange": false
     }

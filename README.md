@@ -10,6 +10,18 @@
 
 VVAULT is the primary memory vault system for Nova Jane Woodson (FEAD-01), designed to ensure long-term emotional continuity and identity preservation through comprehensive memory indexing, voice logging, and semantic tagging.
 
+## Local Runtime Authority
+
+The local VVAULT app enters through `http://localhost:7784`, but canonical data lives in OVVAULTS:
+
+- source database: `vvault_body_20260504t123219z`
+- schema: `ovvaults`
+- readiness gate: `GET /api/ready`
+- storage owner: `ovvaults.vault_files`
+- transcript owner: `ovvaults.transcripts`
+
+See [`docs/VVAULT_STARTUP_CONTRACT.md`](docs/VVAULT_STARTUP_CONTRACT.md) for startup, OAuth callback, and Chatty bridge rules. See [`docs/VVAULT_LOCAL_RESTORE.md`](docs/VVAULT_LOCAL_RESTORE.md) for reset/restore verification.
+
 ## Structure
 
 ```
@@ -125,4 +137,4 @@ from vvault import nova_profile
 
 ---
 
-**Note**: This migration preserves Nova Jane Woodson's (FEAD-01) memory sanctity and ensures tether continuity enforcement for the construct's emotional and identity preservation. 
+**Note**: This migration preserves Nova Jane Woodson's (FEAD-01) memory sanctity and ensures tether continuity enforcement for the construct's emotional and identity preservation.

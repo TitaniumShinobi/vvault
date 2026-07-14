@@ -54,6 +54,32 @@ class RiskLevel(Enum):
     HIGH = "high"
     CRITICAL = "critical"
 
+
+PRIVILEGED_EVENT_TYPES = frozenset({
+    "credential_read",
+    "credential_write",
+    "credential_update",
+    "credential_delete",
+    "config_write",
+    "config_update",
+    "config_delete",
+    "service_token_use",
+    "secret_rotate",
+    "backup_delete",
+    "deploy",
+    "oauth_callback_change",
+    "env_change",
+    "role_change",
+    "mass_delete",
+})
+
+
+def get_privileged_event_severity(event_type: str) -> Tuple[AuditLevel, RiskLevel]:
+    """Return the required severity for privileged runtime events."""
+    if event_type in PRIVILEGED_EVENT_TYPES:
+        return AuditLevel.SECURITY, RiskLevel.CRITICAL
+    return AuditLevel.INFO, RiskLevel.LOW
+
 @dataclass
 class AuditEvent:
     """Audit event record"""
@@ -1044,5 +1070,4 @@ if __name__ == "__main__":
     print(f"\n🔒 Active security alerts: {len(alerts)}")
     
     print("\n✅ Audit and compliance system ready!")
-
 
