@@ -6,6 +6,7 @@ import VaultBrowser from './components/VaultBrowser';
 import Settings from './components/Settings';
 import CinematicLogin from './components/CinematicLogin';
 import { validateSession, SESSION_EXPIRED_EVENT } from './utils/authFetch';
+import vvaultLogo from '../assets/vvaultlogo_inverted.svg';
 import './App.css';
 
 // Navigation component
@@ -31,7 +32,7 @@ const Navigation = ({ user, onLogout }) => {
           aria-label="Open dashboard"
         >
           <img 
-            src="/assets/vvaultlogo_inverted.svg" 
+            src={vvaultLogo}
             alt="" 
             className="nav-logo"
           />
