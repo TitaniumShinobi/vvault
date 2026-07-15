@@ -1,0 +1,7 @@
+name: VVAULT Deployment
+
+on: push
+
+repository: /opt/vvault-public
+branch: recovery/vvault-preview-icons
+script: /opt/deploy/trigger/deploy-vvault.sh
