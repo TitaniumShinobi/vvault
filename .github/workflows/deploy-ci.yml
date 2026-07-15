@@ -14,5 +14,6 @@ jobs:
           host: 165.245.136.194
           username: deploy
           key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          passphrase: ${{ secrets.VVAULT_DEPLOY_KEY_PASSPHRASE }}
           script: |
             /opt/deploy/trigger/deploy-trigger.sh vvault
