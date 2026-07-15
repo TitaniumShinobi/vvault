@@ -54,9 +54,8 @@ cd "$REPO"
 
 OLD_REF="$(git rev-parse HEAD)"
 log "fetching $BRANCH"
-git fetch origin "$BRANCH"
-git checkout "$BRANCH"
-git pull --ff-only origin "$BRANCH"
+git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
+git checkout -B "$BRANCH" "origin/$BRANCH"
 NEW_REF="$(git rev-parse HEAD)"
 
 log "installing locked frontend dependencies"
