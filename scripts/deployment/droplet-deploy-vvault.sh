@@ -5,7 +5,7 @@ set -Eeuo pipefail
 REPO="/opt/vvault-public"
 FRONTEND="/var/www/vvault"
 BACKUP_ROOT="/opt/deploy/backups"
-BRANCH="recovery/vvault-preview-icons"
+BRANCH="production"
 SERVICE="vvault-backend.service"
 READY_URL="http://127.0.0.1:8000/api/ready"
 LOCK_FILE="/tmp/vvault-deploy.lock"

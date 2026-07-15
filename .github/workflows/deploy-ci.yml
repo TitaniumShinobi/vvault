@@ -3,7 +3,7 @@ name: Deploy VVAULT
 on:
   push:
     branches:
-      - recovery/vvault-preview-icons
+      - production
   workflow_dispatch:
 
 concurrency:
