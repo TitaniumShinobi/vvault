@@ -73,6 +73,10 @@ from vvault.security.pocketverse_guard import (
 import chatty_body_service
 import vvault_auth_repository
 import vvault_file_repository
+try:
+    from vvault.server import cleanhouse_files_evidence
+except ImportError:  # pragma: no cover - direct script compatibility
+    import cleanhouse_files_evidence
 from code_project_repository import CodeProjectRepository, is_internal_code_project_path
 
 
@@ -5746,6 +5750,147 @@ def _service_credential_path(service: str, key: str) -> str:
     safe_service = _safe_config_path_segment(service, "service")
     safe_key = _safe_config_path_segment(key, "key")
     return f"system/credentials/{safe_service}/{safe_key}.json"
+
+
+def _cleanhouse_files_owner_context() -> tuple[str | None, str | None, tuple[Any, int] | None]:
+    owner_user_id = _get_authenticated_user_id()
+    if not owner_user_id:
+        return None, None, (jsonify({
+            "success": False,
+            "error": "Canonical OVVAULTS owner identity is required",
+        }), 403)
+    try:
+        callsign = cleanhouse_files_evidence.validate_instance_id(
+            request.headers.get("X-CleanHouse-Instance")
+            or os.environ.get("VVAULT_CLEANHOUSE_INSTANCE_ID")
+            or "zen-001"
+        )
+    except cleanhouse_files_evidence.CleanHouseEvidenceError as exc:
+        return None, None, (jsonify({"success": False, "error": str(exc)}), 400)
+    owner_rows = VAULT_FILE_REPOSITORY.list_construct_file_rows(
+        callsign=callsign,
+        bare_name=_bare_name_from_callsign(callsign),
+        user_id=owner_user_id,
+        include_content=False,
+    )
+    if not owner_rows:
+        return None, None, (jsonify({
+            "success": False,
+            "error": "CleanHouse instance is not canonical for this owner",
+        }), 403)
+    return owner_user_id, callsign, None
+
+
+@app.route('/api/cleanhouse/files/evidence', methods=['POST'])
+@require_chatty_auth
+def append_cleanhouse_files_evidence():
+    """Append a normalized Files batch to the existing OVVAULTS authority."""
+    owner_user_id, callsign, error = _cleanhouse_files_owner_context()
+    if error:
+        return error
+    raw_body = request.get_data(cache=True)
+    try:
+        batch_id, evidence = cleanhouse_files_evidence.validate_batch(
+            request.get_json(silent=True),
+            raw_body=raw_body,
+            expected_batch_id=str(
+                request.headers.get("X-CleanHouse-Batch-Id")
+                or request.headers.get("Idempotency-Key")
+                or ""
+            ).strip().lower(),
+        )
+        receipt = VAULT_FILE_REPOSITORY.append_cleanhouse_files_evidence_batch(
+            user_id=str(owner_user_id),
+            callsign=str(callsign),
+            batch_id=batch_id,
+            events=evidence,
+        )
+        return jsonify({"success": True, **receipt})
+    except cleanhouse_files_evidence.CleanHouseEvidenceError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 409
+    except Exception as exc:
+        logger.error("CLEANHOUSE_FILES: preservation failed (%s)", type(exc).__name__)
+        return jsonify({
+            "success": False,
+            "error": "OVVAULTS Files evidence preservation failed",
+            "error_code": type(exc).__name__,
+        }), 503
+
+
+@app.route('/api/cleanhouse/files/wazuh/events')
+@require_chatty_auth
+def get_cleanhouse_wazuh_events():
+    """Read the manager-local Wazuh FIM stream through VVAULT auth."""
+    _owner_user_id, _callsign, error = _cleanhouse_files_owner_context()
+    if error:
+        return error
+    try:
+        result = cleanhouse_files_evidence.read_wazuh_alerts(
+            after=str(request.args.get("after") or ""),
+            limit=int(request.args.get("limit") or 100),
+        )
+        response = jsonify({"success": True, **result})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Invalid Wazuh feed request"}), 400
+    except cleanhouse_files_evidence.WazuhEvidenceUnavailable as exc:
+        return jsonify({"success": False, "error": str(exc), "state": "unavailable"}), 503
+
+
+@app.route('/api/cleanhouse/files/wazuh/inventory')
+@require_chatty_auth
+def get_cleanhouse_wazuh_inventory():
+    """Proxy the enrolled agent's FIM inventory from the local manager API."""
+    _owner_user_id, _callsign, error = _cleanhouse_files_owner_context()
+    if error:
+        return error
+    try:
+        result = cleanhouse_files_evidence.query_wazuh_inventory(
+            offset=int(request.args.get("offset") or 0),
+            limit=int(request.args.get("limit") or 500),
+        )
+        response = jsonify({"success": True, **result})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Invalid Wazuh inventory request"}), 400
+    except cleanhouse_files_evidence.WazuhEvidenceUnavailable as exc:
+        return jsonify({"success": False, "error": str(exc), "state": "unavailable"}), 503
+
+
+@app.route('/api/cleanhouse/files/wazuh/status')
+@require_chatty_auth
+def get_cleanhouse_wazuh_status():
+    """Expose bounded manager evidence readiness without Wazuh credentials."""
+    _owner_user_id, _callsign, error = _cleanhouse_files_owner_context()
+    if error:
+        return error
+    alerts_path = Path(
+        os.environ.get("VVAULT_WAZUH_ALERTS_PATH")
+        or cleanhouse_files_evidence.DEFAULT_ALERTS_PATH
+    )
+    alerts_ready = alerts_path.is_file() and os.access(alerts_path, os.R_OK)
+    inventory_configured = bool(
+        os.environ.get("VVAULT_WAZUH_AGENT_ID")
+        and os.environ.get("VVAULT_WAZUH_MANAGER_TOKEN")
+    )
+    state = "live" if alerts_ready and inventory_configured else (
+        "warming" if alerts_ready else "unavailable"
+    )
+    response = jsonify({
+        "success": True,
+        "provider": "wazuh_manager",
+        "state": state,
+        "alerts_ready": alerts_ready,
+        "inventory_configured": inventory_configured,
+        "evidence_authenticated": alerts_ready,
+        "storage_owner": VAULT_FILE_OWNER,
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _service_credential_payload_from_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:

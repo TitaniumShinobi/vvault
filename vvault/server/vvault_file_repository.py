@@ -542,6 +542,160 @@ class VVaultFileRepository:
             "path": logical_path,
         }
 
+    def append_cleanhouse_files_evidence_batch(
+        self,
+        *,
+        user_id: str,
+        callsign: str,
+        batch_id: str,
+        events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Append an idempotent CleanHouse evidence batch and receipt."""
+        if len(batch_id) != 64 or any(character not in "0123456789abcdef" for character in batch_id):
+            raise ValueError("CleanHouse batch ID is invalid")
+        if not user_id or not callsign or not events:
+            raise ValueError("CleanHouse evidence owner, instance, and events are required")
+
+        now = _utc_now_iso()
+        accepted_ids: list[str] = []
+        receipt_id = f"cleanhouse-files:{batch_id}"
+        prefix = f"instances/{callsign}/evidence/cleanhouse/files"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                for event in events:
+                    evidence_id = str(event["evidence_id"])
+                    content = str(event["content"])
+                    content_sha = str(event["sha256"])
+                    event_key = hashlib.sha256(evidence_id.encode("utf-8")).hexdigest()
+                    path = f"{prefix}/events/{event_key}.json"
+                    metadata = {
+                        "artifact_id": "life.cleanhouse.files.evidence",
+                        "schema": "cleanhouse.files_evidence.event.v1",
+                        "evidence_id": evidence_id,
+                        "batch_id": batch_id,
+                        "append_only": True,
+                        "source_product": "cleanhouse",
+                    }
+                    cur.execute(
+                        """
+                        INSERT INTO vault_files (
+                            user_id, bucket, object_key, filename, content_type,
+                            size_bytes, sha256, created_at, content, metadata,
+                            construct_id, storage_path, file_type, is_system, updated_at
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, 'application/json', %s, %s, %s,
+                            %s, %s::jsonb, %s, %s, 'cleanhouse_file_evidence', false, %s
+                        )
+                        ON CONFLICT (bucket, object_key) DO NOTHING
+                        RETURNING id::text AS id, sha256
+                        """,
+                        (
+                            user_id,
+                            DEFAULT_BUCKET,
+                            f"users/{user_id}/{path}",
+                            path,
+                            len(content.encode("utf-8")),
+                            content_sha,
+                            event.get("created_at") or now,
+                            content,
+                            json.dumps(metadata),
+                            callsign,
+                            path,
+                            now,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        cur.execute(
+                            """
+                            SELECT id::text AS id, sha256
+                            FROM vault_files
+                            WHERE bucket = %s AND object_key = %s
+                            FOR SHARE
+                            """,
+                            (DEFAULT_BUCKET, f"users/{user_id}/{path}"),
+                        )
+                        row = cur.fetchone()
+                    if not row or str(row.get("sha256") or "") != content_sha:
+                        raise ValueError(f"CleanHouse evidence ID collision: {evidence_id}")
+                    accepted_ids.append(evidence_id)
+
+                receipt_path = f"{prefix}/receipts/{batch_id}.json"
+                receipt_key = f"users/{user_id}/{receipt_path}"
+                cur.execute(
+                    """
+                    SELECT id::text AS id, content, sha256
+                    FROM vault_files
+                    WHERE bucket = %s AND object_key = %s
+                    FOR SHARE
+                    """,
+                    (DEFAULT_BUCKET, receipt_key),
+                )
+                existing_receipt = cur.fetchone()
+                if existing_receipt:
+                    receipt = json.loads(str(existing_receipt.get("content") or "{}"))
+                    if (
+                        receipt.get("batch_id") != batch_id
+                        or receipt.get("accepted_evidence_ids") != accepted_ids
+                    ):
+                        raise ValueError("CleanHouse evidence receipt collision")
+                else:
+                    receipt = {
+                        "schema": "ovvaults.cleanhouse.files_evidence.receipt.v1",
+                        "receipt_id": receipt_id,
+                        "batch_id": batch_id,
+                        "accepted_evidence_ids": accepted_ids,
+                        "owner_user_id": user_id,
+                        "instance_id": callsign,
+                        "committed_at": now,
+                        "storage_owner": FILE_OWNER,
+                    }
+                    receipt_content = json.dumps(
+                        receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                    )
+                    receipt_sha = hashlib.sha256(receipt_content.encode("utf-8")).hexdigest()
+                    cur.execute(
+                        """
+                        INSERT INTO vault_files (
+                            user_id, bucket, object_key, filename, content_type,
+                            size_bytes, sha256, created_at, content, metadata,
+                            construct_id, storage_path, file_type, is_system, updated_at
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, 'application/json', %s, %s, %s,
+                            %s, %s::jsonb, %s, %s, 'cleanhouse_file_evidence_receipt', false, %s
+                        )
+                        RETURNING id::text AS id
+                        """,
+                        (
+                            user_id,
+                            DEFAULT_BUCKET,
+                            receipt_key,
+                            receipt_path,
+                            len(receipt_content.encode("utf-8")),
+                            receipt_sha,
+                            now,
+                            receipt_content,
+                            json.dumps(
+                                {
+                                    "artifact_id": "life.cleanhouse.files.evidence-receipt",
+                                    "schema": receipt["schema"],
+                                    "batch_id": batch_id,
+                                    "append_only": True,
+                                    "source_product": "cleanhouse",
+                                }
+                            ),
+                            callsign,
+                            receipt_path,
+                            now,
+                        ),
+                    )
+                    if not cur.fetchone():
+                        raise ValueError("CleanHouse evidence receipt was not committed")
+            conn.commit()
+        return receipt
+
     def load_text(self, row: dict[str, Any] | None) -> str:
         if not row:
             return ""
