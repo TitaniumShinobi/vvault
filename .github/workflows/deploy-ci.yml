@@ -23,4 +23,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VVAULT_DEPLOY_KEY }}
           script: |
+            tracked_changes="$(git -C /opt/vvault-public status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
+            untracked_changes="$(git -C /opt/vvault-public ls-files --others --exclude-standard | wc -l | tr -d ' ')"
+            echo "[vvault-deploy] production worktree changes: tracked=${tracked_changes} untracked=${untracked_changes}"
             /opt/deploy/trigger/deploy-trigger.sh vvault
