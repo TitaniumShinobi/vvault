@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import mimetypes
 from datetime import datetime, timezone
@@ -541,6 +542,84 @@ class VVaultFileRepository:
             "deduped": 0,
             "path": logical_path,
         }
+
+    @staticmethod
+    def _cleanhouse_files_credential_path(callsign: str) -> str:
+        return f"instances/{callsign}/credentials/cleanhouse-files.json"
+
+    def store_cleanhouse_files_credential_hash(
+        self,
+        *,
+        user_id: str,
+        callsign: str,
+        credential_sha256: str,
+    ) -> dict[str, Any]:
+        if not user_id or not callsign:
+            raise ValueError("CleanHouse credential owner and instance are required")
+        if len(credential_sha256) != 64 or any(character not in "0123456789abcdef" for character in credential_sha256):
+            raise ValueError("CleanHouse credential hash is invalid")
+        path = self._cleanhouse_files_credential_path(callsign)
+        existing = self.find_by_path(construct_id=callsign, user_id=user_id, filename=path)
+        created_at = _utc_now_iso()
+        if existing and isinstance(existing.get("content"), str):
+            try:
+                previous = json.loads(existing["content"])
+                created_at = str(previous.get("created_at") or created_at)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        updated_at = _utc_now_iso()
+        content = json.dumps(
+            {
+                "schema": "ovvaults.cleanhouse.files_credential.v1",
+                "credential_sha256": credential_sha256,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "instance_id": callsign,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        result = self.upsert({
+            "user_id": user_id,
+            "filename": path,
+            "storage_path": path,
+            "object_key": f"users/{user_id}/{path}",
+            "content": content,
+            "content_type": "application/json",
+            "file_type": "cleanhouse_files_credential",
+            "construct_id": callsign,
+            "is_system": True,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "metadata": {
+                "artifact_id": "life.cleanhouse.files.credential",
+                "schema": "ovvaults.cleanhouse.files_credential.v1",
+                "secret_material_stored": False,
+                "revocable": True,
+            },
+        })
+        return {**result, "credential_sha256": credential_sha256, "updated_at": updated_at}
+
+    def verify_cleanhouse_files_credential(
+        self,
+        *,
+        user_id: str,
+        callsign: str,
+        credential: str,
+    ) -> bool:
+        if not user_id or not callsign or not credential:
+            return False
+        path = self._cleanhouse_files_credential_path(callsign)
+        row = self.find_by_path(construct_id=callsign, user_id=user_id, filename=path)
+        if not row or not isinstance(row.get("content"), str):
+            return False
+        try:
+            payload = json.loads(row["content"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        expected = str(payload.get("credential_sha256") or "")
+        observed = hashlib.sha256(credential.encode("utf-8")).hexdigest()
+        return len(expected) == 64 and hmac.compare_digest(expected, observed)
 
     def append_cleanhouse_files_evidence_batch(
         self,

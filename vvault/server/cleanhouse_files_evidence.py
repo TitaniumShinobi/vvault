@@ -9,6 +9,7 @@ existing ``ovvaults.vault_files`` repository.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -18,6 +19,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
+
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 
 BATCH_SCHEMA = "cleanhouse.files_evidence.batch.v1"
@@ -29,6 +33,9 @@ MAX_BATCH_BYTES = 2 * 1024 * 1024
 MAX_EVENT_BYTES = 256 * 1024
 MAX_FEED_EVENTS = 500
 MAX_FEED_BYTES = 4 * 1024 * 1024
+PAIRING_SCHEMA = "vvault.cleanhouse.files_pairing.v1"
+PAIRING_TOKEN_PREFIX = "chf_v1_"
+MIN_PAIRING_RSA_BITS = 3072
 
 
 class CleanHouseEvidenceError(ValueError):
@@ -54,6 +61,44 @@ def validate_instance_id(value: Any) -> str:
     if not all(character.isalnum() or character in {"-", "_"} for character in candidate):
         raise CleanHouseEvidenceError("CleanHouse instance is invalid")
     return candidate
+
+
+def pairing_token_hash(token: str) -> str:
+    candidate = str(token or "").strip()
+    if not candidate.startswith(PAIRING_TOKEN_PREFIX) or len(candidate) < 48 or len(candidate) > 256:
+        raise CleanHouseEvidenceError("CleanHouse pairing credential is invalid")
+    return hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+
+
+def encrypt_pairing_credential(token: str, public_key_pem: Any) -> dict[str, Any]:
+    pairing_token_hash(token)
+    candidate = str(public_key_pem or "").strip()
+    if len(candidate) < 256 or len(candidate) > 8192:
+        raise CleanHouseEvidenceError("CleanHouse pairing public key is invalid")
+    try:
+        public_key = serialization.load_pem_public_key(candidate.encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise CleanHouseEvidenceError("CleanHouse pairing public key is invalid") from exc
+    if not isinstance(public_key, rsa.RSAPublicKey) or public_key.key_size < MIN_PAIRING_RSA_BITS:
+        raise CleanHouseEvidenceError("CleanHouse pairing requires an RSA-3072 or stronger public key")
+    ciphertext = public_key.encrypt(
+        token.encode("utf-8"),
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    )
+    public_der = public_key.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return {
+        "schema": PAIRING_SCHEMA,
+        "algorithm": "RSA-OAEP-3072-SHA256",
+        "public_key_sha256": hashlib.sha256(public_der).hexdigest(),
+        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+    }
 
 
 def validate_batch(

@@ -5781,8 +5781,109 @@ def _cleanhouse_files_owner_context() -> tuple[str | None, str | None, tuple[Any
     return owner_user_id, callsign, None
 
 
+def require_cleanhouse_files_auth(f):
+    """Accept a dedicated owner-scoped CleanHouse credential or legacy auth."""
+    from functools import wraps
+
+    legacy = require_chatty_auth(f)
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        credential = str(request.headers.get("X-CleanHouse-Key") or "").strip()
+        if not credential:
+            return legacy(*args, **kwargs)
+        email = str(request.headers.get("X-Chatty-User") or "").strip().lower()
+        try:
+            callsign = cleanhouse_files_evidence.validate_instance_id(
+                request.headers.get("X-CleanHouse-Instance") or "zen-001"
+            )
+        except cleanhouse_files_evidence.CleanHouseEvidenceError:
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+        user = db_get_user(email) if email else None
+        user_id = str((user or {}).get("id") or "")
+        valid = bool(user_id) and VAULT_FILE_REPOSITORY.verify_cleanhouse_files_credential(
+            user_id=user_id,
+            callsign=callsign,
+            credential=credential,
+        )
+        if not valid:
+            log_auth_decision(
+                action="access_attempt",
+                user_id=email or "cleanhouse",
+                resource=request.path,
+                result="denied",
+                reason="invalid_cleanhouse_files_credential",
+                ip=request.headers.get("X-Forwarded-For", request.remote_addr),
+            )
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+        request.current_user = user
+        request.current_token = None
+        log_auth_decision(
+            action="access_granted",
+            user_id=email,
+            resource=request.path,
+            result="allowed",
+            reason="cleanhouse_files_credential",
+            ip=request.headers.get("X-Forwarded-For", request.remote_addr),
+        )
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+@app.route('/api/cleanhouse/files/pair', methods=['POST'])
+@require_auth
+def pair_cleanhouse_files_client():
+    """Issue an owner-scoped credential encrypted to the requesting client."""
+    owner_user_id, callsign, error = _cleanhouse_files_owner_context()
+    if error:
+        return error
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"success": False, "error": "Request body required"}), 400
+    try:
+        requested_callsign = cleanhouse_files_evidence.validate_instance_id(payload.get("instance_id"))
+        if requested_callsign != callsign:
+            raise cleanhouse_files_evidence.CleanHouseEvidenceError("CleanHouse instance mismatch")
+        credential = cleanhouse_files_evidence.PAIRING_TOKEN_PREFIX + secrets.token_urlsafe(48)
+        credential_sha256 = cleanhouse_files_evidence.pairing_token_hash(credential)
+        encrypted = cleanhouse_files_evidence.encrypt_pairing_credential(
+            credential,
+            payload.get("public_key_pem"),
+        )
+        stored = VAULT_FILE_REPOSITORY.store_cleanhouse_files_credential_hash(
+            user_id=str(owner_user_id),
+            callsign=str(callsign),
+            credential_sha256=credential_sha256,
+        )
+        _log_privileged_event(
+            "secret_rotate",
+            resource=f"cleanhouse-files:{callsign}",
+            action=str(stored.get("action") or "updated"),
+            result="success",
+            description="Dedicated CleanHouse Files credential paired",
+            metadata={
+                "instance_id": callsign,
+                "public_key_sha256": encrypted["public_key_sha256"],
+                "plaintext_exported": False,
+            },
+            user_id=str(owner_user_id),
+        )
+        return jsonify({
+            "success": True,
+            "instance_id": callsign,
+            "credential_type": "cleanhouse_files_pairing",
+            **encrypted,
+        })
+    except cleanhouse_files_evidence.CleanHouseEvidenceError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except Exception as exc:
+        logger.error("CLEANHOUSE_FILES: pairing failed (%s)", type(exc).__name__)
+        return jsonify({"success": False, "error": "CleanHouse pairing failed"}), 503
+
+
 @app.route('/api/cleanhouse/files/evidence', methods=['POST'])
-@require_chatty_auth
+@require_cleanhouse_files_auth
 def append_cleanhouse_files_evidence():
     """Append a normalized Files batch to the existing OVVAULTS authority."""
     owner_user_id, callsign, error = _cleanhouse_files_owner_context()
@@ -5820,7 +5921,7 @@ def append_cleanhouse_files_evidence():
 
 
 @app.route('/api/cleanhouse/files/wazuh/events')
-@require_chatty_auth
+@require_cleanhouse_files_auth
 def get_cleanhouse_wazuh_events():
     """Read the manager-local Wazuh FIM stream through VVAULT auth."""
     _owner_user_id, _callsign, error = _cleanhouse_files_owner_context()
@@ -5841,7 +5942,7 @@ def get_cleanhouse_wazuh_events():
 
 
 @app.route('/api/cleanhouse/files/wazuh/inventory')
-@require_chatty_auth
+@require_cleanhouse_files_auth
 def get_cleanhouse_wazuh_inventory():
     """Proxy the enrolled agent's FIM inventory from the local manager API."""
     _owner_user_id, _callsign, error = _cleanhouse_files_owner_context()
@@ -5862,7 +5963,7 @@ def get_cleanhouse_wazuh_inventory():
 
 
 @app.route('/api/cleanhouse/files/wazuh/status')
-@require_chatty_auth
+@require_cleanhouse_files_auth
 def get_cleanhouse_wazuh_status():
     """Expose bounded manager evidence readiness without Wazuh credentials."""
     _owner_user_id, _callsign, error = _cleanhouse_files_owner_context()
