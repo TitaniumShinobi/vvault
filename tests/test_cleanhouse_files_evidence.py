@@ -149,6 +149,85 @@ def test_pairing_route_returns_only_rsa_encrypted_owner_scoped_credential():
     assert store.call_args.kwargs["credential_sha256"] == evidence.pairing_token_hash(credential)
 
 
+def test_pairing_form_accepts_verified_same_origin_auth_cookie_with_csrf():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("ascii")
+    owner_id = "11111111-1111-4111-8111-111111111111"
+    csrf_token = "pairing-csrf-token"
+    client = server.app.test_client()
+    client.set_cookie("cleanhouse_pair_csrf", csrf_token)
+    client.set_cookie("auth_sid", "signed-cookie")
+    with (
+        patch.object(server, "get_current_user", return_value=(None, None)),
+        patch.object(
+            server,
+            "verify_standalone_auth_session_token",
+            return_value={"email": "devon@example.com", "name": "Devon"},
+        ),
+        patch.object(
+            server,
+            "_ensure_vvault_user",
+            return_value={"id": owner_id, "email": "devon@example.com", "role": "admin"},
+        ),
+        patch.object(server, "_resolve_backend_origin", return_value="https://vvault.thewreck.org"),
+        patch.object(
+            server,
+            "_cleanhouse_files_owner_context",
+            return_value=(owner_id, "zen-001", None),
+        ),
+        patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "store_cleanhouse_files_credential_hash",
+            return_value={"action": "created"},
+        ),
+    ):
+        response = client.post(
+            "/api/cleanhouse/files/pair",
+            data={
+                "instance_id": "zen-001",
+                "public_key_pem": public_pem,
+                "csrf_token": csrf_token,
+            },
+            headers={
+                "Origin": "https://vvault.thewreck.org",
+                "Sec-Fetch-Site": "same-origin",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.get_json()["credential_type"] == "cleanhouse_files_pairing"
+
+
+def test_pairing_form_rejects_cross_origin_cookie_request():
+    client = server.app.test_client()
+    client.set_cookie("auth_sid", "signed-cookie")
+    with (
+        patch.object(server, "get_current_user", return_value=(None, None)),
+        patch.object(
+            server,
+            "verify_standalone_auth_session_token",
+            return_value={"email": "devon@example.com", "name": "Devon"},
+        ),
+        patch.object(
+            server,
+            "_ensure_vvault_user",
+            return_value={"id": "11111111-1111-4111-8111-111111111111", "email": "devon@example.com"},
+        ),
+        patch.object(server, "_resolve_backend_origin", return_value="https://vvault.thewreck.org"),
+    ):
+        response = client.post(
+            "/api/cleanhouse/files/pair",
+            data={"instance_id": "zen-001"},
+            headers={"Origin": "https://attacker.invalid", "Sec-Fetch-Site": "cross-site"},
+        )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "Same-origin pairing required"
+
+
 def test_evidence_route_accepts_dedicated_cleanhouse_pairing_credential():
     payload, body, batch_id = _body()
     owner_id = "11111111-1111-4111-8111-111111111111"

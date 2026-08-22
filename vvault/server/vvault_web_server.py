@@ -5831,16 +5831,95 @@ def require_cleanhouse_files_auth(f):
     return decorated_function
 
 
-@app.route('/api/cleanhouse/files/pair', methods=['POST'])
-@require_auth
+def _cleanhouse_pairing_same_origin() -> bool:
+    origin = str(request.headers.get("Origin") or "").strip().rstrip("/")
+    expected = str(_resolve_backend_origin() or request.host_url).strip().rstrip("/")
+    fetch_site = str(request.headers.get("Sec-Fetch-Site") or "").strip().lower()
+    return bool(origin and expected and origin == expected) and fetch_site in {"", "none", "same-origin"}
+
+
+def require_cleanhouse_pairing_auth(f):
+    """Authenticate pairing through Bearer auth or the same-origin auth cookie."""
+    from functools import wraps
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        session, token = get_current_user()
+        auth_kind = "bearer"
+        if not session:
+            secret = str(os.environ.get("AUTH_SESSION_SECRET") or "").strip()
+            cookie_name = str(os.environ.get("AUTH_COOKIE_NAME") or "auth_sid").strip()
+            payload = verify_standalone_auth_session_token(
+                str(request.cookies.get(cookie_name) or ""),
+                secret,
+            )
+            if not payload:
+                return jsonify({"success": False, "error": "Authentication required"}), 401
+            email = str(payload.get("email") or "").strip().lower()
+            display_name = str(payload.get("name") or email.split("@")[0]).strip()
+            try:
+                session = _ensure_vvault_user(email, display_name)
+            except Exception:
+                return _auth_repository_unavailable_response(request.path)
+            auth_kind = "standalone_cookie"
+            token = None
+
+        if request.method == "POST" and auth_kind == "standalone_cookie" and not _cleanhouse_pairing_same_origin():
+            return jsonify({"success": False, "error": "Same-origin pairing required"}), 403
+
+        request.current_user = session
+        request.current_token = token
+        request.cleanhouse_pairing_auth = auth_kind
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+@app.route('/api/cleanhouse/files/pair', methods=['GET', 'POST'])
+@require_cleanhouse_pairing_auth
 def pair_cleanhouse_files_client():
     """Issue an owner-scoped credential encrypted to the requesting client."""
+    if request.method == "GET":
+        csrf_token = secrets.token_urlsafe(32)
+        response = app.response_class(
+            f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Pair CleanHouse</title></head>
+<body><main><h1>Pair CleanHouse</h1>
+<form method="post" action="/api/cleanhouse/files/pair">
+<input type="hidden" name="instance_id" value="zen-001">
+<input type="hidden" name="csrf_token" value="{csrf_token}">
+<label for="public_key_pem">CleanHouse public key</label>
+<textarea id="public_key_pem" name="public_key_pem" required></textarea>
+<button type="submit">Pair CleanHouse</button>
+</form></main></body></html>""",
+            mimetype="text/html",
+        )
+        response.set_cookie(
+            "cleanhouse_pair_csrf",
+            csrf_token,
+            max_age=600,
+            secure=True,
+            httponly=True,
+            samesite="Strict",
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
+            "base-uri 'none'; frame-ancestors 'none'"
+        )
+        return response
+
     owner_user_id, callsign, error = _cleanhouse_files_owner_context()
     if error:
         return error
-    payload = request.get_json(silent=True)
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict()
     if not isinstance(payload, dict):
         return jsonify({"success": False, "error": "Request body required"}), 400
+    if getattr(request, "cleanhouse_pairing_auth", "") == "standalone_cookie":
+        csrf_cookie = str(request.cookies.get("cleanhouse_pair_csrf") or "")
+        csrf_form = str(payload.get("csrf_token") or "")
+        if not csrf_cookie or not hmac.compare_digest(csrf_cookie, csrf_form):
+            return jsonify({"success": False, "error": "Pairing CSRF validation failed"}), 403
     try:
         requested_callsign = cleanhouse_files_evidence.validate_instance_id(payload.get("instance_id"))
         if requested_callsign != callsign:
