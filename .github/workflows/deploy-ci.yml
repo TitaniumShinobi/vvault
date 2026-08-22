@@ -23,15 +23,36 @@ jobs:
           username: deploy
           key: ${{ secrets.VVAULT_DEPLOY_KEY }}
           script: |
+            set -eu
+            expected_untracked='vvault/server/chatty_body_service.py.incident-20260801T1201Z
+            vvault/server/chatty_body_service.py.pre-projection-20260731
+            vvault/server/projection_classification.py.incident-20260801T1201Z
+            vvault/server/vvault_file_repository.py.incident-20260801T1201Z
+            vvault/server/vvault_file_repository.py.pre-projection-20260731
+            vvault/server/vvault_web_server.py.incident-20260801T1201Z
+            vvault/server/vvault_web_server.py.pre-projection-20260731'
             tracked_changes="$(git -C /opt/vvault-public status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
-            untracked_changes="$(git -C /opt/vvault-public ls-files --others --exclude-standard | wc -l | tr -d ' ')"
-            echo "[vvault-deploy] production worktree changes: tracked=${tracked_changes} untracked=${untracked_changes}"
-            git -C /opt/vvault-public -c core.quotePath=true ls-files --others --exclude-standard \
-              | sed 's|^|[vvault-deploy] untracked path: |'
-            echo "[vvault-deploy] deployment mutation-command audit"
-            grep -nE 'git[[:space:]]+(clean|reset|checkout|restore|switch|pull|fetch|merge)|rsync([^#]*--delete|[[:space:]])|rm[[:space:]]|find([^#]*-delete)' \
-              /opt/deploy/trigger/deploy-vvault.sh \
-              | sed 's|^|[vvault-deploy] deploy-script line: |' \
-              || echo "[vvault-deploy] deploy-script line: none"
-            echo "[vvault-deploy] diagnostic-only run; deployment intentionally not invoked"
-            exit 1
+            actual_untracked="$(git -C /opt/vvault-public -c core.quotePath=false ls-files --others --exclude-standard)"
+            if [ "$tracked_changes" != "0" ]; then
+              echo "[vvault-deploy] tracked production changes detected; refusing preservation/deployment" >&2
+              exit 1
+            fi
+            if [ "$actual_untracked" != "$expected_untracked" ]; then
+              echo "[vvault-deploy] untracked production set changed; refusing preservation/deployment" >&2
+              exit 1
+            fi
+            for path in $expected_untracked; do
+              digest="$(sha256sum "/opt/vvault-public/$path")"
+              echo "[vvault-deploy] preserved artifact sha256: $digest"
+            done
+            exclude_file=/opt/vvault-public/.git/info/exclude
+            touch "$exclude_file"
+            for path in $expected_untracked; do
+              grep -Fqx "$path" "$exclude_file" || printf '%s\n' "$path" >> "$exclude_file"
+            done
+            if [ -n "$(git -C /opt/vvault-public status --porcelain)" ]; then
+              echo "[vvault-deploy] worktree remains dirty after exact-path preservation; refusing deployment" >&2
+              exit 1
+            fi
+            echo "[vvault-deploy] seven artifacts preserved in place and excluded by exact path"
+            /opt/deploy/trigger/deploy-trigger.sh vvault
