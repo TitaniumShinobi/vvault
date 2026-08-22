@@ -28,4 +28,10 @@ jobs:
             echo "[vvault-deploy] production worktree changes: tracked=${tracked_changes} untracked=${untracked_changes}"
             git -C /opt/vvault-public -c core.quotePath=true ls-files --others --exclude-standard \
               | sed 's|^|[vvault-deploy] untracked path: |'
-            /opt/deploy/trigger/deploy-trigger.sh vvault
+            echo "[vvault-deploy] deployment mutation-command audit"
+            grep -nE 'git[[:space:]]+(clean|reset|checkout|restore|switch|pull|fetch|merge)|rsync([^#]*--delete|[[:space:]])|rm[[:space:]]|find([^#]*-delete)' \
+              /opt/deploy/trigger/deploy-vvault.sh \
+              | sed 's|^|[vvault-deploy] deploy-script line: |' \
+              || echo "[vvault-deploy] deploy-script line: none"
+            echo "[vvault-deploy] diagnostic-only run; deployment intentionally not invoked"
+            exit 1
