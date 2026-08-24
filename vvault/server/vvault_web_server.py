@@ -5844,6 +5844,16 @@ def require_cleanhouse_pairing_auth(f):
 
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # The pairing document contains no credential and is intentionally public.
+        # Browser-local VVAULT sessions are bearer tokens in localStorage, so the
+        # document must load before its same-origin script can attach that token to
+        # the credential-issuing POST.  POST remains fail-closed below.
+        if request.method == "GET":
+            request.current_user = None
+            request.current_token = None
+            request.cleanhouse_pairing_auth = "public_form"
+            return f(*args, **kwargs)
+
         session, token = get_current_user()
         auth_kind = "bearer"
         if not session:
@@ -5881,17 +5891,92 @@ def pair_cleanhouse_files_client():
     """Issue an owner-scoped credential encrypted to the requesting client."""
     if request.method == "GET":
         csrf_token = secrets.token_urlsafe(32)
-        response = app.response_class(
-            f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Pair CleanHouse</title></head>
+        script_nonce = secrets.token_urlsafe(24)
+        pairing_document = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pair CleanHouse</title>
+<style>
+:root { color-scheme: dark; font-family: system-ui, sans-serif; }
+body { margin: 0; background: #101114; color: #f3f4f6; }
+main { width: min(760px, calc(100% - 40px)); margin: 48px auto; }
+form { display: grid; gap: 14px; }
+textarea { min-height: 240px; resize: vertical; padding: 12px; color: inherit; background: #181b20; border: 1px solid #3a3f48; border-radius: 10px; }
+button { width: fit-content; padding: 10px 16px; border: 0; border-radius: 999px; font-weight: 700; cursor: pointer; }
+#pairing-result { min-height: 150px; }
+.muted { color: #aeb4bf; }
+</style></head>
 <body><main><h1>Pair CleanHouse</h1>
-<form method="post" action="/api/cleanhouse/files/pair">
+<p class="muted">The credential is encrypted to this public key before it leaves VVAULT.</p>
+<form id="cleanhouse-pairing-form" method="post" action="/api/cleanhouse/files/pair">
 <input type="hidden" name="instance_id" value="zen-001">
-<input type="hidden" name="csrf_token" value="{csrf_token}">
+<input type="hidden" name="csrf_token" value="__CSRF_TOKEN__">
 <label for="public_key_pem">CleanHouse public key</label>
-<textarea id="public_key_pem" name="public_key_pem" required></textarea>
+<textarea id="public_key_pem" name="public_key_pem" autocomplete="off" spellcheck="false" required></textarea>
 <button type="submit">Pair CleanHouse</button>
-</form></main></body></html>""",
+</form>
+<section id="pairing-output" hidden>
+<h2>Encrypted pairing result</h2>
+<p id="pairing-status" class="muted"></p>
+<textarea id="pairing-result" readonly></textarea>
+<button id="copy-pairing-result" type="button">Copy encrypted result</button>
+</section>
+<script nonce="__SCRIPT_NONCE__">
+(() => {
+  const form = document.getElementById('cleanhouse-pairing-form');
+  const output = document.getElementById('pairing-output');
+  const status = document.getElementById('pairing-status');
+  const result = document.getElementById('pairing-result');
+  const copy = document.getElementById('copy-pairing-result');
+
+  const bearerToken = () => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('vvault_user') || 'null');
+      if (saved && saved.token) return String(saved.token);
+    } catch (_) {}
+    return String(localStorage.getItem('vvault_token') || '');
+  };
+
+  form.addEventListener('submit', async (event) => {
+    const token = bearerToken();
+    if (!token) return; // Preserve the CSRF-protected auth-cookie form path.
+    event.preventDefault();
+    output.hidden = false;
+    status.textContent = 'Pairing…';
+    result.value = '';
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          instance_id: form.elements.instance_id.value,
+          public_key_pem: form.elements.public_key_pem.value
+        })
+      });
+      const payload = await response.json();
+      result.value = JSON.stringify(payload);
+      status.textContent = response.ok ? 'CleanHouse is paired. Copy this encrypted result.' : (payload.error || 'Pairing failed.');
+    } catch (_) {
+      status.textContent = 'Pairing request failed.';
+    }
+  });
+
+  copy.addEventListener('click', async () => {
+    if (!result.value) return;
+    await navigator.clipboard.writeText(result.value);
+    copy.textContent = 'Copied';
+  });
+})();
+</script></main></body></html>"""
+        pairing_document = pairing_document.replace("__CSRF_TOKEN__", csrf_token).replace(
+            "__SCRIPT_NONCE__",
+            script_nonce,
+        )
+        response = app.response_class(
+            pairing_document,
             mimetype="text/html",
         )
         response.set_cookie(
@@ -5904,7 +5989,8 @@ def pair_cleanhouse_files_client():
         )
         response.headers["Cache-Control"] = "no-store"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
+            f"default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-{script_nonce}'; "
+            "connect-src 'self'; form-action 'self'; "
             "base-uri 'none'; frame-ancestors 'none'"
         )
         return response

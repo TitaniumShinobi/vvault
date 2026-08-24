@@ -149,6 +149,38 @@ def test_pairing_route_returns_only_rsa_encrypted_owner_scoped_credential():
     assert store.call_args.kwargs["credential_sha256"] == evidence.pairing_token_hash(credential)
 
 
+def test_pairing_document_loads_before_browser_local_bearer_auth():
+    with patch.object(server, "get_current_user") as get_current_user:
+        response = server.app.test_client().get("/api/cleanhouse/files/pair")
+
+    assert response.status_code == 200
+    assert response.mimetype == "text/html"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "script-src 'nonce-" in response.headers["Content-Security-Policy"]
+    assert "connect-src 'self'" in response.headers["Content-Security-Policy"]
+    document = response.get_data(as_text=True)
+    assert "Pair CleanHouse" in document
+    assert "localStorage.getItem('vvault_token')" in document
+    assert "'Authorization': `Bearer ${token}`" in document
+    assert evidence.PAIRING_TOKEN_PREFIX not in document
+    assert '"ciphertext"' not in document
+    get_current_user.assert_not_called()
+
+
+def test_pairing_post_without_bearer_or_verified_cookie_stays_fail_closed():
+    with (
+        patch.object(server, "get_current_user", return_value=(None, None)),
+        patch.object(server, "verify_standalone_auth_session_token", return_value=None),
+    ):
+        response = server.app.test_client().post(
+            "/api/cleanhouse/files/pair",
+            json={"instance_id": "zen-001", "public_key_pem": "not-a-key"},
+        )
+
+    assert response.status_code == 401
+    assert response.get_json() == {"success": False, "error": "Authentication required"}
+
+
 def test_pairing_form_accepts_verified_same_origin_auth_cookie_with_csrf():
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
     public_pem = private_key.public_key().public_bytes(
