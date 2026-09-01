@@ -23,4 +23,11 @@ jobs:
           username: deploy
           key: ${{ secrets.VVAULT_DEPLOY_KEY }}
           script: |
+            set +e
             /opt/deploy/trigger/deploy-trigger.sh vvault
+            deploy_status=$?
+            stat -c 'vvault-env uid=%u gid=%g mode=%a' /opt/vvault-public/.env || true
+            systemctl show vvault-backend.service \
+              -p User -p Group -p LoadState -p ActiveState -p SubState \
+              -p Result -p ExecMainCode -p ExecMainStatus || true
+            exit "$deploy_status"
