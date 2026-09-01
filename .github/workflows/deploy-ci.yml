@@ -14,8 +14,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      VVAULT_ENROLLMENT_HMAC_KEY: ${{ secrets.VVAULT_ENROLLMENT_HMAC_KEY }}
 
     steps:
       - name: Deploy to Droplet
@@ -24,38 +22,5 @@ jobs:
           host: 165.245.136.194
           username: deploy
           key: ${{ secrets.VVAULT_DEPLOY_KEY }}
-          envs: VVAULT_ENROLLMENT_HMAC_KEY
           script: |
-            python3 - <<'PY'
-            import os
-            import stat
-            import tempfile
-            from pathlib import Path
-
-            secret = os.environ.get("VVAULT_ENROLLMENT_HMAC_KEY", "")
-            if len(secret) < 32:
-                raise SystemExit("VVAULT enrollment key is missing or too short")
-
-            env_path = Path("/opt/vvault-public/.env")
-            existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-            lines = [line for line in existing.splitlines() if not line.startswith("VVAULT_ENROLLMENT_HMAC_KEY=")]
-            lines.append(f"VVAULT_ENROLLMENT_HMAC_KEY={secret}")
-            payload = "\n".join(lines) + "\n"
-            descriptor, temporary_path = tempfile.mkstemp(prefix=".env.", dir=env_path.parent)
-            try:
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.chmod(temporary_path, stat.S_IRUSR | stat.S_IWUSR)
-                os.replace(temporary_path, env_path)
-                os.chmod(env_path, stat.S_IRUSR | stat.S_IWUSR)
-            finally:
-                if os.path.exists(temporary_path):
-                    os.unlink(temporary_path)
-            PY
-            if ! /opt/deploy/trigger/deploy-trigger.sh vvault; then
-              sudo systemctl show vvault-backend.service \
-                -p ActiveState -p SubState -p Result -p ExecMainCode -p ExecMainStatus || true
-              exit 1
-            fi
+            /opt/deploy/trigger/deploy-trigger.sh vvault

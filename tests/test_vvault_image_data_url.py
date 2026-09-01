@@ -8,7 +8,6 @@ from vvault.server import vvault_web_server as server
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII="
 )
-OWNER_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def _image_row(*, content="", bucket="vvault-local", object_key="images/test.png", storage_path="instances/zen-001/assets/test.png"):
@@ -32,20 +31,9 @@ def _client(monkeypatch, row, *, stored_bytes=None):
     monkeypatch.setattr(
         server,
         "db_get_session",
-        lambda _token: {
-            "id": OWNER_ID,
-            "email": "dwoodson92@gmail.com",
-            "role": "admin",
-            "auth_mode": "session",
-        },
+        lambda _token: {"email": "dwoodson92@gmail.com", "role": "admin"},
     )
-    monkeypatch.setattr(
-        server.VAULT_FILE_REPOSITORY,
-        "get_user_file",
-        lambda *, file_id, user_id, construct_id=None: row
-        if file_id == "image-1" and user_id == OWNER_ID
-        else None,
-    )
+    monkeypatch.setattr(server.VAULT_FILE_REPOSITORY, "get_by_id", lambda _file_id: row)
     monkeypatch.setattr(
         server.VAULT_FILE_REPOSITORY,
         "load_bytes",

@@ -25,7 +25,6 @@ except ImportError:
 import os
 import sys
 import json
-import copy
 import re
 import logging
 import threading
@@ -33,9 +32,9 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-from flask import Flask, request, jsonify, send_from_directory, Response, has_request_context
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import hashlib
 import hmac
@@ -47,6 +46,7 @@ import time
 import secrets
 import base64
 import jwt
+import bcrypt
 from datetime import datetime, timedelta, timezone
 import requests  # For Turnstile verification
 from oauthlib.oauth2 import WebApplicationClient
@@ -70,20 +70,7 @@ from vvault.security.pocketverse_guard import (
     enforce_pocketverse_authority,
     PocketverseAuthorityError,
 )
-if __package__:
-    from vvault.server import chatty_body_service
-    from vvault.server import vvault_access_assertion
-    from vvault.server import cleanhouse_files_evidence
-    from vvault.server import vvault_enrollment
-    from vvault.server.projection_classification import row_is_projection_excluded
-else:
-    # The production unit starts from vvault/server, whereas tests and other
-    # consumers import this module through the vvault.server package.
-    import chatty_body_service
-    import vvault_access_assertion
-    import cleanhouse_files_evidence
-    import vvault_enrollment
-    from projection_classification import row_is_projection_excluded
+import chatty_body_service
 import vvault_auth_repository
 import vvault_file_repository
 try:
@@ -96,9 +83,10 @@ from code_project_repository import CodeProjectRepository, is_internal_code_proj
 def _pocketverse_request_context():
     """Build request context for Pocketverse guard from current request."""
     cu = getattr(request, "current_user", None) or {}
+    email = cu.get("email") or (request.headers.get("X-Chatty-User") if request else None)
     return {
-        "email": cu.get("email"),
-        "user_id": cu.get("id") or cu.get("user_id"),
+        "email": email,
+        "user_id": cu.get("id") or email,
         "session_user": cu,
         "metadata_loader": _load_pocketverse_metadata_from_body,
     }
@@ -108,131 +96,6 @@ def _is_uuid(value: Optional[str]) -> bool:
         isinstance(value, str)
         and re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$', value.strip(), re.I)
     )
-
-
-_CONSTRUCT_OWNER_CACHE_TTL_SECONDS = 30.0
-_construct_owner_cache_lock = threading.Lock()
-_construct_owner_cache: dict[str, tuple[float, str]] = {}
-_construct_projectability_cache_lock = threading.Lock()
-_construct_projectability_cache: dict[tuple[str, str], tuple[float, bool]] = {}
-CONSTRUCT_PROJECTABILITY_CACHE_TTL_SECONDS = 60.0
-CONSTRUCT_EDITOR_CACHE_TTL_SECONDS = 30.0
-CONSTRUCT_EDITOR_CACHE_LKG_SECONDS = 120.0
-_construct_editor_cache_lock = threading.Lock()
-_construct_editor_cache: dict[tuple[str, str], tuple[float, Dict[str, Any]]] = {}
-_construct_editor_inflight: dict[tuple[str, str], threading.Event] = {}
-AVATAR_CACHE_TTL_SECONDS = 60.0
-AVATAR_CACHE_LKG_SECONDS = 300.0
-AVATAR_CACHE_MAX_ENTRIES = 32
-AVATAR_CACHE_MAX_BYTES = 128 * 1024 * 1024
-_avatar_cache_lock = threading.Lock()
-_avatar_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
-_avatar_descriptor_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
-_avatar_cache_inflight: dict[tuple[str, str], threading.Event] = {}
-_avatar_hydration_slots = threading.BoundedSemaphore(2)
-
-
-def _provided_service_token() -> str:
-    """Read the bounded service credential from the supported transports."""
-    chatty_key = str(request.headers.get("X-Chatty-Key") or "")
-    service_key = str(request.headers.get("X-Service-Token") or "")
-    if chatty_key and service_key and not hmac.compare_digest(
-        chatty_key.encode("utf-8"), service_key.encode("utf-8")
-    ):
-        return ""
-    provided = chatty_key or service_key
-    if provided:
-        return provided
-    auth_header = str(request.headers.get("Authorization") or "")
-    for prefix in ("Bearer ", "ServiceToken "):
-        if auth_header.startswith(prefix):
-            return auth_header[len(prefix):].strip()
-    return ""
-
-
-def _configured_service_token() -> str:
-    """Resolve the current service credential without freezing env selection."""
-    imported = str(globals().get("_IMPORTED_VVAULT_SERVICE_TOKEN") or "")
-    current = str(globals().get("VVAULT_SERVICE_TOKEN") or "")
-    if current != imported:
-        return current
-    if "VVAULT_SERVICE_TOKEN" in os.environ:
-        return str(os.environ.get("VVAULT_SERVICE_TOKEN") or "")
-    return ""
-
-
-def _service_token_matches(expected: str | None = None) -> bool:
-    configured = str(
-        _configured_service_token()
-        if expected is None
-        else expected or ""
-    )
-    provided = _provided_service_token()
-    return bool(
-        configured
-        and provided
-        and hmac.compare_digest(
-            configured.encode("utf-8"), provided.encode("utf-8")
-        )
-    )
-
-
-def _trusted_service_identity_cache_allowed() -> bool:
-    return _service_token_matches()
-
-
-def _invalidate_construct_owner_cache(construct_id: str) -> None:
-    callsign = _normalize_callsign(construct_id)
-    with _construct_owner_cache_lock:
-        _construct_owner_cache.pop(callsign, None)
-    with _construct_editor_cache_lock:
-        for key in list(_construct_editor_cache):
-            if key[1] == callsign:
-                _construct_editor_cache.pop(key, None)
-    with _construct_projectability_cache_lock:
-        for key in list(_construct_projectability_cache):
-            if key[1] == callsign:
-                _construct_projectability_cache.pop(key, None)
-
-
-def _construct_is_projectable_cached(user_id: str, callsign: str) -> bool:
-    """Bound the repeated owner/callsign projection guard to one DB lookup."""
-    key = (str(user_id), _normalize_callsign(callsign))
-    now = time.monotonic()
-    with _construct_projectability_cache_lock:
-        cached = _construct_projectability_cache.get(key)
-        if cached and now - cached[0] <= CONSTRUCT_PROJECTABILITY_CACHE_TTL_SECONDS:
-            return cached[1]
-    result = VAULT_FILE_REPOSITORY.construct_is_projectable(
-        user_id=key[0], callsign=key[1]
-    )
-    with _construct_projectability_cache_lock:
-        _construct_projectability_cache[key] = (time.monotonic(), bool(result))
-        if len(_construct_projectability_cache) > 1024:
-            oldest = min(
-                _construct_projectability_cache,
-                key=lambda item: _construct_projectability_cache[item][0],
-            )
-            _construct_projectability_cache.pop(oldest, None)
-    return bool(result)
-
-
-def _invalidate_avatar_cache(
-    construct_id: str, owner_user_id: str | None = None
-) -> None:
-    callsign = _normalize_callsign(construct_id)
-    with _avatar_cache_lock:
-        for key in list(_avatar_cache):
-            if key[1] == callsign and (
-                owner_user_id is None or key[0] == str(owner_user_id)
-            ):
-                _avatar_cache.pop(key, None)
-        for key in list(_avatar_descriptor_cache):
-            if key[1] == callsign and (
-                owner_user_id is None or key[0] == str(owner_user_id)
-            ):
-                _avatar_descriptor_cache.pop(key, None)
-
 
 # Configure logging
 logging.basicConfig(
@@ -529,10 +392,6 @@ def _security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    if request.path.startswith("/api/auth/") or request.path == "/api/vault/session-bridge":
-        response.headers["Cache-Control"] = "no-store, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
 
@@ -3000,15 +2859,7 @@ OAUTH_BASE_URL = _resolve_backend_origin() or ""
 
 # Service API Configuration (for FXShinobi/Chatty backend-to-backend calls)
 VVAULT_SERVICE_TOKEN = os.environ.get("VVAULT_SERVICE_TOKEN")
-_IMPORTED_VVAULT_SERVICE_TOKEN = VVAULT_SERVICE_TOKEN
 VVAULT_ENCRYPTION_KEY = os.environ.get("VVAULT_ENCRYPTION_KEY", os.environ.get("SECRET_KEY", "default-encryption-key"))
-CONGRUENCY_PURGE_CONSTRUCTS = (
-    "arbiter-001", "aurora-001", "clean-001", "click-001", "codegpt-001",
-    "continuitygpt-001", "dayday-001", "db-override-test-001",
-    "engineergpt-001", "insight-001", "katana-002", "linda-001", "luna-001",
-    "monday-001", "projectionproof-001", "qc-001", "researchgpt-001",
-    "scout-001", "tom-001", "val-001",
-)
 
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'backups', 'vault_files')
 BACKUP_MAX_AGE_DAYS = 30
@@ -3038,11 +2889,11 @@ def _backup_before_write(file_id: str, filename: str, content: str) -> bool:
 
         with open(backup_path, 'w', encoding='utf-8') as f:
             json.dump(backup_data, f, indent=2, ensure_ascii=False)
-
+        
         logger.info(f"BACKUP: Saved backup for file_id={file_id} filename={filename} content_length={len(content or '')} to {backup_filename}")
-
+        
         _cleanup_old_backups()
-
+        
         return True
     except Exception as e:
         logger.error(f"BACKUP ERROR: Failed to backup file_id={file_id} filename={filename}: {e}")
@@ -3156,14 +3007,24 @@ def require_service_token(f):
     """Decorator to require VVAULT_SERVICE_TOKEN for backend-to-backend calls"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not _configured_service_token():
+        auth_header = request.headers.get('Authorization', '')
+        provided_token = None
+        
+        if auth_header.startswith('Bearer '):
+            provided_token = auth_header[7:]
+        elif auth_header.startswith('ServiceToken '):
+            provided_token = auth_header[13:]
+        else:
+            provided_token = request.headers.get('X-Service-Token')
+        
+        if not VVAULT_SERVICE_TOKEN:
             logger.warning("SERVICE_API: VVAULT_SERVICE_TOKEN not configured")
             return jsonify({
                 "success": False,
                 "error": "Service API not configured"
             }), 503
         
-        if not _service_token_matches():
+        if provided_token != VVAULT_SERVICE_TOKEN:
             logger.warning(f"SERVICE_API: Invalid service token attempt")
             return jsonify({
                 "success": False,
@@ -3173,9 +3034,36 @@ def require_service_token(f):
         return f(*args, **kwargs)
     return decorated_function
 
+# Legacy fallback identity references. These are not an auth persistence
+# authority after the VVAULT-native auth cutover.
+USERS_DB_FALLBACK = {
+    'admin@vvault.com': {
+        'password': 'admin123',
+        'name': 'Admin User',
+        'role': 'admin'
+    }
+}
+
+# In-memory session cache (primary storage when DB table unavailable)
+ACTIVE_SESSIONS = {}
+
 def _check_session_table_available() -> bool:
     """Check if VVAULT-native session storage is available."""
     return _auth_repository_ready()
+
+def db_create_session(email: str, role: str, token: str, expires_at: datetime, remember_me: bool = False) -> bool:
+    """Create a VVAULT-native session; persist only a token hash."""
+    user = AUTH_REPOSITORY.get_user_by_email(email)
+    if not user:
+        raise RuntimeError("VVAULT auth user does not exist")
+    token_hash = _session_token_hash(token)
+    AUTH_REPOSITORY.create_session(
+        user_id=str(user["id"]),
+        token_hash=token_hash,
+        expires_at=expires_at,
+    )
+    logger.info(f"Session persisted to VVAULT auth DB for {email} (remember_me={remember_me})")
+    return True
 
 def db_delete_session(token: str) -> bool:
     """Revoke session from VVAULT-native session storage."""
@@ -3188,15 +3076,8 @@ def db_get_session(token: str) -> Optional[Dict]:
         session_data = AUTH_REPOSITORY.get_session_by_hash(_session_token_hash(token))
         if not session_data:
             return None
-        if session_data.get("session_kind") != "normal":
-            return None
-        if session_data.get("enrollment_status") != vvault_enrollment.ACTIVE:
-            return None
-        if not session_data.get("device_id") or session_data.get("device_status") != "TRUSTED":
-            return None
         return {
             'id': str(session_data.get('user_id')),
-            'session_id': str(session_data.get('session_id')),
             'email': session_data['email'],
             'name': session_data.get('name') or session_data['email'].split('@')[0],
             'role': session_data.get('role') or 'user',
@@ -3204,7 +3085,6 @@ def db_get_session(token: str) -> Optional[Dict]:
             'expires_at': session_data.get('expires_at'),
             'created_at': session_data.get('session_created_at'),
             'source': 'vvault_auth',
-            'auth_mode': 'session',
         }
     except Exception as e:
         logger.debug(f"VVAULT auth session lookup failed: {type(e).__name__}")
@@ -3212,8 +3092,6 @@ def db_get_session(token: str) -> Optional[Dict]:
 
 def db_get_user(email: str) -> Optional[Dict]:
     """Get user from VVAULT-native auth storage."""
-    if has_request_context():
-        request.environ.pop("vvault.auth_lookup_error", None)
     try:
         user = AUTH_REPOSITORY.get_user_by_email(email)
         if not user:
@@ -3222,8 +3100,6 @@ def db_get_user(email: str) -> Optional[Dict]:
         user['role'] = _resolve_user_role(email, local_user=user)
         return user
     except Exception as e:
-        if has_request_context():
-            request.environ["vvault.auth_lookup_error"] = type(e).__name__
         logger.error(f"Failed to get user from VVAULT auth database: {type(e).__name__}")
         return None
 
@@ -3256,17 +3132,46 @@ def log_auth_decision(action: str, user_id: str, resource: str, result: str, rea
     log_level = logging.INFO if result == "allowed" else logging.WARNING
     logger.log(log_level, f"AUTH: {action} | user={user_id} | resource={resource} | result={result} | reason={reason}")
 
+def _b64url_decode_segment(segment: str) -> bytes:
+    pad = "=" * ((4 - len(segment) % 4) % 4)
+    return base64.urlsafe_b64decode(segment + pad)
+
+
+def verify_standalone_auth_session_token(raw_token: str, secret: str) -> Optional[Dict[str, Any]]:
+    """Verify @quantum/auth cookie token (must match auth/src/auth/session.ts HMAC)."""
+    if not raw_token or not secret:
+        return None
+    try:
+        parts = raw_token.split(".")
+        if len(parts) != 2:
+            return None
+        encoded_payload, provided_sig_b64u = parts
+        msg = encoded_payload.encode("utf-8")
+        expected_mac = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).digest()
+        provided_sig = _b64url_decode_segment(provided_sig_b64u)
+        if len(provided_sig) != len(expected_mac) or not hmac.compare_digest(provided_sig, expected_mac):
+            return None
+        payload = json.loads(_b64url_decode_segment(encoded_payload).decode("utf-8"))
+        exp = int(payload.get("exp") or 0)
+        if exp < int(time.time()):
+            return None
+        email = (payload.get("email") or "").strip().lower()
+        if not email:
+            return None
+        return payload
+    except Exception as exc:
+        logger.debug("standalone auth token verify failed: %s", exc)
+        return None
+
+
 def get_current_user():
     """Extract and validate current user from request token (database-backed)"""
     try:
         auth_header = request.headers.get('Authorization')
-        token = (
-            auth_header.split(' ', 1)[1].strip()
-            if auth_header and auth_header.startswith('Bearer ')
-            else str(request.cookies.get('vvault_session') or '')
-        )
-        if not token:
+        if not auth_header or not auth_header.startswith('Bearer '):
             return None, None
+        
+        token = auth_header.split(' ')[1]
         
         session = db_get_session(token)
         if not session:
@@ -3313,72 +3218,50 @@ def require_auth(f):
 def require_chatty_auth(f):
     """Auth decorator for Chatty integration endpoints.
 
-    User-scoped calls accept only an owner-bound signed assertion or a native
-    ACTIVE/trusted-device VVAULT session. Shared secrets never select owners.
+    Accepts three auth methods in priority order:
+    1. VVAULT_SERVICE_TOKEN via X-Chatty-Key or X-Service-Token header (service-to-service).
+       User context comes from X-Chatty-User header (email).
+    2. Standard Bearer session token (same as require_auth).
+    3. Dev mode: if VVAULT_SERVICE_TOKEN env var is not set, endpoints are
+       open and X-Chatty-User provides user context (optional).
     """
     from functools import wraps
     @wraps(f)
     def decorated_function(*args, **kwargs):
         ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        auth_header = request.headers.get("Authorization", "")
-        bearer = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
-        if bearer.count(".") == 2:
-            try:
-                unverified_claims = vvault_access_assertion._decode_segment(bearer.split(".")[1], "claims")
-            except vvault_access_assertion.AccessAssertionRejected:
-                unverified_claims = {}
-            if unverified_claims.get("version") == vvault_access_assertion.ASSERTION_VERSION:
-                try:
-                    verified = vvault_access_assertion.verify_access_assertion(bearer)
-                except vvault_access_assertion.AccessAssertionUnavailable:
-                    return jsonify({
-                        "success": False,
-                        "error": "VVAULT access assertion verification is unavailable",
-                        "errorCode": "ACCESS_ASSERTION_UNAVAILABLE",
-                    }), 503
-                except vvault_access_assertion.AccessAssertionRejected:
-                    return jsonify({
-                        "success": False,
-                        "error": "VVAULT access assertion was rejected",
-                        "errorCode": "ACCESS_ASSERTION_REJECTED",
-                    }), 401
-                required = vvault_access_assertion.required_scopes(request.method, request.path)
-                if not required or not required.issubset(verified["scopes"]):
-                    return jsonify({
-                        "success": False,
-                        "error": "VVAULT access assertion lacks the required scope",
-                        "errorCode": "ACCESS_ASSERTION_REJECTED",
-                    }), 403
-                request.current_user = {
-                    "id": verified["ownerUserId"],
-                    "user_id": verified["ownerUserId"],
-                    "role": "user",
-                    "auth_mode": "signed_assertion",
-                    "access_scopes": sorted(verified["scopes"]),
-                    "subject": verified["subject"],
-                }
-                request.current_token = None
-                request.vvault_access_assertion = {
-                    "key_id": verified["keyId"],
-                    "owner_fingerprint": verified["ownerFingerprint"],
-                    "expires_at": verified["expiresAt"],
-                }
-                logger.info(
-                    "VVAULT_ACCESS_ASSERTION %s",
-                    json.dumps({
-                        "requestId": str(request.headers.get("X-Request-ID") or "")[:128] or None,
-                        "phase": "authorization",
-                        "target": request.path,
-                        "keyId": verified["keyId"],
-                        "ownerFingerprint": verified["ownerFingerprint"],
-                        "status": "accepted",
-                        "retryResult": (
-                            "retry" if request.headers.get("X-Chatty-Assertion-Retry") == "1"
-                            else "not_attempted"
-                        ),
-                    }, separators=(",", ":")),
-                )
-                return f(*args, **kwargs)
+        expected_key = os.environ.get("VVAULT_SERVICE_TOKEN")
+        provided_key = request.headers.get("X-Chatty-Key") or request.headers.get("X-Service-Token")
+
+        if expected_key and provided_key == expected_key:
+            chatty_email = request.headers.get("X-Chatty-User")
+            if not chatty_email:
+                return jsonify({"success": False, "error": "X-Chatty-User header required with API key auth"}), 400
+            chatty_user_id = request.headers.get("X-Chatty-User-Id")
+            current_user = {"email": chatty_email}
+            if _is_uuid(chatty_user_id):
+                current_user["id"] = chatty_user_id.strip()
+            log_auth_decision(
+                action="access_granted",
+                user_id=chatty_email,
+                resource=request.path,
+                result="allowed",
+                reason="chatty_api_key",
+                ip=ip
+            )
+            request.current_user = current_user
+            request.current_token = None
+            return f(*args, **kwargs)
+
+        if expected_key and provided_key and provided_key != expected_key:
+            log_auth_decision(
+                action="access_attempt",
+                user_id="chatty_service",
+                resource=request.path,
+                result="denied",
+                reason="invalid_chatty_api_key",
+                ip=ip
+            )
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
 
         session, token = get_current_user()
         if session:
@@ -3390,19 +3273,21 @@ def require_chatty_auth(f):
                 reason="valid_session",
                 ip=ip
             )
-            request.current_user = {**session, "auth_mode": session.get("auth_mode") or "session"}
+            request.current_user = session
             request.current_token = token
             return f(*args, **kwargs)
 
-        # A shared credential may authorize service-only operations, but it
-        # deliberately carries no owner. User-scoped routes still fail closed
-        # in _get_authenticated_user_id unless a native session or signed,
-        # owner-bound assertion was supplied.
-        if _service_token_matches():
-            request.current_user = {
-                "role": "service",
-                "auth_mode": "service_token",
-            }
+        if not expected_key:
+            chatty_email = request.headers.get("X-Chatty-User")
+            log_auth_decision(
+                action="access_granted",
+                user_id=chatty_email or "dev_open",
+                resource=request.path,
+                result="allowed",
+                reason="chatty_dev_mode_open",
+                ip=ip
+            )
+            request.current_user = {"email": chatty_email} if chatty_email else {"email": "dev@localhost"}
             request.current_token = None
             return f(*args, **kwargs)
 
@@ -3417,66 +3302,6 @@ def require_chatty_auth(f):
         return jsonify({"success": False, "error": "Authentication required"}), 401
     return decorated_function
 
-
-def _construct_grade_preflight_strict_auth_error():
-    """Fail closed unless Chatty auth established a non-development principal."""
-    current_user = getattr(request, "current_user", None) or {}
-    if current_user.get("auth_mode") == "signed_assertion":
-        assertion = getattr(request, "vvault_access_assertion", None)
-        if (
-            isinstance(assertion, dict)
-            and assertion.get("key_id")
-            and assertion.get("owner_fingerprint")
-            and assertion.get("expires_at")
-        ):
-            return None
-
-    current_token = str(getattr(request, "current_token", None) or "")
-    if current_user and current_token and current_user.get("auth_mode") == "session":
-        return None
-
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    log_auth_decision(
-        action="access_attempt",
-        user_id="anonymous",
-        resource=request.path,
-        result="denied",
-        reason="construct_grade_preflight_strict_auth_required",
-        ip=ip,
-    )
-    return jsonify({
-        "success": False,
-        "canonical": True,
-        "error": "Strict authentication is required for construct attribution preflight",
-        "error_code": "CONSTRUCT_GRADE_PREFLIGHT_AUTH_REQUIRED",
-    }), 401
-
-
-def _construct_creation_provenance_token(session_token: str, user_id: str) -> str:
-    message = f"vvault-construct-create:{user_id}:{session_token}".encode("utf-8")
-    secret = app.config.get("SECRET_KEY", "").encode("utf-8")
-    return hmac.new(secret, message, hashlib.sha256).hexdigest()
-
-
-def _construct_creation_source(user_id: str) -> str | None:
-    service_token = request.headers.get("X-Service-Token") or request.headers.get("X-Chatty-Key")
-    if (
-        request.path == "/api/simforge/construct/create"
-        and VVAULT_SERVICE_TOKEN
-        and service_token
-        and hmac.compare_digest(service_token, VVAULT_SERVICE_TOKEN)
-    ):
-        return "simforge"
-
-    session_token = getattr(request, "current_token", None)
-    supplied = request.headers.get("X-VVAULT-Creation-Provenance", "")
-    if session_token and supplied:
-        expected = _construct_creation_provenance_token(session_token, user_id)
-        if hmac.compare_digest(supplied, expected):
-            return "vvault_ui"
-    return None
-
-
 def require_role(*roles):
     """Zero Trust: Decorator to require specific role(s) for access"""
     from functools import wraps
@@ -3485,7 +3310,7 @@ def require_role(*roles):
         def decorated_function(*args, **kwargs):
             session, token = get_current_user()
             ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-
+            
             if not session:
                 log_auth_decision(
                     action="role_check",
@@ -3496,7 +3321,7 @@ def require_role(*roles):
                     ip=ip
                 )
                 return jsonify({"success": False, "error": "Authentication required"}), 401
-
+            
             user_role = session.get('role', 'user')
             if user_role not in roles:
                 log_auth_decision(
@@ -3523,6 +3348,45 @@ def require_role(*roles):
             return f(*args, **kwargs)
         return decorated_function
     return decorator
+
+def verify_turnstile_token(token: str, remote_ip: str = None) -> bool:
+    """Verify Cloudflare Turnstile token"""
+    try:
+        # Get secret key from environment
+        secret_key = os.getenv('TURNSTILE_SECRET_KEY')
+        
+        if not secret_key:
+            logger.error("TURNSTILE_SECRET_KEY not configured")
+            return False
+        
+        # Prepare verification request
+        data = {
+            'secret': secret_key,
+            'response': token
+        }
+        
+        if remote_ip:
+            data['remoteip'] = remote_ip
+        
+        # Make verification request to Cloudflare
+        response = requests.post(
+            'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+            data=data,
+            timeout=10
+        )
+        
+        result = response.json()
+        
+        if result.get('success'):
+            logger.info("Turnstile verification successful")
+            return True
+        else:
+            logger.warning(f"Turnstile verification failed: {result.get('error-codes', [])}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Turnstile verification error: {e}")
+        return False
 
 # VVAULT Configuration
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -4465,7 +4329,7 @@ def map_to_vsi_folder(filename: str, construct_id: str = '', metadata: dict = No
             return f'instances/{construct_id}/assets/{base}'
         if ext in DOC_EXTS:
             return f'instances/{construct_id}/documents/{base}'
-        return f'instances/{construct_id}/documents/{base}'
+        return f'instances/{construct_id}/{base}'
     
     if base == 'profile.json':
         return f'account/{base}'
@@ -4492,8 +4356,6 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
     
     transformed = []
     for f in _dedupe_vault_rows(files):
-        if row_is_projection_excluded(f):
-            continue
         if f.get('is_system') and not is_admin:
             continue
         
@@ -4555,14 +4417,43 @@ def _filter_transformed_vault_files_for_path(files: List[Dict[str, Any]], reques
 
 @app.route("/api/vault/session-bridge", methods=["POST", "OPTIONS"])
 def session_bridge_from_standalone_auth():
-    """Permanently retired legacy bridge."""
+    """Mint a Flask vault Bearer token from a valid standalone @auth HttpOnly cookie."""
     if request.method == "OPTIONS":
         return ("", 204)
+    secret = (os.environ.get("AUTH_SESSION_SECRET") or "").strip()
+    if not secret:
+        return jsonify({"success": False, "error": "Session bridge is not configured (AUTH_SESSION_SECRET)"}), 503
+    cookie_name = (os.environ.get("AUTH_COOKIE_NAME") or "auth_sid").strip()
+    raw_cookie = request.cookies.get(cookie_name)
+    if not raw_cookie:
+        return jsonify({"success": False, "error": "No auth session cookie"}), 401
+    payload = verify_standalone_auth_session_token(raw_cookie, secret)
+    if not payload:
+        return jsonify({"success": False, "error": "Invalid or expired auth session"}), 401
+    email = payload.get("email", "").strip().lower()
+    display_name = (payload.get("name") or email.split("@")[0]).strip()
+    try:
+        user_row = _ensure_vvault_user(email, display_name)
+    except Exception:
+        return _auth_repository_unavailable_response("/api/vault/session-bridge")
+    role = user_row.get("role", "user")
+    session_token = secrets.token_urlsafe(32)
+    expires_at = datetime.now() + timedelta(days=90)
+    try:
+        db_create_session(email, role, session_token, expires_at, remember_me=True)
+    except Exception:
+        return _auth_repository_unavailable_response("/api/vault/session-bridge")
+    user_info = {
+        "email": email,
+        "name": user_row.get("name", display_name),
+        "role": role,
+    }
     return jsonify({
-        "success": False,
-        "error": "VVAULT session bridge is disabled; use VVAULT-native enrollment",
-        "errorCode": "VVAULT_NATIVE_SESSION_REQUIRED",
-    }), 403
+        "success": True,
+        "user": user_info,
+        "token": session_token,
+        "expires_at": expires_at.isoformat(),
+    })
 
 
 @app.route('/api/vault/user-info')
@@ -4576,10 +4467,16 @@ def get_vault_user_info():
         user_email = current_user.get('email')
         if not user_email:
             return jsonify({"success": False, "error": "Invalid session"}), 401
-        display_name = current_user.get('name') or user_email.split('@')[0].replace('.', ' ').title()
-        user_id = str(current_user.get('id') or "")
-        role = str(current_user.get('role') or 'user')
-        is_admin = role == 'admin'
+        user_role = current_user.get('role', 'user')
+        local_user = AUTH_REPOSITORY.get_user_by_email(user_email)
+        display_name = (
+            (local_user or {}).get('name')
+            or current_user.get('name')
+            or user_email.split('@')[0].replace('.', ' ').title()
+        )
+        user_id = str((local_user or {}).get('id') or current_user.get('id') or "")
+        role = _resolve_user_role(user_email, local_user=local_user, fallback_user=current_user)
+        is_admin = role == 'admin' or user_role == 'admin'
         
         return jsonify({
             "success": True,
@@ -4621,145 +4518,6 @@ def get_vault_user_info():
             "session_owner": SESSION_OWNER,
         }), 503
 
-@app.route('/api/v1/contracts/life.vvault.data-layout/1.0.0')
-@require_chatty_auth
-def get_canonical_data_contract_v1():
-    """This optional migration API is intentionally unavailable in this release."""
-    return jsonify({
-        "success": False,
-        "error": "canonical data-contract services are not included in this release",
-        "error_code": "VVAULT_CANONICAL_DATA_CONTRACT_UNAVAILABLE",
-    }), 503
-
-
-@app.route('/api/v1/artifacts/<path:artifact_id>')
-@require_chatty_auth
-def get_canonical_artifact_v1(artifact_id: str):
-    return jsonify({"success": False, "error_code": "VVAULT_CANONICAL_DATA_CONTRACT_UNAVAILABLE"}), 503
-    instance_id = (request.args.get("instance_id") or "").strip()
-    owner_user_id = _get_authenticated_user_id()
-    if not owner_user_id:
-        return jsonify({"success": False, "error": "authenticated owner_user_id is required"}), 403
-    payload, status = canonical_data_contract.resolve_artifact(
-        artifact_id=artifact_id,
-        instance_id=instance_id,
-        owner_user_id=owner_user_id,
-    )
-    return jsonify(payload), status
-
-
-@app.route('/api/v1/instances/<instance_id>/manifest')
-@require_chatty_auth
-def get_canonical_instance_manifest_v1(instance_id: str):
-    return jsonify({"success": False, "error_code": "VVAULT_CANONICAL_DATA_CONTRACT_UNAVAILABLE"}), 503
-    owner_user_id = _get_authenticated_user_id()
-    if not owner_user_id:
-        return jsonify({"success": False, "error": "authenticated owner_user_id is required"}), 403
-    payload, status = canonical_data_contract.resolve_manifest(
-        instance_id=instance_id,
-        owner_user_id=owner_user_id,
-    )
-    return jsonify(payload), status
-
-
-@app.route('/api/v1/migrations/canonical-layout/dry-run', methods=['POST'])
-@require_chatty_auth
-def dry_run_canonical_layout_migration_v1():
-    return jsonify({"success": False, "error_code": "VVAULT_CANONICAL_DATA_CONTRACT_UNAVAILABLE"}), 503
-    owner_user_id = _get_authenticated_user_id()
-    if not owner_user_id:
-        return jsonify({"success": False, "error": "authenticated owner_user_id is required"}), 403
-    rows = canonical_data_contract.authenticated_rows(owner_user_id)
-    report = canonical_data_contract.audit_rows(rows)
-    plan = canonical_data_contract.plan_migration(report, rows)
-    return jsonify({
-        "success": True,
-        "canonical": True,
-        "authority": "vvault_body",
-        "storage_owner": "ovvaults.vault_files",
-        "report": report,
-        "migration_plan": plan,
-    })
-
-
-@app.route('/api/v1/migrations/canonical-layout/apply', methods=['POST'])
-@require_role('admin')
-def apply_canonical_layout_migration_v1():
-    return jsonify({"success": False, "error_code": "VVAULT_CANONICAL_DATA_CONTRACT_UNAVAILABLE"}), 503
-    payload = request.get_json(silent=True) or {}
-    operation_ids = {
-        str(value)
-        for value in payload.get("operation_ids", [])
-        if str(value).strip()
-    }
-    if payload.get("handler") != "Devon" or payload.get("confirm") is not True:
-        return jsonify({
-            "success": False,
-            "error": "explicit Devon handler confirmation is required",
-            "error_code": "VVAULT_HANDLER_CONFIRMATION_REQUIRED",
-        }), 403
-    rows = canonical_data_contract.administrative_rows()
-    report = canonical_data_contract.audit_rows(rows)
-    plan = canonical_data_contract.plan_migration(report, rows)
-    if plan["collision_count"]:
-        return jsonify({
-            "success": False,
-            "error": "migration apply is blocked by unresolved canonical collisions",
-            "error_code": "VVAULT_CANONICAL_COLLISIONS_UNRESOLVED",
-            "collision_count": plan["collision_count"],
-            "quarantine": plan["quarantine"],
-        }), 409
-    selected = [
-        operation
-        for operation in plan["operations"]
-        if operation["plan_sha256"] in operation_ids
-    ]
-    if len(selected) != len(operation_ids):
-        return jsonify({
-            "success": False,
-            "error": "one or more operation IDs are absent from the current authenticated dry-run",
-            "error_code": "VVAULT_MIGRATION_PLAN_STALE",
-        }), 409
-    service = canonical_data_contract.CanonicalMigrationService()
-    receipts = [
-        service.apply_operation(operation, actor="Devon")
-        for operation in selected
-    ]
-    return jsonify({
-        "success": True,
-        "migration_id": plan["migration_id"],
-        "receipt_count": len(receipts),
-        "receipts": receipts,
-    })
-
-
-@app.route('/api/v1/migrations/<migration_id>/receipts')
-@require_role('admin')
-def get_canonical_layout_migration_receipts_v1(migration_id: str):
-    receipts = chatty_body_service._rows(
-        """
-        SELECT operation_id, migration_id, contract_version, actor,
-               source_record_id::text AS source_record_id,
-               destination_record_id::text AS destination_record_id,
-               owner_user_id::text AS owner_user_id,
-               instance_id, artifact_id, before_path, after_path,
-               before_sha256, after_sha256, before_schema_version,
-               after_schema_version, result, applied_at, rolled_back_at,
-               rolled_back_by, rollback_receipt, receipt
-        FROM ovvaults.canonical_artifact_migration_receipts
-        WHERE migration_id = %s
-        ORDER BY applied_at, operation_id
-        """,
-        (migration_id,),
-    )
-    return jsonify({
-        "success": True,
-        "migration_id": migration_id,
-        "receipt_count": len(receipts),
-        "receipts": receipts,
-    })
-
-
 @app.route('/api/vault/files')
 @require_auth
 def get_vault_files():
@@ -4775,26 +4533,28 @@ def get_vault_files():
         user_email = current_user.get('email')
         if not user_email:
             return jsonify({"success": False, "error": "Invalid session"}), 401
+        user_role = current_user.get('role', 'user')
+        is_admin = user_role == 'admin'
         requested_path = (request.args.get('path') or '').strip().strip('/')
-
+        
         user_lookup_started_at = time.perf_counter()
         user_id = _get_authenticated_user_id()
         user_lookup_ms = int(round((time.perf_counter() - user_lookup_started_at) * 1000))
         user_name = current_user.get('name') or user_email.split('@')[0]
-
-        if not user_id:
+        
+        if not is_admin and not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
         row_fetch_started_at = time.perf_counter()
         rows = VAULT_FILE_REPOSITORY.list_for_browser(
             user_id=user_id,
-            is_admin=False,
+            is_admin=is_admin,
             requested_path=requested_path,
         )
         row_fetch_ms = int(round((time.perf_counter() - row_fetch_started_at) * 1000))
 
         transform_started_at = time.perf_counter()
-        files = _transform_files_for_display(rows, is_admin=False, user_id=user_id)
+        files = _transform_files_for_display(rows, is_admin=is_admin, user_id=None if is_admin else user_id)
         if requested_path:
             files = _filter_transformed_vault_files_for_path(files, requested_path)
         transform_ms = int(round((time.perf_counter() - transform_started_at) * 1000))
@@ -4803,7 +4563,7 @@ def get_vault_files():
             "VAULT_FILES_LIST path=%s mode=%s admin=%s user_lookup_ms=%s row_fetch_ms=%s transform_ms=%s row_count=%s file_count=%s route_elapsed_ms=%s",
             requested_path or "ALL_FILES",
             "scoped" if requested_path else "all_files",
-            False,
+            is_admin,
             user_lookup_ms,
             row_fetch_ms,
             transform_ms,
@@ -4820,7 +4580,7 @@ def get_vault_files():
             "storage_owner": VAULT_FILE_OWNER,
             "files": files,
             "count": len(files),
-            "user_root": user_name
+            "user_root": user_name if not is_admin else "Vault (Admin)"
         })
     except Exception as e:
         logger.error(f"Error fetching vault files: {e}")
@@ -5279,8 +5039,10 @@ def memup_status():
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
+        user_role = current_user.get('role', 'user')
+        is_admin = user_role == 'admin'
         user_id = _get_authenticated_user_id()
-        if not user_id:
+        if not user_id and not is_admin:
             return jsonify({"success": False, "error": "User not found"}), 403
 
         original_path = _original_capsule_path(construct_id)
@@ -5290,14 +5052,14 @@ def memup_status():
             storage_path=original_path,
             construct_id=construct_id,
             user_id=user_id,
-            is_admin=False,
+            is_admin=is_admin,
         )
         materialized_row = _lookup_exact_vault_preview_row(
             filename=materialized_path,
             storage_path=materialized_path,
             construct_id=construct_id,
             user_id=user_id,
-            is_admin=False,
+            is_admin=is_admin,
         )
 
         def _artifact_summary(row: Optional[Dict[str, Any]], path: str) -> Dict[str, Any]:
@@ -5671,19 +5433,33 @@ def get_vault_file(file_id):
     try:
         current_user = request.current_user
         user_email = current_user.get('email')
-        user_id = _get_authenticated_user_id()
-        if not user_id:
-            return jsonify({"success": False, "error": "User not found"}), 403
+        user_role = current_user.get('role', 'user')
 
-        row = VAULT_FILE_REPOSITORY.get_user_file(file_id=file_id, user_id=user_id)
+        row = VAULT_FILE_REPOSITORY.get_by_id(file_id)
 
         if not row:
             return jsonify({"success": False, "error": "File not found"}), 404
 
+        effective_user_id = row.get('user_id')
+        if user_role != 'admin':
+            user_id = _get_authenticated_user_id()
+
+            file_user_id = row.get('user_id')
+            is_system = row.get('is_system', False)
+
+            if file_user_id is None and not is_system:
+                log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "unassigned_file")
+                return jsonify({"success": False, "error": "Access denied"}), 403
+
+            if file_user_id is not None and file_user_id != user_id:
+                log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "not_owner")
+                return jsonify({"success": False, "error": "Access denied"}), 403
+            effective_user_id = user_id
+
         backing_row = _lookup_materialized_capsule_backing_row(
             row,
-            user_id=user_id,
-            is_admin=False,
+            user_id=effective_user_id,
+            is_admin=user_role == 'admin',
         )
         if backing_row and isinstance(backing_row.get('content'), str) and backing_row.get('content'):
             file_payload = _build_preview_payload_from_materialized_sibling(
@@ -5710,12 +5486,21 @@ def get_vault_file(file_id):
 
 
 def _get_authorized_vault_data_row(file_id):
-    user_id = _get_authenticated_user_id()
-    if not user_id:
-        return None, (jsonify({"success": False, "error": "User not found"}), 403)
-    row = VAULT_FILE_REPOSITORY.get_user_file(file_id=file_id, user_id=user_id)
+    row = VAULT_FILE_REPOSITORY.get_by_id(file_id)
     if not row:
         return None, (jsonify({"success": False, "error": "File not found"}), 404)
+    current_user = request.current_user
+    user_email = current_user.get("email")
+    if current_user.get("role", "user") != "admin":
+        user_id = _get_authenticated_user_id()
+        file_user_id = row.get("user_id")
+        is_system = row.get("is_system", False)
+        if file_user_id is None and not is_system:
+            log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}/data-url", "denied", "unassigned_file")
+            return None, (jsonify({"success": False, "error": "Access denied"}), 403)
+        if file_user_id is not None and file_user_id != user_id:
+            log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}/data-url", "denied", "not_owner")
+            return None, (jsonify({"success": False, "error": "Access denied"}), 403)
     return row, None
 
 
@@ -5758,100 +5543,6 @@ def get_vault_file_data_url(file_id):
         return jsonify({"success": False, "error": str(exc)}), 500
 
 
-@app.route('/api/vault/files/<file_id>/media')
-@require_auth
-def get_vault_file_media(file_id):
-    """Return authenticated, browser-previewable image, PDF, audio, or video bytes."""
-    try:
-        row, error_response = _get_authorized_vault_data_row(file_id)
-        if error_response:
-            return error_response
-        body, mime, unavailable_reason = _media_preview_bytes(row)
-        if unavailable_reason or body is None:
-            return _preview_unavailable_response(row, unavailable_reason or 'missing_content')
-        filename = os.path.basename(row.get('filename') or row.get('storage_path') or 'preview')
-        safe_filename = re.sub(r'[\r\n"\\\\]', '_', filename)
-        response = Response(body, status=200, mimetype=mime)
-        response.headers['Content-Disposition'] = f'inline; filename="{safe_filename}"'
-        response.headers['Content-Length'] = str(len(body))
-        response.headers['Cache-Control'] = 'private, max-age=300'
-        response.headers['X-Content-Type-Options'] = 'nosniff'
-        return response
-    except Exception as exc:
-        logger.error("Error fetching vault media preview: %s", exc)
-        return jsonify({"success": False, "error": str(exc)}), 500
-
-
-@app.route('/api/vault/drive/files/<file_id>/download')
-@require_auth
-def download_vault_drive_file(file_id):
-    """Download exact owner-scoped file bytes without the preview size/type boundary."""
-    try:
-        row, error_response = _get_authorized_vault_data_row(file_id)
-        if error_response:
-            return error_response
-        if row.get("drive_trashed_at"):
-            return jsonify({"success": False, "error": "File is in Trash"}), 409
-        content = row.get("content")
-        metadata = _metadata_to_dict(row.get("metadata"))
-        body = None
-        if isinstance(content, bytes):
-            body = content
-        elif isinstance(content, str):
-            text = content.strip()
-            encoded = re.match(r"^data:[^;,]+;base64,(.+)$", text, re.I | re.S)
-            binary_like = str(row.get("file_type") or "").lower() in {"binary", "image", "pdf", "audio", "video"} or bool(metadata.get("original_size"))
-            if encoded or binary_like:
-                try:
-                    body = base64.b64decode(re.sub(r"\s+", "", encoded.group(1) if encoded else text), validate=True)
-                except (ValueError, TypeError):
-                    body = None
-            if body is None and not binary_like:
-                body = content.encode("utf-8")
-        if body is None:
-            stored = VAULT_FILE_REPOSITORY.load_bytes(row)
-            body = stored[0] if stored else None
-        if body is None:
-            return jsonify({"success": False, "error": "Canonical file bytes are unavailable"}), 409
-        digest = hashlib.sha256(body).hexdigest()
-        expected = str(row.get("sha256") or "").lower()
-        if re.fullmatch(r"[0-9a-f]{64}", expected) and digest != expected:
-            return jsonify({"success": False, "error": "Canonical file hash mismatch", "error_code": "CANONICAL_FILE_HASH_MISMATCH"}), 409
-        filename = os.path.basename(row.get("filename") or row.get("storage_path") or "download")
-        response = Response(body, status=200, content_type=str(row.get("content_type") or "application/octet-stream"))
-        response.headers["Content-Disposition"] = f"attachment; filename=\"{re.sub(r'[\r\n\"\\\\]', '_', filename)}\""
-        response.headers["Content-Length"] = str(len(body))
-        response.headers["ETag"] = f'"{digest}"'
-        response.headers["X-VVAULT-SHA256"] = digest
-        response.headers["Cache-Control"] = "private, no-store"
-        return response
-    except Exception as exc:
-        logger.error("VVAULT Drive download failed: %s", exc)
-        return jsonify({"success": False, "error": "Download failed", "error_code": type(exc).__name__}), 503
-
-
-@app.route('/api/vault/files/<file_id>/archive')
-@require_auth
-def get_vault_file_archive_preview(file_id):
-    """Return an authenticated, bounded listing for a ZIP archive."""
-    try:
-        row, error_response = _get_authorized_vault_data_row(file_id)
-        if error_response:
-            return error_response
-        preview, unavailable_reason = _archive_preview(row)
-        if unavailable_reason or preview is None:
-            return _preview_unavailable_response(row, unavailable_reason or 'missing_content')
-        return jsonify({
-            'success': True,
-            'file_id': row.get('id'),
-            'filename': row.get('filename'),
-            **preview,
-        })
-    except Exception as exc:
-        logger.error("Error building vault archive preview: %s", exc)
-        return jsonify({"success": False, "error": str(exc)}), 500
-
-
 @app.route('/api/vault/files/preview', methods=['POST'])
 @require_auth
 def preview_vault_file():
@@ -5860,6 +5551,7 @@ def preview_vault_file():
     try:
         current_user = request.current_user
         user_email = current_user.get('email')
+        user_role = current_user.get('role', 'user')
         payload = request.get_json(silent=True) or {}
         filename = str(payload.get('filename') or payload.get('storage_path') or '').strip()
         storage_path = str(payload.get('storage_path') or filename).strip()
@@ -5871,9 +5563,11 @@ def preview_vault_file():
         if not filename:
             return jsonify({"success": False, "error": "filename is required"}), 400
 
-        effective_user_id = _get_authenticated_user_id()
-        if not effective_user_id:
-            return jsonify({"success": False, "error": "User not found"}), 403
+        effective_user_id = payload.get('user_id')
+        if user_role != 'admin':
+            effective_user_id = _get_authenticated_user_id()
+            if not effective_user_id:
+                return jsonify({"success": False, "error": "User not found"}), 403
 
         pseudo_row = {
             'id': payload.get('id'),
@@ -5898,7 +5592,7 @@ def preview_vault_file():
                 storage_path=storage_path,
                 construct_id=construct_id,
                 user_id=effective_user_id,
-                is_admin=False,
+                is_admin=user_role == 'admin',
             )
             requested_row = dict(matched_row or {})
             for key, value in pseudo_row.items():
@@ -5908,7 +5602,7 @@ def preview_vault_file():
             backing_row = _lookup_materialized_capsule_backing_row(
                 requested_row,
                 user_id=effective_user_id,
-                is_admin=False,
+                is_admin=user_role == 'admin',
             )
             if backing_row and isinstance(backing_row.get('content'), str) and backing_row.get('content'):
                 file_payload = _build_preview_payload_from_materialized_sibling(
@@ -7259,23 +6953,6 @@ def update_construct_editor(construct_id):
 # END SERVICE API ENDPOINTS
 # ============================================================================
 
-def _chatty_construct_actor_user_id(callsign: str) -> tuple[str | None, tuple[dict[str, Any], int] | None]:
-    """Resolve the owner solely from the validated request session/assertion."""
-    current_user = getattr(request, "current_user", None) or {}
-    if not current_user:
-        return None, ({"success": False, "error": "Authentication required"}, 401)
-    user_id = _get_authenticated_user_id()
-    if not user_id:
-        return None, ({"success": False, "error": "User not found"}, 403)
-    normalized_callsign = _normalize_callsign(callsign)
-    if not _construct_is_projectable_cached(user_id, normalized_callsign):
-        return None, ({
-            "success": False,
-            "error": "Construct not found",
-            "error_code": "VVAULT_CONSTRUCT_NOT_PROJECTABLE",
-        }, 404)
-    return user_id, None
-
 @app.route('/api/chatty/transcript/<construct_id>')
 @require_chatty_auth
 def get_chatty_transcript(construct_id):
@@ -7285,14 +6962,7 @@ def get_chatty_transcript(construct_id):
     Returns the chat_with_zen-001.md content from the vault
     """
     try:
-        actor_user_id, actor_error = _chatty_construct_actor_user_id(construct_id)
-        if actor_error:
-            return jsonify(actor_error[0]), actor_error[1]
-        body_payload, body_status = chatty_body_service.transcript_body(
-            construct_id,
-            max_chars=request.args.get('maxChars', type=int),
-            owner_user_id=actor_user_id,
-        ).to_response()
+        body_payload, body_status = chatty_body_service.transcript_body(construct_id).to_response()
         return jsonify(body_payload), body_status
         enforce_pocketverse_authority(construct_id, _pocketverse_request_context())
         current_user = request.current_user
@@ -7378,13 +7048,8 @@ def update_chatty_transcript(construct_id):
     POST body: { "content": "full markdown content" }
     """
     try:
-        actor_user_id, actor_error = _chatty_construct_actor_user_id(construct_id)
-        if actor_error:
-            return jsonify(actor_error[0]), actor_error[1]
         data = request.get_json(silent=True) or {}
-        body_payload, body_status = chatty_body_service.update_transcript_body(
-            construct_id, data, owner_user_id=actor_user_id,
-        ).to_response()
+        body_payload, body_status = chatty_body_service.update_transcript_body(construct_id, data).to_response()
         return jsonify(body_payload), body_status
         if construct_id == 'zen-001' and _is_runtime_lock_active():
             return _runtime_lock_deferred_response(construct_id, 'transcript_update')
@@ -8759,6 +8424,7 @@ def get_security_summary():
             "denial_rate": round(denied / total * 100, 2) if total > 0 else 0,
             "unique_users": len(unique_users),
             "anonymous_attempts": anonymous_attempts,
+            "active_sessions": len(ACTIVE_SESSIONS)
         }
     })
 
@@ -8794,15 +8460,132 @@ def get_config():
         "door_contract": door,
     })
 
+def _credential_login_unavailable_message(auth_provider: Optional[str]) -> str:
+    """Parity with @quantum/auth — OAuth-only accounts should not get a generic invalid-password dead end."""
+    p = (auth_provider or '').strip().lower()
+    if p == 'google':
+        return 'This account uses Google sign-in. Use the Google button to continue.'
+    if p == 'github':
+        return 'This account uses GitHub sign-in. Use the GitHub button to continue.'
+    return 'This account does not use email and password. Sign in with your linked sign-in provider.'
+
+
+def _life_registry_match_vvault_message_chatty_credentials() -> str:
+    return (
+        'This account uses LIFE email sign-in (Chatty/Code). Sign in there, or complete VVAULT sign-up to add a vault password.'
+    )
+
+
+def _life_registry_match_vvault_message_generic() -> str:
+    return (
+        'This email was found in the LIFE Technology user registry. Finish VVAULT sign-up below and your account will be connected.'
+    )
+
+
 # Authentication endpoints
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """Permanently retired password login endpoint."""
-    return jsonify({
-        "success": False,
-        "error": "Password login is disabled; use VVAULT-native OIDC enrollment",
-        "errorCode": "PASSWORD_AUTH_RETIRED",
-    }), 403
+    """User login endpoint (database-backed)"""
+    if _rate_limit_key("auth"):
+        return jsonify({"success": False, "error": "rate_limit_exceeded"}), 429
+    try:
+        data = request.get_json()
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
+        ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        
+        if not email or not password:
+            log_auth_decision("login_attempt", email or "unknown", "/api/auth/login", "denied", "missing_credentials", ip)
+            return jsonify({"success": False, "error": "Email and password are required"}), 400
+
+        if not _auth_repository_ready():
+            log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "auth_repository_unavailable", ip)
+            return _auth_repository_unavailable_response("/api/auth/login")
+        
+        user_data = db_get_user(email)
+        
+        if not user_data:
+            log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "user_not_found", ip)
+            return jsonify({"success": False, "error": "Invalid email or password"}), 401
+
+        password_hash = user_data.get('password_hash')
+        has_vvault_pw = bool(password_hash and password_hash != vvault_auth_repository.OAUTH_DISABLED_PASSWORD_HASH)
+        has_chatty_pw = bool(user_data.get('auth_password_hash'))
+        auth_prov = (user_data.get('auth_provider') or '').strip().lower()
+
+        if not has_vvault_pw and not user_data.get('password'):
+            if auth_prov in ('google', 'github'):
+                msg = _credential_login_unavailable_message(auth_prov)
+                log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "oauth_only_account", ip)
+                payload = {
+                    "success": False,
+                    "error": msg,
+                    "oauthOnly": True,
+                    "credentialLoginUnavailable": True,
+                }
+                if auth_prov:
+                    payload["authProvider"] = auth_prov
+                return jsonify(payload), 401
+            if has_chatty_pw:
+                log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "chatty_credentials_only", ip)
+                return jsonify({
+                    "success": False,
+                    "error": _life_registry_match_vvault_message_chatty_credentials(),
+                    "lifeRegistryMatch": True,
+                }), 401
+            log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "no_password_on_record", ip)
+            return jsonify({
+                "success": False,
+                "error": _life_registry_match_vvault_message_generic(),
+                "lifeRegistryMatch": True,
+            }), 401
+        
+        password_valid = False
+        if has_vvault_pw:
+            try:
+                password_valid = bcrypt.checkpw(password.encode('utf-8'), user_data['password_hash'].encode('utf-8'))
+            except Exception:
+                password_valid = (user_data.get('password_hash') == password)
+        elif user_data.get('password'):
+            password_valid = (user_data['password'] == password)
+        
+        if not password_valid:
+            log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "invalid_password", ip)
+            return jsonify({"success": False, "error": "Invalid email or password"}), 401
+        
+        session_token = secrets.token_urlsafe(32)
+        remember_me = data.get('rememberMe', False)
+        if remember_me:
+            expires_at = datetime.now() + timedelta(days=90)
+        else:
+            expires_at = datetime.now() + timedelta(days=30)
+        role = user_data.get('role', 'user')
+        
+        try:
+            db_create_session(email, role, session_token, expires_at, remember_me=remember_me)
+        except Exception:
+            log_auth_decision("login_attempt", email, "/api/auth/login", "denied", "session_persist_failed", ip)
+            return _auth_repository_unavailable_response("/api/auth/login")
+        
+        user_info = {
+            'email': email,
+            'name': user_data.get('name', email.split('@')[0]),
+            'role': role
+        }
+        
+        log_auth_decision("login_success", email, "/api/auth/login", "allowed", "credentials_valid", ip)
+        logger.info(f"User logged in: {email}")
+        
+        return jsonify({
+            "success": True,
+            "user": user_info,
+            "token": session_token,
+            "expires_at": expires_at.isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"Login error: {e}")
+        return jsonify({"success": False, "error": "Login failed"}), 500
 
 @app.route('/api/auth/glyph-preview', methods=['POST'])
 def glyph_preview():
@@ -8848,12 +8631,140 @@ def glyph_preview():
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
-    """Permanently retired password registration endpoint."""
-    return jsonify({
-        "success": False,
-        "error": "Password registration is disabled; an enrollment invitation is required",
-        "errorCode": "PASSWORD_AUTH_RETIRED",
-    }), 403
+    """User registration endpoint with bcrypt password hashing and VVAULT-native storage."""
+    if _rate_limit_key("auth"):
+        return jsonify({"success": False, "error": "rate_limit_exceeded"}), 429
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    try:
+        glyph_color_hex = '#722F37'
+        glyph_center_image_bytes = None
+
+        if request.content_type and 'multipart' in request.content_type:
+            data = {}
+            data['email'] = request.form.get('email', '')
+            data['password'] = request.form.get('password', '')
+            data['confirmPassword'] = request.form.get('confirmPassword', '')
+            data['name'] = request.form.get('name', '')
+            data['turnstileToken'] = request.form.get('turnstileToken', '')
+            glyph_color_hex = request.form.get('glyphColorHex', '#722F37')
+            if 'glyphCenterImage' in request.files:
+                f = request.files['glyphCenterImage']
+                if f and f.filename:
+                    glyph_center_image_bytes = f.read()
+        else:
+            data = request.get_json() or {}
+            glyph_color_hex = data.get('glyphColorHex', '#722F37')
+
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
+        confirm_password = data.get('confirmPassword', '')
+        name = data.get('name', '').strip()
+        turnstile_token = data.get('turnstileToken', '')
+        
+        if not email or not password or not confirm_password or not name:
+            log_auth_decision('registration_failed', 'anonymous', '/api/auth/register', 'denied', 'missing_fields', ip)
+            return jsonify({"success": False, "error": "All fields are required"}), 400
+        
+        if '@' not in email or '.' not in email.split('@')[1]:
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'invalid_email', ip)
+            return jsonify({"success": False, "error": "Invalid email format"}), 400
+        
+        if password != confirm_password:
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'password_mismatch', ip)
+            return jsonify({"success": False, "error": "Passwords do not match"}), 400
+        
+        if len(password) < 8:
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'weak_password', ip)
+            return jsonify({"success": False, "error": "Password must be at least 8 characters"}), 400
+
+        if not _auth_repository_ready():
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'auth_repository_unavailable', ip)
+            return _auth_repository_unavailable_response("/api/auth/register")
+        
+        existing_user = db_get_user(email)
+        if existing_user:
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'user_exists', ip)
+            return jsonify({"success": False, "error": "User already exists"}), 409
+        
+        if not verify_turnstile_token(turnstile_token, request.remote_addr):
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'turnstile_failed', ip)
+            return jsonify({"success": False, "error": "Human verification failed. Please try again."}), 400
+        
+        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        try:
+            user_row = AUTH_REPOSITORY.create_password_user(
+                email=email,
+                password_hash=password_hash,
+                name=name,
+                role='user',
+            )
+            new_user_id = str(user_row.get('id')) if user_row else None
+            logger.info(f"User registered in VVAULT auth DB: {email}")
+        except Exception as exc:
+            logger.warning(f"Failed to register in VVAULT auth DB for {email}: {type(exc).__name__}")
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'auth_user_persist_failed', ip)
+            return _auth_repository_unavailable_response("/api/auth/register")
+        
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now() + timedelta(days=30)
+        try:
+            db_create_session(email, 'user', token, expires_at)
+        except Exception:
+            log_auth_decision('registration_failed', email, '/api/auth/register', 'denied', 'session_persist_failed', ip)
+            return _auth_repository_unavailable_response("/api/auth/register")
+
+        glyph_data = None
+        try:
+            import sys as _sys
+            _sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+            from glyph_generator import generate_glyph_to_bytes
+            glyph_identity = f"{name}_{int(datetime.now().timestamp() * 1000)}"
+            glyph_bytes, glyph_number_rows = generate_glyph_to_bytes(
+                glyph_identity, glyph_color_hex, glyph_center_image_bytes
+            )
+            import base64 as b64mod
+            glyph_b64 = b64mod.b64encode(glyph_bytes).decode('utf-8')
+            glyph_sha = hashlib.sha256(glyph_bytes).hexdigest()
+            glyph_filename = f"{glyph_identity}_glyph.png"
+            glyph_meta = {
+                'user_email': email,
+                'provider': 'vvault_registration',
+                'folder': 'account',
+                'glyph_number_rows': glyph_number_rows,
+                'color_hex': glyph_color_hex,
+                'type': 'user_glyph',
+            }
+            glyph_data = {
+                'glyph_base64': glyph_b64,
+                'number_rows': glyph_number_rows,
+                'color_hex': glyph_color_hex,
+                'sha256': glyph_sha,
+                'filename': glyph_filename,
+                'metadata': glyph_meta,
+            }
+        except Exception as ge:
+            logger.warning(f"User glyph generation failed (non-fatal): {ge}")
+
+        user_data = {'email': email, 'name': name, 'role': 'user'}
+        log_auth_decision('registration_success', email, '/api/auth/register', 'allowed', 'user_created', ip)
+        logger.info(f"New user registered: {email}")
+        
+        resp = {
+            "success": True,
+            "user": user_data,
+            "token": token,
+            "expires_at": expires_at.isoformat(),
+            "message": "Registration successful"
+        }
+        if glyph_data:
+            resp['glyph'] = glyph_data
+        return jsonify(resp)
+        
+    except Exception as e:
+        logger.error(f"Registration error: {e}")
+        log_auth_decision('registration_error', 'unknown', '/api/auth/register', 'denied', str(e), ip)
+        return jsonify({"success": False, "error": "Registration failed"}), 500
 
 @app.route('/api/auth/logout', methods=['POST'])
 def logout():
@@ -8861,28 +8772,18 @@ def logout():
     try:
         auth_header = request.headers.get('Authorization')
         ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        bearer_token = (
-            auth_header.split(' ', 1)[1].strip()
-            if auth_header and auth_header.startswith('Bearer ')
-            else ''
-        )
-        cookie_token = str(request.cookies.get('vvault_session') or '')
-        for token in {bearer_token, cookie_token} - {''}:
+        
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
             session = db_get_session(token)
-            AUTH_REPOSITORY.revoke_session_by_hash(_session_token_hash(token))
+            
             if session:
                 user_email = session['email']
+                db_delete_session(token)
                 log_auth_decision("logout", user_email, "/api/auth/logout", "allowed", "session_terminated", ip)
                 logger.info(f"User logged out: {user_email}")
-        pending_token = str(request.cookies.get('vvault_pending_session') or '')
-        if pending_token:
-            AUTH_REPOSITORY.revoke_session_by_hash(_session_token_hash(pending_token))
         
-        response = jsonify({"success": True, "message": "Logged out successfully"})
-        response.delete_cookie('vvault_session', path='/')
-        response.delete_cookie('vvault_pending_session', path='/')
-        response.delete_cookie('vvault_pending_device', path='/')
-        return response
+        return jsonify({"success": True, "message": "Logged out successfully"})
         
     except Exception as e:
         logger.error(f"Logout error: {e}")
@@ -8892,20 +8793,29 @@ def logout():
 def verify_token():
     """Verify authentication token (database-backed)"""
     try:
-        session, _token = get_current_user()
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"success": False, "error": "No token provided"}), 401
+        
+        token = auth_header.split(' ')[1]
+        
+        session = db_get_session(token)
         if not session:
             return jsonify({"success": False, "error": "Invalid or expired token"}), 401
         
         email = session['email']
+        user_data = db_get_user(email)
+        
         user_info = {
             'email': email,
-            'name': session.get('name') or email.split('@')[0],
+            'name': user_data.get('name', email.split('@')[0]) if user_data else email.split('@')[0],
             'role': session.get('role', 'user')
         }
         
         return jsonify({
             "success": True,
             "user": user_info,
+            "token": token
         })
         
     except Exception as e:
@@ -9218,22 +9128,184 @@ def get_construct_memories(construct_id):
             "query_terms": ["remember", "drawing", "picture"]
         }
     """
-    actor_user_id, actor_error = _chatty_construct_actor_user_id(construct_id)
-    if actor_error:
-        return jsonify(actor_error[0]), actor_error[1]
-
     try:
-        max_chars = request.args.get('maxChars', type=int)
-        query = request.args.get('q', type=str)
-        limit = request.args.get('limit', default=10, type=int)
-        body_payload, body_status = chatty_body_service.memories(
-            construct_id,
-            owner_user_id=actor_user_id,
-            max_chars=max_chars,
-            query=query,
-            limit=limit,
-        ).to_response()
+        body_payload, body_status = chatty_body_service.memories(construct_id).to_response()
         return jsonify(body_payload), body_status
+        
+        callsign = _normalize_callsign(construct_id)
+        bare_name = _bare_name_from_callsign(callsign)
+        query = request.args.get('q', '')
+        limit = int(request.args.get('limit', '10'))
+        include_boundaries = request.args.get('include_boundaries', 'true').lower() == 'true'
+        output_format = request.args.get('format', 'rich')
+        is_chrono = _is_chronological_query(query) if query else False
+        
+        query_terms = _clean_query(query) if query else []
+        
+        ledger_sessions = None
+        try:
+            ledger_result = legacy_remote_client.table('vault_files').select(
+                'content'
+            ).eq('filename', f'{callsign}_continuity_ledger.json').eq(
+                'construct_id', callsign
+            ).execute()
+            if ledger_result.data and ledger_result.data[0].get('content'):
+                ledger_sessions = json.loads(ledger_result.data[0]['content'])
+                logger.info(f"[Memory API] Using stored ledger for {callsign}: {len(ledger_sessions)} sessions")
+        except Exception as ledger_err:
+            logger.debug(f"[Memory API] No ledger available for {callsign}, using raw transcripts: {ledger_err}")
+        
+        transcript_files = _get_transcript_files(callsign, bare_name)
+        
+        if not transcript_files:
+            return jsonify({
+                "success": True,
+                "construct_id": callsign,
+                "memories": [],
+                "total_pairs": 0,
+                "transcript_files": 0,
+                "chronological": is_chrono,
+                "query_terms": query_terms
+            })
+        
+        transcript_files.sort(key=lambda f: len(f.get('content', '')))
+        
+        all_pairs = []
+        file_sources = {}
+        total_files = len(transcript_files)
+        
+        for file_idx, tf in enumerate(transcript_files):
+            content = tf.get('content', '')
+            fname = tf.get('filename', '')
+            source_label = _detect_source_label(fname)
+            
+            pairs = _parse_transcript_pairs(content, callsign)
+            
+            if len(pairs) > MAX_PAIRS_PER_FILE:
+                keep_start = pairs[:10]
+                keep_end = pairs[-10:]
+                middle = pairs[10:-10]
+                step = max(1, len(middle) // (MAX_PAIRS_PER_FILE - 20))
+                keep_middle = [middle[i] for i in range(0, len(middle), step)]
+                pairs = keep_start + keep_middle + keep_end
+            
+            for p in pairs:
+                p['source'] = source_label
+                p['file_index'] = file_idx
+                file_sources[file_idx] = source_label
+            all_pairs.extend(pairs)
+        
+        for i, p in enumerate(all_pairs):
+            p['index'] = i
+        
+        total_pairs = len(all_pairs)
+        logger.info(f"[Memory API] {callsign}: {total_pairs} pairs from {total_files} files, query_terms={query_terms}")
+        
+        memories = []
+        
+        if include_boundaries or is_chrono:
+            if total_pairs > 0:
+                first = all_pairs[0].copy()
+                first['tag'] = 'first_exchange'
+                first['score'] = 100.0
+                memories.append(first)
+                
+                if total_pairs > 1:
+                    last = all_pairs[-1].copy()
+                    last['tag'] = 'last_exchange'
+                    last['score'] = 99.0
+                    memories.append(last)
+        
+        if query:
+            scored = []
+            boundary_indices = {0, total_pairs - 1} if include_boundaries else set()
+            for pair in all_pairs:
+                if pair['index'] in boundary_indices:
+                    continue
+                pair_copy = pair.copy()
+                pair_copy['score'] = _score_memory_pair(
+                    pair, query, query_terms, total_pairs,
+                    pair.get('file_index', 0), total_files
+                )
+                pair_copy['tag'] = None
+                scored.append(pair_copy)
+            scored.sort(key=lambda x: x['score'], reverse=True)
+            remaining = limit - len(memories)
+            memories.extend(scored[:max(0, remaining)])
+        elif not is_chrono:
+            step = max(1, total_pairs // limit) if total_pairs > limit else 1
+            boundary_indices = {0, total_pairs - 1} if include_boundaries else set()
+            sampled = [p for i, p in enumerate(all_pairs) if i not in boundary_indices and i % step == 0]
+            remaining = limit - len(memories)
+            for p in sampled[:max(0, remaining)]:
+                p_copy = p.copy()
+                p_copy['score'] = 1.0
+                p_copy['tag'] = None
+                memories.append(p_copy)
+        
+        if output_format == 'rich':
+            for mem in memories:
+                combined_text = mem.get('user', '') + ' ' + mem.get('construct', '')
+                mem['tone'] = _detect_tone(combined_text)
+                
+                idx = mem.get('index', 0)
+                if idx < total_pairs * 0.15:
+                    mem['position'] = 'early'
+                elif idx > total_pairs * 0.85:
+                    mem['position'] = 'recent'
+                else:
+                    mem['position'] = 'middle'
+                
+                source = mem.get('source', 'Conversation')
+                tag = mem.get('tag')
+                position = mem.get('position', 'middle')
+                if tag == 'first_exchange':
+                    mem['context_hint'] = f'From your earliest conversations on {source}'
+                elif tag == 'last_exchange':
+                    mem['context_hint'] = f'From your most recent exchange on {source}'
+                elif position == 'early':
+                    mem['context_hint'] = f'From early in your {source} conversations'
+                elif position == 'recent':
+                    mem['context_hint'] = f'From a recent {source} conversation'
+                else:
+                    mem['context_hint'] = f'From a {source} conversation'
+                
+                mem.pop('file_index', None)
+                
+                if ledger_sessions:
+                    _enrich_memory_from_ledger(mem, ledger_sessions)
+        else:
+            for mem in memories:
+                mem.pop('file_index', None)
+                mem.pop('source', None)
+        
+        response_data = {
+            "success": True,
+            "construct_id": callsign,
+            "memories": memories,
+            "total_pairs": total_pairs,
+            "transcript_files": total_files,
+            "chronological": is_chrono,
+            "query_terms": query_terms,
+            "ledger_available": ledger_sessions is not None,
+        }
+        
+        if ledger_sessions and output_format == 'rich':
+            all_hooks = []
+            seen_hook_types = set()
+            for session in ledger_sessions:
+                for hook in session.get('continuity_hooks', []):
+                    if hook.get('type') not in seen_hook_types:
+                        all_hooks.append(hook)
+                        seen_hook_types.add(hook.get('type'))
+            response_data['continuity_hooks'] = all_hooks[:10]
+            
+            dates = [s.get('estimated_date', '') for s in ledger_sessions if s.get('estimated_date')]
+            if dates:
+                response_data['date_range'] = {'earliest': min(dates), 'latest': max(dates)}
+        
+        return jsonify(response_data)
+        
     except Exception as e:
         logger.error(f"[Memory API] Error for {construct_id}: {e}")
         import traceback
@@ -9243,12 +9315,12 @@ def get_construct_memories(construct_id):
 
 # ─── Continuity Ledger API ───────────────────────────────────────────────────
 
-def _get_transcript_files(callsign: str, bare_name: str, *, user_id: str) -> List[Dict]:
+def _get_transcript_files(callsign: str, bare_name: str) -> List[Dict]:
     """Fetch transcript files from VVAULT-native vault_files for a construct."""
     rows = VAULT_FILE_REPOSITORY.list_construct_file_rows(
         callsign=callsign,
         bare_name=bare_name,
-        user_id=user_id,
+        user_id=None,
         include_content=True,
     )
     transcript_keywords = ['transcript', 'character_ai', 'chatgpt', 'chat_with_', 'conversation', 'chat']
@@ -9289,18 +9361,14 @@ def generate_construct_ledger(construct_id):
     """
     try:
         callsign = _normalize_callsign(construct_id)
-        actor_user_id, actor_error = _chatty_construct_actor_user_id(callsign)
-        if actor_error:
-            return jsonify(actor_error[0]), actor_error[1]
-
         bare_name = _bare_name_from_callsign(callsign)
         include_exchanges = request.args.get('include_exchanges', 'false').lower() == 'true'
         output_format = request.args.get('format', 'json')
-        user_id = actor_user_id or _get_authenticated_user_id()
+        user_id = _get_authenticated_user_id() or _resolve_construct_owner_user_id(callsign)
         if not user_id:
             return jsonify({"success": False, "error": "Construct owner not found"}), 403
 
-        transcript_files = _get_transcript_files(callsign, bare_name, user_id=user_id)
+        transcript_files = _get_transcript_files(callsign, bare_name)
         if not transcript_files:
             return jsonify({
                 "success": True,
@@ -9422,10 +9490,6 @@ def get_construct_ledger(construct_id):
     """
     try:
         callsign = _normalize_callsign(construct_id)
-        actor_user_id, actor_error = _chatty_construct_actor_user_id(callsign)
-        if actor_error:
-            return jsonify(actor_error[0]), actor_error[1]
-        callsign = _normalize_callsign(construct_id)
         output_format = request.args.get('format', 'json')
 
         if output_format == 'markdown':
@@ -9437,8 +9501,8 @@ def get_construct_ledger(construct_id):
             filename=ledger_filename,
             storage_path=ledger_filename,
             construct_id=callsign,
-            user_id=actor_user_id,
-            is_admin=False,
+            user_id=None,
+            is_admin=True,
         )
 
         if not row:
@@ -9519,351 +9583,10 @@ def google_oauth_health():
 
 
 # Google OAuth Routes
-def _enrollment_secret() -> str:
-    secret = (os.environ.get("VVAULT_ENROLLMENT_HMAC_KEY") or "").strip()
-    if len(secret) < 32:
-        raise RuntimeError("VVAULT_ENROLLMENT_HMAC_KEY must be configured (32+ characters)")
-    return secret
-
-
-def _oauth_transaction_key() -> str:
-    key = (os.environ.get("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY") or "").strip()
-    if not key:
-        raise RuntimeError("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY must be configured")
-    return key
-
-
-def _google_id_token_claims(id_token: str, nonce: str, jwks_uri: str) -> Dict[str, Any]:
-    """Validate the signed ID token; userinfo is never identity authority."""
-    signing_key = jwt.PyJWKClient(jwks_uri, timeout=5).get_signing_key_from_jwt(id_token).key
-    claims = jwt.decode(
-        id_token,
-        signing_key,
-        algorithms=["RS256"],
-        audience=GOOGLE_CLIENT_ID,
-        issuer=["https://accounts.google.com", "accounts.google.com"],
-        options={"require": ["exp", "iat", "aud", "iss", "sub", "nonce"]},
-    )
-    if not hmac.compare_digest(str(claims.get("nonce") or ""), nonce):
-        raise ValueError("Google ID token nonce mismatch")
-    if claims.get("email_verified") is not True or not isinstance(claims.get("email"), str):
-        raise ValueError("Google ID token has no verified email")
-    return claims
-
-
-def _canonical_google_issuer(value: str) -> str:
-    if value in {"accounts.google.com", "https://accounts.google.com"}:
-        return "https://accounts.google.com"
-    raise ValueError("Google issuer is not allowed")
-
-
-def _google_provider_config() -> Dict[str, str]:
-    response = requests.get(GOOGLE_DISCOVERY_URL, timeout=(3.05, 5))
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise ValueError("Google discovery response is invalid")
-    allowed_hosts = {"accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com"}
-    result: Dict[str, str] = {}
-    for key in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
-        value = str(payload.get(key) or "")
-        parsed = urlparse(value)
-        if parsed.scheme != "https" or parsed.hostname not in allowed_hosts:
-            raise ValueError(f"Google discovery {key} is not allowed")
-        result[key] = value
-    return result
-
-
-def _webauthn_relying_party() -> Tuple[str, str]:
-    allowed_origin = str(os.environ.get("VVAULT_WEBAUTHN_ORIGIN") or _get_frontend_url()).rstrip("/")
-    parsed = urlparse(allowed_origin)
-    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
-        raise RuntimeError("VVAULT_WEBAUTHN_ORIGIN is invalid")
-    if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise RuntimeError("WebAuthn requires HTTPS outside localhost")
-    rp_id = str(os.environ.get("VVAULT_WEBAUTHN_RP_ID") or parsed.hostname).strip().lower()
-    if rp_id != parsed.hostname and not parsed.hostname.endswith(f".{rp_id}"):
-        raise RuntimeError("VVAULT_WEBAUTHN_RP_ID does not match the allowed origin")
-    return rp_id, allowed_origin
-
-
-def _pending_session_from_request() -> Optional[Dict[str, Any]]:
-    raw = request.cookies.get("vvault_pending_session") or ""
-    if not raw:
-        return None
-    try:
-        session_data = AUTH_REPOSITORY.get_session_by_hash(_session_token_hash(raw))
-    except Exception:
-        return None
-    if not session_data or session_data.get("session_kind") != "pending":
-        return None
-    if session_data.get("enrollment_status") != vvault_enrollment.PENDING:
-        return None
-    return session_data
-
-
-def _pending_device_session_from_request() -> Optional[Dict[str, Any]]:
-    raw = request.cookies.get("vvault_pending_session") or ""
-    if not raw:
-        return None
-    try:
-        session_data = AUTH_REPOSITORY.get_session_by_hash(_session_token_hash(raw))
-    except Exception:
-        return None
-    if not session_data or session_data.get("session_kind") not in {"pending", "device_pending"}:
-        return None
-    status = session_data.get("enrollment_status")
-    if session_data.get("session_kind") == "pending" and status != vvault_enrollment.PENDING:
-        return None
-    if session_data.get("session_kind") == "device_pending" and status != vvault_enrollment.ACTIVE:
-        return None
-    return session_data
-
-
-def _pending_enrollment_owner() -> Tuple[Optional[Dict[str, Any]], Optional[Any]]:
-    session_data = _pending_session_from_request()
-    if not session_data:
-        return None, (jsonify({"success": False, "error": "Pending enrollment session required"}), 401)
-    return session_data, None
-
-
-@app.route('/api/auth/enrollment/consents', methods=['POST'])
-def accept_enrollment_consents():
-    session_data, error = _pending_enrollment_owner()
-    if error:
-        return error
-    documents = vvault_enrollment.legal_documents(_repo_root)
-    AUTH_REPOSITORY.record_consents(
-        user_id=str(session_data['user_id']), documents=documents,
-        ip_hash=vvault_enrollment.request_evidence(request.remote_addr or '', _enrollment_secret()),
-        user_agent_hash=vvault_enrollment.request_evidence(request.headers.get('User-Agent', ''), _enrollment_secret()),
-    )
-    AUTH_REPOSITORY.record_security_event(user_id=str(session_data['user_id']), event_type='enrollment_consents_accepted', outcome='allowed')
-    return jsonify({"success": True, "documents": documents})
-
-
-@app.route('/api/auth/enrollment/webauthn/challenge', methods=['POST'])
-def create_webauthn_registration_challenge():
-    session_data, error = _pending_enrollment_owner()
-    if error:
-        return error
-    user_id = str(session_data['user_id'])
-    documents = vvault_enrollment.legal_documents(_repo_root)
-    if not AUTH_REPOSITORY.consents_complete(user_id=user_id, documents=documents):
-        return jsonify({"success": False, "error": "Current Terms and Privacy consent is required"}), 409
-    rp_id, allowed_origin = _webauthn_relying_party()
-    challenge = secrets.token_bytes(32)
-    encoded_challenge = vvault_enrollment.b64url_encode(challenge)
-    AUTH_REPOSITORY.create_webauthn_challenge(
-        user_id=user_id,
-        session_id=str(session_data['session_id']),
-        challenge_digest=vvault_enrollment.keyed_digest(encoded_challenge, _enrollment_secret()),
-        purpose='registration',
-        rp_id=rp_id,
-        allowed_origin=allowed_origin,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
-    )
-    return jsonify({
-        "success": True,
-        "publicKey": vvault_enrollment.registration_options(
-            challenge=challenge,
-            user_id=user_id,
-            user_name=str(session_data.get('email') or user_id),
-            rp_id=rp_id,
-        ),
-    })
-
-
-@app.route('/api/auth/enrollment/webauthn/register', methods=['POST'])
-def verify_webauthn_registration():
-    session_data, error = _pending_enrollment_owner()
-    if error:
-        return error
-    credential = request.get_json(silent=True) or {}
-    try:
-        challenge = vvault_enrollment.registration_challenge_from_credential(credential)
-        challenge_digest = vvault_enrollment.keyed_digest(
-            vvault_enrollment.b64url_encode(challenge), _enrollment_secret()
-        )
-        user_id = str(session_data['user_id'])
-        session_id = str(session_data['session_id'])
-        stored = AUTH_REPOSITORY.get_webauthn_challenge(
-            user_id=user_id, session_id=session_id, challenge_digest=challenge_digest,
-        )
-        if not stored:
-            return jsonify({"success": False, "error": "WebAuthn challenge is invalid or expired"}), 400
-        verified = vvault_enrollment.verify_registration_credential(
-            credential,
-            challenge=challenge,
-            rp_id=str(stored['rp_id']),
-            allowed_origin=str(stored['allowed_origin']),
-        )
-        response_data = credential.get('response') if isinstance(credential, dict) else {}
-        transports = response_data.get('transports') if isinstance(response_data, dict) else []
-        if not isinstance(transports, list) or any(not isinstance(value, str) for value in transports):
-            transports = []
-        saved = AUTH_REPOSITORY.consume_webauthn_challenge_and_save_credential(
-            user_id=user_id,
-            session_id=session_id,
-            challenge_digest=challenge_digest,
-            credential_id=str(verified['credential_id']),
-            public_key=bytes(verified['public_key']),
-            sign_count=int(verified['sign_count']),
-            transports=transports,
-            rp_id=str(stored['rp_id']),
-            allowed_origin=str(stored['allowed_origin']),
-        )
-        if not saved:
-            return jsonify({"success": False, "error": "WebAuthn challenge was already consumed"}), 409
-        return jsonify({"success": True, "webauthn_verified": True})
-    except (ValueError, RuntimeError) as exc:
-        logger.warning("WebAuthn registration rejected: %s", type(exc).__name__)
-        return jsonify({"success": False, "error": "WebAuthn registration was rejected"}), 400
-
-
-@app.route('/api/auth/enrollment/recovery-codes', methods=['POST'])
-def create_recovery_codes():
-    session_data, error = _pending_enrollment_owner()
-    if error:
-        return error
-    codes = [secrets.token_urlsafe(12) for _ in range(10)]
-    created = AUTH_REPOSITORY.issue_recovery_codes(
-        user_id=str(session_data['user_id']),
-        digests=[vvault_enrollment.keyed_digest(code, _enrollment_secret()) for code in codes],
-        documents=vvault_enrollment.legal_documents(_repo_root),
-    )
-    if not created:
-        return jsonify({"success": False, "error": "Verified WebAuthn and current consent are required"}), 409
-    # This is the sole response containing recovery material; persistence holds
-    # only keyed digests and audit records intentionally exclude the codes.
-    return jsonify({"success": True, "recovery_codes": codes})
-
-
-@app.route('/api/auth/enrollment/status', methods=['GET'])
-def enrollment_status():
-    pending = _pending_device_session_from_request()
-    if not pending:
-        return jsonify({"success": False, "error": "Pending device session required"}), 401
-    user_id = str(pending['user_id'])
-    progress = AUTH_REPOSITORY.enrollment_progress(user_id)
-    target = next(
-        (device for device in progress.get('devices', []) if str(device.get('id')) == str(pending.get('device_id'))),
-        None,
-    )
-    return jsonify({
-        "success": True,
-        "user_id": user_id,
-        "device_id": str(pending['device_id']),
-        "device_status": str((target or {}).get('status') or 'UNKNOWN'),
-        "enrollment_status": str(pending.get('enrollment_status') or ''),
-        "consents_complete": vvault_enrollment.consent_set_complete(
-            progress.get('consents', []), vvault_enrollment.legal_documents(_repo_root),
-        ),
-        "webauthn_complete": bool(progress.get('mfa')),
-        "recovery_complete": bool(progress.get('recovery')),
-    })
-
-
-@app.route('/api/auth/devices/<device_id>/approve', methods=['POST'])
-@require_auth
-def approve_pending_device(device_id: str):
-    current = getattr(request, 'current_user', None) or {}
-    data = request.get_json(silent=True) or {}
-    target_user_id = str(data.get('target_user_id') or '')
-    if not _is_uuid(target_user_id):
-        return jsonify({"success": False, "error": "target_user_id is required"}), 400
-    if not AUTH_REPOSITORY.approve_pending_device(
-        target_user_id=target_user_id,
-        device_id=device_id,
-        actor_session_id=str(current.get('session_id') or ''),
-    ):
-        return jsonify({"success": False, "error": "Device approval denied"}), 403
-    return jsonify({
-        "success": True, "target_user_id": target_user_id,
-        "device_id": device_id, "status": "TRUSTED",
-    })
-
-
-@app.route('/api/auth/enrollment/devices/<device_id>/approve', methods=['POST'])
-def approve_enrollment_device(device_id: str):
-    pending = _pending_device_session_from_request()
-    if not pending:
-        return jsonify({"success": False, "error": "Pending device session required"}), 401
-    owner_id = str(pending['user_id'])
-    current, _ = get_current_user()
-    device_secret = request.cookies.get('vvault_pending_device') or ''
-    if not device_secret:
-        return jsonify({"success": False, "error": "Pending device evidence required"}), 401
-    normal_token = vvault_enrollment.opaque_token()
-    normal = AUTH_REPOSITORY.approve_device_and_rotate_session(
-        owner_user_id=owner_id,
-        device_id=device_id,
-        pending_session_id=str(pending['session_id']),
-        actor_session_id=str((current or {}).get('session_id') or '') or None,
-        normal_token_hash=_session_token_hash(normal_token),
-        normal_expires_at=datetime.now(timezone.utc) + timedelta(days=30),
-        documents=vvault_enrollment.legal_documents(_repo_root),
-        device_secret_digest=vvault_enrollment.keyed_digest(device_secret, _enrollment_secret()),
-    )
-    if not normal:
-        return jsonify({"success": False, "error": "Trusted-device approval or enrollment gates are incomplete"}), 403
-    response = jsonify({"success": True, "enrollment_status": "ACTIVE"})
-    response.set_cookie(
-        'vvault_session', normal_token, httponly=True, secure=_runtime_is_production(),
-        samesite='Strict', max_age=30 * 24 * 60 * 60, path='/',
-    )
-    response.delete_cookie('vvault_pending_session', path='/')
-    response.delete_cookie('vvault_pending_device', path='/')
-    return response
-
-
-@app.route('/api/auth/devices/<device_id>/revoke', methods=['POST'])
-@require_auth
-def revoke_trusted_device(device_id: str):
-    current = getattr(request, 'current_user', None) or {}
-    if not AUTH_REPOSITORY.revoke_device(
-        device_id=device_id, actor_session_id=str(current.get('session_id') or ''),
-    ):
-        return jsonify({"success": False, "error": "Device revocation denied"}), 403
-    return jsonify({"success": True, "device_id": device_id, "status": "REVOKED"})
-
-
-@app.route('/api/auth/devices/<device_id>/recover', methods=['POST'])
-def recover_pending_device(device_id: str):
-    pending = _pending_device_session_from_request()
-    if not pending:
-        return jsonify({"success": False, "error": "Pending device session required"}), 401
-    payload = request.get_json(silent=True) or {}
-    recovery_code = str(payload.get('recovery_code') or '')
-    device_secret = str(request.cookies.get('vvault_pending_device') or '')
-    if not recovery_code or not device_secret:
-        return jsonify({"success": False, "error": "Recovery and device evidence are required"}), 400
-    normal_token = vvault_enrollment.opaque_token()
-    normal = AUTH_REPOSITORY.recover_device_and_rotate_session(
-        owner_user_id=str(pending['user_id']),
-        device_id=device_id,
-        pending_session_id=str(pending['session_id']),
-        recovery_code_digest=vvault_enrollment.keyed_digest(recovery_code, _enrollment_secret()),
-        device_secret_digest=vvault_enrollment.keyed_digest(device_secret, _enrollment_secret()),
-        normal_token_hash=_session_token_hash(normal_token),
-        normal_expires_at=datetime.now(timezone.utc) + timedelta(days=30),
-    )
-    if not normal:
-        return jsonify({"success": False, "error": "Recovery code is invalid or already used"}), 403
-    response = jsonify({"success": True, "recovered": True})
-    response.set_cookie(
-        'vvault_session', normal_token, httponly=True, secure=_runtime_is_production(),
-        samesite='Strict', max_age=30 * 24 * 60 * 60, path='/',
-    )
-    response.delete_cookie('vvault_pending_session', path='/')
-    response.delete_cookie('vvault_pending_device', path='/')
-    return response
-
-
-def _begin_google_oauth(
-    *, operation: str, link_user_id: str | None = None,
-    link_session_id: str | None = None,
-):
+@app.route('/api/auth/google')
+@app.route('/api/auth/oauth/google')
+def google_oauth_login():
+    """Initiate Google OAuth login"""
     if _rate_limit_key("auth"):
         return jsonify({"success": False, "error": "rate_limit_exceeded"}), 429
     try:
@@ -9871,82 +9594,49 @@ def _begin_google_oauth(
 
         if not google_client or not _google_oauth_ready():
             return jsonify({"success": False, "error": _google_oauth_config_error()}), 500
-        data = request.get_json(silent=True) or request.form.to_dict(flat=True) or {}
-        origin = str(request.headers.get('Origin') or data.get('frontend_origin') or _get_frontend_url())
-        frontend_origin = origin if _allowed_redirect_base(origin) else _get_frontend_url()
+
+        origin = request.headers.get('Origin', '')
+        referer = request.headers.get('Referer', '')
+        fwd_host = request.headers.get('X-Forwarded-Host', '')
+        req_host = request.headers.get('Host', request.host)
+        logger.info(f"OAuth login headers - Origin: {origin}, Referer: {referer}, X-Forwarded-Host: {fwd_host}, Host: {req_host}")
+
+        callback_url = f"{_get_backend_url()}/api/auth/google/callback"
+
+        frontend_origin = origin or ""
+        if not frontend_origin and referer:
+            frontend_origin = referer.split('/api/auth/google')[0].rstrip('/')
+        if not frontend_origin:
+            frontend_origin = _get_frontend_url()
+        if not _allowed_redirect_base(frontend_origin):
+            frontend_origin = _get_frontend_url()
+
         auth_available, auth_state = _oauth_identity_authority_available()
         if not auth_available:
             return _oauth_identity_authority_redirect(frontend_origin, auth_state)
 
-        provider = _google_provider_config()
-        callback_url = f"{_get_backend_url()}/api/auth/google/callback"
-        state = vvault_enrollment.opaque_token()
-        nonce = vvault_enrollment.opaque_token()
-        verifier = vvault_enrollment.opaque_token(48)
-        digest_key = _enrollment_secret()
-        invitation = str(data.get("invitation") or "") if operation == "signin" else ""
-        invitation_digest = vvault_enrollment.keyed_digest(invitation, digest_key) if invitation else None
-        AUTH_REPOSITORY.create_oauth_transaction(
-            state_digest=vvault_enrollment.keyed_digest(state, digest_key),
-            nonce_digest=vvault_enrollment.keyed_digest(nonce, digest_key),
-            nonce_ciphertext=vvault_enrollment.encrypt_transaction_secret(nonce, _oauth_transaction_key()),
-            verifier_digest=vvault_enrollment.keyed_digest(verifier, digest_key),
-            verifier_ciphertext=vvault_enrollment.encrypt_transaction_secret(verifier, _oauth_transaction_key()),
-            redirect_uri=callback_url,
-            invitation_digest=invitation_digest,
-            frontend_origin=frontend_origin,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
-            operation=operation,
-            link_user_id=link_user_id,
-            link_session_id=link_session_id,
-        )
+        # Get Google's OAuth endpoints after identity authority is proven.
+        google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
+        authorization_endpoint = google_provider_cfg["authorization_endpoint"]
+
+        from flask import session as flask_session
+        flask_session['oauth_callback_url'] = callback_url
+        flask_session['oauth_frontend_url'] = frontend_origin
+
+        # Prepare the OAuth request
         request_uri = google_client.prepare_request_uri(
-            provider["authorization_endpoint"],
+            authorization_endpoint,
             redirect_uri=callback_url,
             scope=["openid", "email", "profile"],
             prompt="select_account",
-            state=state,
-            nonce=nonce,
-            code_challenge=vvault_enrollment.pkce_challenge(verifier),
-            code_challenge_method="S256",
         )
+        
+        logger.info(f"Redirecting to Google OAuth with callback: {callback_url}")
         return redirect(request_uri)
-    except Exception as exc:
-        logger.error("Google OAuth initialization failed: %s", type(exc).__name__)
+        
+    except Exception as e:
+        logger.error(f"Google OAuth init error: {e}")
         return jsonify({"success": False, "error": "OAuth initialization failed"}), 500
-
-
-@app.route('/api/auth/google', methods=['POST'])
-@app.route('/api/auth/oauth/google', methods=['POST'])
-def google_oauth_login():
-    """Begin VVAULT-native Google identity verification."""
-    return _begin_google_oauth(operation="signin")
-
-
-@app.route('/api/auth/google', methods=['GET'])
-@app.route('/api/auth/oauth/google', methods=['GET'])
-def reject_google_oauth_query_submission():
-    """Allow browser navigation only when no invitation material is supplied."""
-    if request.args:
-        return jsonify({
-            "success": False,
-            "error": "Invitation material is accepted only in a POST body",
-            "errorCode": "OAUTH_QUERY_INVITATION_FORBIDDEN",
-        }), 405
-    return _begin_google_oauth(operation="signin")
-
-
-@app.route('/api/auth/identity-links/google', methods=['POST'])
-@require_auth
-def begin_google_identity_link():
-    """Begin an explicit link for the currently authenticated ACTIVE account."""
-    current = getattr(request, 'current_user', None) or {}
-    return _begin_google_oauth(
-        operation="link",
-        link_user_id=str(current.get('id') or ''),
-        link_session_id=str(current.get('session_id') or ''),
-    )
-
 
 @app.route('/api/auth/google/callback')
 @app.route('/api/auth/oauth/google/callback')
@@ -9961,35 +9651,38 @@ def google_oauth_callback():
         if not google_client or not _google_oauth_ready():
             return jsonify({"success": False, "error": _google_oauth_config_error()}), 500
         
-        # Consume state before exchange: a repeated callback cannot mint an
-        # account or session, even if the provider code remains valid.
+        # Get the authorization code from Google
         code = request.args.get("code")
-        state = request.args.get("state")
         if not code:
             error = request.args.get("error", "Unknown error")
-            logger.warning("Google OAuth returned an error: %s", str(error)[:64])
-            return jsonify({"success": False, "error": "OAuth authorization failed"}), 400
+            error_desc = request.args.get("error_description", "")
+            logger.error(f"OAuth error: {error} - {error_desc}")
+            return jsonify({"success": False, "error": f"OAuth failed: {error} - {error_desc}"}), 400
         
-        if not state:
-            return jsonify({"success": False, "error": "OAuth state is required"}), 400
-        transaction = AUTH_REPOSITORY.consume_oauth_transaction(
-            vvault_enrollment.keyed_digest(state, _enrollment_secret())
-        )
-        if not transaction:
-            return jsonify({"success": False, "error": "OAuth state is invalid or expired"}), 400
-        callback_url = str(transaction["redirect_uri"])
-        expected_callback_url = f"{_get_backend_url()}/api/auth/google/callback"
-        if not hmac.compare_digest(callback_url, expected_callback_url):
-            raise ValueError("OAuth redirect URI mismatch")
+        from flask import session as flask_session
+        stored_callback = flask_session.pop('oauth_callback_url', None)
+        stored_frontend = flask_session.pop('oauth_frontend_url', None)
+        
+        if stored_callback:
+            callback_url = stored_callback
+        else:
+            callback_url = f"{_get_backend_url()}/api/auth/google/callback"
+        
+        from urllib.parse import urlparse
         parsed = urlparse(callback_url)
-        authorization_response = f"{parsed.scheme}://{parsed.netloc}{request.full_path}"
-        frontend_url = _get_frontend_url(str(transaction["frontend_origin"]))
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        authorization_response = f"{base}{request.full_path}"
+        
+        oauth_origin_base = base
+        candidate_frontend = stored_frontend or oauth_origin_base
+        frontend_url = _get_frontend_url(candidate_frontend) if _allowed_redirect_base(candidate_frontend) else _get_frontend_url()
 
         auth_available, auth_state = _oauth_identity_authority_available()
         if not auth_available:
             return _oauth_identity_authority_redirect(frontend_url, auth_state)
 
-        google_provider_cfg = _google_provider_config()
+        # Get Google's OAuth endpoints after identity authority is proven.
+        google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
         token_endpoint = google_provider_cfg["token_endpoint"]
         
         logger.info(f"Processing OAuth callback with redirect_url: {callback_url}")
@@ -10000,9 +9693,6 @@ def google_oauth_callback():
             authorization_response=authorization_response,
             redirect_url=callback_url,
             code=code,
-            code_verifier=vvault_enrollment.decrypt_transaction_secret(
-                transaction["pkce_verifier_ciphertext"], _oauth_transaction_key()
-            ),
         )
         
         token_response = requests.post(
@@ -10010,77 +9700,74 @@ def google_oauth_callback():
             headers=headers,
             data=body,
             auth=(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET),
-            timeout=(3.05, 5),
         )
 
         if not token_response.ok:
             logger.error(
-                "Google OAuth token exchange failed: status=%s",
+                "Google OAuth token exchange failed: status=%s body=%s",
                 token_response.status_code,
+                token_response.text[:500],
             )
             error_message = quote("Google sign-in failed during token exchange", safe='')
             return redirect(f"{frontend_url}/?oauth_error={error_message}")
 
-        token_payload = token_response.json()
-        id_token = str(token_payload.get("id_token") or "")
-        verifier = vvault_enrollment.decrypt_transaction_secret(
-            transaction["pkce_verifier_ciphertext"], _oauth_transaction_key()
-        )
-        if not vvault_enrollment.safe_compare(verifier, transaction["pkce_verifier_digest"], _enrollment_secret()):
-            raise ValueError("OAuth PKCE verifier integrity failure")
-        # oauthlib builds the request body above; assert it included the only
-        # verifier VVAULT generated before trusting a token response.
-        if "code_verifier=" not in str(body):
-            raise ValueError("OAuth token request omitted PKCE verifier")
-        nonce = vvault_enrollment.decrypt_transaction_secret(transaction["nonce_ciphertext"], _oauth_transaction_key())
-        if not vvault_enrollment.safe_compare(nonce, transaction["nonce_digest"], _enrollment_secret()):
-            raise ValueError("OAuth nonce integrity failure")
-        claims = _google_id_token_claims(id_token, nonce=nonce, jwks_uri=google_provider_cfg["jwks_uri"])
-        issuer = _canonical_google_issuer(str(claims["iss"]))
-        subject = str(claims["sub"])
-        if transaction.get("operation") == "link":
-            linked = AUTH_REPOSITORY.link_oidc_identity(
-                user_id=str(transaction.get("link_user_id") or ""),
-                actor_session_id=str(transaction.get("link_session_id") or ""),
-                issuer=issuer,
-                subject=subject,
+        # Parse the token response
+        google_client.parse_request_body_response(json.dumps(token_response.json()))
+        
+        # Get user info from Google
+        userinfo_endpoint = google_provider_cfg["userinfo_endpoint"]
+        uri, headers, body = google_client.add_token(userinfo_endpoint)
+        userinfo_response = requests.get(uri, headers=headers, data=body)
+        if not userinfo_response.ok:
+            logger.error(
+                "Google OAuth userinfo request failed: status=%s body=%s",
+                userinfo_response.status_code,
+                userinfo_response.text[:500],
             )
-            if not linked:
-                return redirect(f"{frontend_url}/?oauth_error={quote('Identity link denied', safe='')}")
-            return redirect(f"{frontend_url}/?identity_linked=1")
-
-        identity = AUTH_REPOSITORY.get_identity(issuer=issuer, subject=subject)
-        if identity is None:
-            identity = AUTH_REPOSITORY.admit_oidc_identity(
-                issuer=issuer, subject=subject, email=str(claims["email"]),
-                name=str(claims.get("name") or claims["email"]), avatar_url=str(claims.get("picture") or "") or None,
-                invitation_digest=transaction.get("invitation_digest"),
+            error_message = quote("Google sign-in failed while loading account profile", safe='')
+            return redirect(f"{frontend_url}/?oauth_error={error_message}")
+        userinfo = userinfo_response.json()
+        
+        # Verify email
+        if not userinfo.get("email_verified"):
+            return jsonify({"success": False, "error": "Email not verified by Google"}), 400
+        
+        users_email = userinfo["email"]
+        users_name = userinfo.get("given_name", userinfo.get("name", "User"))
+        resolved_role = _resolve_user_role(users_email, fallback_user=USERS_DB_FALLBACK.get(users_email))
+        try:
+            user_row = AUTH_REPOSITORY.upsert_oauth_user(
+                email=users_email,
+                name=users_name,
+                role=resolved_role,
+                oauth_provider="google",
+                oauth_subject=str(userinfo.get("sub") or users_email),
+                avatar_url=userinfo.get("picture"),
             )
-            if identity is None:
-                logger.warning("OIDC admission denied issuer=%s subject_sha256=%s", issuer, hashlib.sha256(subject.encode()).hexdigest())
-                return redirect(f"{frontend_url}/?oauth_error={quote('Enrollment invitation required', safe='')}")
-        device_secret = vvault_enrollment.opaque_token()
-        device = AUTH_REPOSITORY.create_pending_device(
-            user_id=str(identity["id"]), device_digest=vvault_enrollment.keyed_digest(device_secret, _enrollment_secret()),
-            ip_hash=vvault_enrollment.request_evidence(request.remote_addr or "", _enrollment_secret()),
-            user_agent_hash=vvault_enrollment.request_evidence(request.headers.get("User-Agent", ""), _enrollment_secret()),
-        )
-        pending_token = vvault_enrollment.opaque_token()
-        issue_pending = (
-            AUTH_REPOSITORY.issue_device_pending_session
-            if identity.get("enrollment_status") == vvault_enrollment.ACTIVE
-            else AUTH_REPOSITORY.issue_pending_oauth_session
-        )
-        issue_pending(
-            user_id=str(identity["id"]),
-            token_hash=_session_token_hash(pending_token),
-            device_id=str(device["id"]),
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=20),
-        )
-        response = redirect(f"{frontend_url}/?oauth_pending=1")
-        response.set_cookie("vvault_pending_session", pending_token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=20 * 60, path="/")
-        response.set_cookie("vvault_pending_device", device_secret, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=20 * 60, path="/")
-        return response
+            resolved_role = user_row.get("role") or resolved_role
+            logger.info(f"OAuth user persisted in VVAULT auth DB: {users_email} (id={user_row.get('id')})")
+        except Exception as db_err:
+            logger.warning(f"VVAULT auth user upsert failed: {type(db_err).__name__}")
+            error_message = quote("Google sign-in failed while storing VVAULT identity", safe='')
+            return redirect(f"{frontend_url}/?oauth_error={error_message}")
+        
+        session_token = secrets.token_urlsafe(32)
+        expires_at = datetime.now() + timedelta(days=30)
+        
+        try:
+            db_create_session(users_email, resolved_role, session_token, expires_at, remember_me=True)
+        except Exception as session_err:
+            logger.warning(f"VVAULT auth session create failed: {type(session_err).__name__}")
+            error_message = quote("Google sign-in failed while storing VVAULT session", safe='')
+            return redirect(f"{frontend_url}/?oauth_error={error_message}")
+        
+        logger.info(f"Google OAuth login successful: {users_email}")
+        
+        encoded_email = quote(users_email, safe='')
+        encoded_name = quote(users_name, safe='')
+        redirect_url = f"{frontend_url}/?token={session_token}&email={encoded_email}&name={encoded_name}"
+        logger.info(f"Redirecting to: {redirect_url}")
+        return redirect(redirect_url)
         
     except Exception as e:
         logger.exception(f"Google OAuth callback error: {e}")
@@ -10143,33 +9830,6 @@ def main():
         logger.info("Pocketverse boot mode: %s", boot_mode)
         _run_pocketverse_boot(boot_mode)
 
-    chatty_body_service.open_body_database_pool(wait=False)
-    _startup_timings["supervisor_ms"] = 0
-    _load_chatty_vvault_door_contract()
-    runtime_status = _refresh_readiness_snapshot()
-    _startup_timings["database_ready_ms"] = int(
-        (time.perf_counter() - SERVER_STARTED_MONOTONIC) * 1000
-    )
-    projection_warm = _prime_mandatory_projection_caches()
-    _startup_timings["projection_warm_ms"] = int(
-        projection_warm.get("durationMs") or 0
-    )
-    _startup_timings["backend_ready_ms"] = int(
-        (time.perf_counter() - SERVER_STARTED_MONOTONIC) * 1000
-    )
-    _startup_timings["frontend_ready_ms"] = -1
-    _startup_timings["canonical_ready_ms"] = _startup_timings["backend_ready_ms"]
-    logger.info(
-        "[startup] supervisor_ms=%s database_ready_ms=%s backend_ready_ms=%s "
-        "frontend_ready_ms=%s canonical_ready_ms=%s",
-        _startup_timings["supervisor_ms"],
-        _startup_timings["database_ready_ms"],
-        _startup_timings["backend_ready_ms"],
-        _startup_timings["frontend_ready_ms"],
-        _startup_timings["canonical_ready_ms"],
-    )
-    _start_readiness_refresh_worker()
-    _start_provider_transcript_search_backfill_worker()
     runtime_status = _get_vvault_runtime_status()
     body_status = runtime_status.get("body_database", {})
     auth_status = runtime_status.get("auth", {})
