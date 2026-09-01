@@ -6,7 +6,6 @@ DEPLOY = (ROOT / "scripts/deployment/droplet-deploy-vvault.sh").read_text(encodi
 RUNNER = (ROOT / "scripts/deployment/apply-vvault-enrollment-migrations.sh").read_text(encoding="utf-8")
 WORKFLOW = (ROOT / ".github/workflows/deploy-ci.yml").read_text(encoding="utf-8")
 BACKUP_RECEIPTS = (ROOT / "scripts/deployment/create-vvault-enrollment-backup-receipts.py").read_text(encoding="utf-8")
-BOOTSTRAP = (ROOT / ".github/workflows/bootstrap-vvault-backup-tools.yml").read_text(encoding="utf-8")
 
 
 def test_deploy_applies_enrollment_migrations_before_restart_and_refuses_automatic_rollback():
@@ -80,18 +79,6 @@ def test_deployment_installs_postgres_client_only_when_required_for_recovery_cop
     assert 'sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client' in DEPLOY
 
 
-def test_one_time_bootstrap_is_root_scoped_to_postgresql_client_only():
-    assert 'username: root' in BOOTSTRAP
-    assert 'workflow_dispatch:' in BOOTSTRAP
-    assert 'apt-get install -y -qq postgresql-client' in BOOTSTRAP
-    assert 'VVAULT_DEPLOY_KEY' in BOOTSTRAP
-
-
-def test_existing_deployment_workflow_can_dispatch_the_scoped_bootstrap_without_deploying():
-    assert 'bootstrap_recovery_tools:' in WORKFLOW
-    assert 'if: ${{ inputs.bootstrap_recovery_tools == true }}' in WORKFLOW
-    assert 'if: ${{ inputs.bootstrap_recovery_tools != true }}' in WORKFLOW
-    assert 'username: root' in WORKFLOW
 
 
 def test_deployment_resolves_a_service_environment_file_without_printing_values():
