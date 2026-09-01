@@ -117,7 +117,9 @@ ensure_backup_tools() {
     if ! (
       cd "$temporary"
       apt-get download "$client_package" libpq5 >/dev/null
-      dpkg-deb -x ./*.deb "$tool_root"
+      for package in ./*.deb; do
+        dpkg-deb -x "$package" "$tool_root"
+      done
     ); then
       rm -rf "$temporary"
       log "private PostgreSQL client bootstrap failed"

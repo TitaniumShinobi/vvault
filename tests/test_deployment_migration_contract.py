@@ -77,7 +77,8 @@ def test_deployment_creates_private_verified_recovery_receipts_before_migration(
 def test_deployment_installs_postgres_client_only_when_required_for_recovery_copy():
     assert 'command -v pg_dump >/dev/null 2>&1 && command -v pg_restore >/dev/null 2>&1' in DEPLOY
     assert 'apt-get download "$client_package" libpq5' in DEPLOY
-    assert 'dpkg-deb -x ./*.deb "$tool_root"' in DEPLOY
+    assert 'for package in ./*.deb; do' in DEPLOY
+    assert 'dpkg-deb -x "$package" "$tool_root"' in DEPLOY
     assert 'VVAULT_BACKUP_TOOL_ROOT' in DEPLOY
     assert 'sudo apt-get' not in DEPLOY
 
