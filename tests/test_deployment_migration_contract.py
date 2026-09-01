@@ -16,6 +16,15 @@ def test_deploy_applies_enrollment_migrations_before_restart_and_refuses_automat
     assert "forward-only" in DEPLOY
 
 
+def test_production_pushes_restart_backend_only_until_a_full_deploy_is_explicit():
+    assert "DEPLOY_MODE=\"${VVAULT_DEPLOY_MODE:-full}\"" in DEPLOY
+    assert '[[ "$DEPLOY_MODE" == "backend-only" ]]' in DEPLOY
+    assert "frontend and database unchanged" in DEPLOY
+    assert "inputs.operation == 'deploy_backend'" in WORKFLOW
+    assert "inputs.operation == 'deploy_full'" in WORKFLOW
+    assert "default: deploy_backend" in WORKFLOW
+
+
 def test_migration_runner_requires_verified_backup_receipts_and_uses_checksum_ledger():
     for required in (
         "VVAULT_DATABASE_BACKUP_RECEIPT_PATH",

@@ -9,10 +9,11 @@ on:
       operation:
         description: "Tracked production operation"
         required: true
-        default: deploy
+        default: deploy_backend
         type: choice
         options:
-          - deploy
+          - deploy_backend
+          - deploy_full
           - restore_frontend
       frontend_snapshot:
         description: "Required only for restore_frontend; exact /opt/deploy/backups/vvault-YYYYMMDD-HHMMSS snapshot"
@@ -24,15 +25,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    if: github.event_name == 'push' || inputs.operation == 'deploy'
+  deploy-backend:
+    if: github.event_name == 'push' || inputs.operation == 'deploy_backend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VVAULT_DEPLOY_MODE: backend-only
+
+    steps:
+      - name: Restart backend from tracked checkout
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          envs: VVAULT_DEPLOY_MODE
+          script: |
+            repo=/opt/vvault-public
+            git -C "$repo" fetch origin production:refs/remotes/origin/production
+            if [ -n "$(git -C "$repo" status --porcelain --untracked-files=normal)" ]; then
+              echo "refusing deployment: host checkout is dirty"
+              exit 1
+            fi
+            # A clean tracked checkout may be reset safely.  This prevents a
+            # stale host-side deployment script from being executed after a
+            # successful fetch.
+            git -C "$repo" checkout -B production origin/production
+            git -C "$repo" reset --hard origin/production
+            exec "$repo/scripts/deployment/droplet-deploy-vvault.sh"
+
+  deploy-full:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy_full'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       VVAULT_ENROLLMENT_HMAC_KEY: ${{ secrets.VVAULT_ENROLLMENT_HMAC_KEY }}
 
     steps:
-      - name: Deploy to Droplet
+      - name: Deploy full release to Droplet
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 165.245.136.194
@@ -68,19 +98,12 @@ jobs:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
             PY
-            # Do not delegate to an unmanaged host-side trigger.  Refresh the
-            # exact pushed production ref, then run the reviewed repository
-            # deployment contract directly.  That contract fails before any
-            # restart if migration recovery receipts are missing or invalid.
             repo=/opt/vvault-public
             git -C "$repo" fetch origin production:refs/remotes/origin/production
             if [ -n "$(git -C "$repo" status --porcelain --untracked-files=normal)" ]; then
               echo "refusing deployment: host checkout is dirty"
               exit 1
             fi
-            # A clean tracked checkout may be reset safely.  This prevents a
-            # stale host-side deployment script from being executed after a
-            # successful fetch.
             git -C "$repo" checkout -B production origin/production
             git -C "$repo" reset --hard origin/production
             exec "$repo/scripts/deployment/droplet-deploy-vvault.sh"

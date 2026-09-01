@@ -12,6 +12,7 @@ LOCK_FILE="/tmp/vvault-deploy.lock"
 ENV_FILE="${VVAULT_RUNTIME_ENV_FILE:-/opt/vvault-public/.env}"
 EXPECTED_SERVICE_USER="${VVAULT_SERVICE_USER:-vvault}"
 EXPECTED_SERVICE_GROUP="${VVAULT_SERVICE_GROUP:-vvault}"
+DEPLOY_MODE="${VVAULT_DEPLOY_MODE:-full}"
 
 OLD_REF=""
 BACKUP=""
@@ -203,11 +204,27 @@ cd "$REPO"
 }
 verify_runtime_contract
 
+case "$DEPLOY_MODE" in
+  full|backend-only) ;;
+  *) log "unsupported deployment mode"; exit 1 ;;
+esac
+
 OLD_REF="$(git rev-parse HEAD)"
 log "fetching $BRANCH"
 git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
 git checkout -B "$BRANCH" "origin/$BRANCH"
 NEW_REF="$(git rev-parse HEAD)"
+
+if [[ "$DEPLOY_MODE" == "backend-only" ]]; then
+  log "restarting backend from the tracked production checkout (frontend and database unchanged)"
+  RESTART_ATTEMPTED=1
+  sudo systemctl restart "$SERVICE"
+  log "verifying canonical readiness"
+  verify_readiness
+  trap - ERR INT TERM
+  log "backend-only deployment successful: $OLD_REF -> $NEW_REF"
+  exit 0
+fi
 
 log "creating verified database and object-storage recovery receipts"
 ensure_backup_tools

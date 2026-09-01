@@ -10006,6 +10006,12 @@ def begin_canonical_oauth(provider: str):
     return _begin_identity_oauth(provider)
 
 
+@app.route('/api/auth/google', methods=['GET'])
+def begin_legacy_google_compatibility_oauth():
+    """Keep the restored legacy login page on the canonical Google flow."""
+    return _begin_identity_oauth("google")
+
+
 @app.route('/api/auth/reauth/<provider>', methods=['POST'])
 @require_auth
 def begin_canonical_reauth(provider: str):
