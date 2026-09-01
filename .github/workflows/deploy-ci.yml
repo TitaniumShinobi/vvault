@@ -24,6 +24,8 @@ jobs:
           key: ${{ secrets.VVAULT_DEPLOY_KEY }}
           script: |
             set +e
+            command -v setfacl >/dev/null || exit 1
+            setfacl -m u:vvault:r /opt/vvault-public/.env || exit 1
             /opt/deploy/trigger/deploy-trigger.sh vvault
             deploy_status=$?
             stat -c 'vvault-env uid=%u gid=%g mode=%a' /opt/vvault-public/.env || true
