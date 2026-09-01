@@ -106,13 +106,14 @@ ensure_backup_tools() {
   }
   log "bootstrapping a private PostgreSQL client for verified recovery copies"
   if [[ ! -x "$tool_root/usr/bin/pg_dump" || ! -x "$tool_root/usr/bin/pg_restore" ]]; then
-    local temporary client_package
+    local temporary client_package client_major
     temporary="$(mktemp -d "${TMPDIR:-/tmp}/vvault-pg-client.XXXXXX")"
-    client_package="$(apt-cache depends postgresql-client | awk '$1 == "Depends:" && $2 ~ /^postgresql-client-[0-9]+$/ {print $2; exit}')"
-    [[ "$client_package" =~ ^postgresql-client-[0-9]+$ ]] || {
-      log "could not resolve a versioned PostgreSQL client package"
+    client_major="${VVAULT_BACKUP_POSTGRES_MAJOR:-18}"
+    [[ "$client_major" =~ ^[0-9]{2}$ ]] || {
+      log "configured PostgreSQL backup client major is invalid"
       return 1
     }
+    client_package="postgresql-client-$client_major"
     mkdir -p "$tool_root"
     if ! (
       cd "$temporary"
