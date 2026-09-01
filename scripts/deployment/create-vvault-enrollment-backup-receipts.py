@@ -124,6 +124,29 @@ def backup_database(database_url: str, destination: Path) -> None:
         write_pg_service(database_url, service)
         environment = os.environ.copy()
         environment.update({"PGSERVICEFILE": str(service), "PGSERVICE": "vvault_backup"})
+        server_version = subprocess.run(
+            ["psql", "--no-psqlrc", "-X", "-At", "-c", "SHOW server_version_num"],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        client_version = subprocess.run(
+            ["pg_dump", "--version"],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        if server_version.returncode or client_version.returncode:
+            fail("database version preflight failed")
+        server_major = server_version.stdout.strip()[:2]
+        client_match = re.search(r"(\d+)(?:\.\d+)?$", client_version.stdout.strip())
+        client_major = client_match.group(1) if client_match else "unknown"
+        if not server_major.isdigit() or client_major != server_major:
+            fail(f"database PostgreSQL major mismatch: server={server_major or 'unknown'}, client={client_major}")
         run_checked(["pg_dump", "--format=custom", "--file", str(destination)], environment, "pg_dump")
         run_checked(["pg_restore", "--list", str(destination)], environment, "pg_restore")
     if not destination.is_file() or destination.stat().st_size == 0:
