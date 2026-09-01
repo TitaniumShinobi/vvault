@@ -99,15 +99,36 @@ ensure_backup_tools() {
   if command -v pg_dump >/dev/null 2>&1 && command -v pg_restore >/dev/null 2>&1; then
     return 0
   fi
-  command -v apt-get >/dev/null 2>&1 || {
-    log "PostgreSQL client tools are missing and this host has no supported package manager"
+  local tool_root="${VVAULT_BACKUP_TOOL_ROOT:-$BACKUP_ROOT/.tools/postgresql-client}"
+  command -v apt-get >/dev/null 2>&1 && command -v apt-cache >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1 || {
+    log "PostgreSQL client tools are missing and no portable package bootstrap is available"
     return 1
   }
-  log "installing PostgreSQL client tools required for verified recovery copies"
-  sudo apt-get update -qq
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+  log "bootstrapping a private PostgreSQL client for verified recovery copies"
+  if [[ ! -x "$tool_root/usr/bin/pg_dump" || ! -x "$tool_root/usr/bin/pg_restore" ]]; then
+    local temporary client_package
+    temporary="$(mktemp -d "${TMPDIR:-/tmp}/vvault-pg-client.XXXXXX")"
+    client_package="$(apt-cache depends postgresql-client | awk '$1 == "Depends:" && $2 ~ /^postgresql-client-[0-9]+$/ {print $2; exit}')"
+    [[ "$client_package" =~ ^postgresql-client-[0-9]+$ ]] || {
+      log "could not resolve a versioned PostgreSQL client package"
+      return 1
+    }
+    mkdir -p "$tool_root"
+    if ! (
+      cd "$temporary"
+      apt-get download "$client_package" libpq5 >/dev/null
+      dpkg-deb -x ./*.deb "$tool_root"
+    ); then
+      rm -rf "$temporary"
+      log "private PostgreSQL client bootstrap failed"
+      return 1
+    fi
+    rm -rf "$temporary"
+  fi
+  export PATH="$tool_root/usr/bin:$PATH"
+  export LD_LIBRARY_PATH="$tool_root/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   command -v pg_dump >/dev/null 2>&1 && command -v pg_restore >/dev/null 2>&1 || {
-    log "PostgreSQL client tool installation did not provide pg_dump and pg_restore"
+    log "private PostgreSQL client bootstrap did not provide pg_dump and pg_restore"
     return 1
   }
 }
