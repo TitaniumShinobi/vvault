@@ -61,6 +61,7 @@ def test_github_deployment_executes_the_reviewed_repository_contract_not_a_host_
 def test_deployment_creates_private_verified_recovery_receipts_before_migration():
     assert "create-vvault-enrollment-backup-receipts.py" in DEPLOY
     assert DEPLOY.index("prepare_enrollment_recovery_receipts") < DEPLOY.index("apply-vvault-enrollment-migrations.sh")
+    assert DEPLOY.rindex("ensure_backup_tools") < DEPLOY.rindex("prepare_enrollment_recovery_receipts")
     for required in (
         "pg_dump",
         "pg_restore",
@@ -71,6 +72,11 @@ def test_deployment_creates_private_verified_recovery_receipts_before_migration(
         "stdout contains only receipt paths and opaque receipt IDs",
     ):
         assert required in BACKUP_RECEIPTS
+
+
+def test_deployment_installs_postgres_client_only_when_required_for_recovery_copy():
+    assert 'command -v pg_dump >/dev/null 2>&1 && command -v pg_restore >/dev/null 2>&1' in DEPLOY
+    assert 'sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client' in DEPLOY
 
 
 def test_deployment_resolves_a_service_environment_file_without_printing_values():

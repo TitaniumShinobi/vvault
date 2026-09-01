@@ -95,6 +95,23 @@ prepare_enrollment_recovery_receipts() {
   export VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_ID="$object_id"
 }
 
+ensure_backup_tools() {
+  if command -v pg_dump >/dev/null 2>&1 && command -v pg_restore >/dev/null 2>&1; then
+    return 0
+  fi
+  command -v apt-get >/dev/null 2>&1 || {
+    log "PostgreSQL client tools are missing and this host has no supported package manager"
+    return 1
+  }
+  log "installing PostgreSQL client tools required for verified recovery copies"
+  sudo apt-get update -qq
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+  command -v pg_dump >/dev/null 2>&1 && command -v pg_restore >/dev/null 2>&1 || {
+    log "PostgreSQL client tool installation did not provide pg_dump and pg_restore"
+    return 1
+  }
+}
+
 rollback() {
   local status=$?
   trap - ERR INT TERM
@@ -147,6 +164,7 @@ git checkout -B "$BRANCH" "origin/$BRANCH"
 NEW_REF="$(git rev-parse HEAD)"
 
 log "creating verified database and object-storage recovery receipts"
+ensure_backup_tools
 prepare_enrollment_recovery_receipts
 log "validating backup receipts and applying enrollment migrations"
 VVAULT_DEPLOY_REF="$NEW_REF" \
