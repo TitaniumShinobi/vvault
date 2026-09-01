@@ -9955,6 +9955,7 @@ def _begin_identity_oauth(provider: str, purpose: str = "signin", current: dict 
         params = {
             "client_id": GOOGLE_CLIENT_ID if provider == "google" else GITHUB_CLIENT_ID,
             "redirect_uri": callback_url, "state": state,
+            "response_type": "code",
             "code_challenge": identity_crypto.pkce_challenge(verifier), "code_challenge_method": "S256",
         }
         if provider == "google":

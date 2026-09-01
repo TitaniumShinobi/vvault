@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from vvault.server import vvault_web_server as server
@@ -293,3 +294,4 @@ def test_oauth_callback_origin_cannot_be_overridden_by_request_headers(monkeypat
 
     assert response.status_code == 302
     assert captured["redirect_uri"] == "http://127.0.0.1:8000/api/auth/google/callback"
+    assert parse_qs(urlparse(response.headers["Location"]).query)["response_type"] == ["code"]
