@@ -70,6 +70,7 @@ def test_deployment_creates_private_verified_recovery_receipts_before_migration(
         "VVAULT_OBJECT_STORAGE_SERVICE_KEY",
         "S3_SECRET_ACCESS_KEY",
         "stdout contains only receipt paths and opaque receipt IDs",
+        "exist_ok=True",
     ):
         assert required in BACKUP_RECEIPTS
 

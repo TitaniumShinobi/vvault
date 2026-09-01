@@ -239,7 +239,9 @@ def main() -> None:
     backup_id = f"vvault-enrollment-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{secrets.token_hex(8)}"
     root, receipts = Path(args.backup_root) / backup_id, Path(args.receipt_dir)
     root.mkdir(mode=0o700, parents=True)
-    receipts.mkdir(mode=0o750, parents=True)
+    receipts.mkdir(mode=0o750, parents=True, exist_ok=True)
+    if not receipts.is_dir():
+        fail("protected receipt path is not a directory")
     database_dump, object_root = root / "database.dump", root / "objects"
     object_root.mkdir(mode=0o700)
     backup_database(database_url, database_dump)
