@@ -46,6 +46,27 @@ assert payload.get("transcript_owner") == "ovvaults.transcripts"
 ' <<<"$ready_json"
 }
 
+prepare_enrollment_recovery_receipts() {
+  local key value database_path="" database_id="" object_path="" object_id=""
+  while IFS='=' read -r key value; do
+    case "$key" in
+      VVAULT_DATABASE_BACKUP_RECEIPT_PATH) database_path="$value" ;;
+      VVAULT_DATABASE_BACKUP_RECEIPT_ID) database_id="$value" ;;
+      VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_PATH) object_path="$value" ;;
+      VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_ID) object_id="$value" ;;
+      *) log "backup receipt generator returned an invalid field"; return 1 ;;
+    esac
+  done < <(python3 "$REPO/scripts/deployment/create-vvault-enrollment-backup-receipts.py" --env-file "$ENV_FILE")
+  [[ "$database_path" = /* && "$object_path" = /* && -n "$database_id" && -n "$object_id" ]] || {
+    log "backup receipt generator returned incomplete data"
+    return 1
+  }
+  export VVAULT_DATABASE_BACKUP_RECEIPT_PATH="$database_path"
+  export VVAULT_DATABASE_BACKUP_RECEIPT_ID="$database_id"
+  export VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_PATH="$object_path"
+  export VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_ID="$object_id"
+}
+
 rollback() {
   local status=$?
   trap - ERR INT TERM
@@ -97,6 +118,8 @@ git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
 git checkout -B "$BRANCH" "origin/$BRANCH"
 NEW_REF="$(git rev-parse HEAD)"
 
+log "creating verified database and object-storage recovery receipts"
+prepare_enrollment_recovery_receipts
 log "validating backup receipts and applying enrollment migrations"
 VVAULT_DEPLOY_REF="$NEW_REF" \
   "$REPO/scripts/deployment/apply-vvault-enrollment-migrations.sh"

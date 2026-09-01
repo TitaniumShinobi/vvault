@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = (ROOT / "scripts/deployment/droplet-deploy-vvault.sh").read_text(encoding="utf-8")
 RUNNER = (ROOT / "scripts/deployment/apply-vvault-enrollment-migrations.sh").read_text(encoding="utf-8")
 WORKFLOW = (ROOT / ".github/workflows/deploy-ci.yml").read_text(encoding="utf-8")
+BACKUP_RECEIPTS = (ROOT / "scripts/deployment/create-vvault-enrollment-backup-receipts.py").read_text(encoding="utf-8")
 
 
 def test_deploy_applies_enrollment_migrations_before_restart_and_refuses_automatic_rollback():
@@ -52,3 +53,18 @@ def test_github_deployment_executes_the_reviewed_repository_contract_not_a_host_
     assert "/opt/deploy/trigger/deploy-trigger.sh" not in WORKFLOW
     assert 'git -C "$repo" checkout -B production origin/production' in WORKFLOW
     assert 'exec "$repo/scripts/deployment/droplet-deploy-vvault.sh"' in WORKFLOW
+
+
+def test_deployment_creates_private_verified_recovery_receipts_before_migration():
+    assert "create-vvault-enrollment-backup-receipts.py" in DEPLOY
+    assert DEPLOY.index("prepare_enrollment_recovery_receipts") < DEPLOY.index("apply-vvault-enrollment-migrations.sh")
+    for required in (
+        "pg_dump",
+        "pg_restore",
+        '"kind": kind',
+        '"verified": True',
+        "VVAULT_OBJECT_STORAGE_SERVICE_KEY",
+        "S3_SECRET_ACCESS_KEY",
+        "stdout contains only receipt paths and opaque receipt IDs",
+    ):
+        assert required in BACKUP_RECEIPTS
