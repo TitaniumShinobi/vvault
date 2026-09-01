@@ -143,7 +143,7 @@ def backup_database(database_url: str, destination: Path) -> None:
         if server_version.returncode or client_version.returncode:
             fail("database version preflight failed")
         server_major = server_version.stdout.strip()[:2]
-        client_match = re.search(r"(\d+)(?:\.\d+)?$", client_version.stdout.strip())
+        client_match = re.search(r"\b(\d+)(?:\.\d+)?", client_version.stdout)
         client_major = client_match.group(1) if client_match else "unknown"
         if not server_major.isdigit() or client_major != server_major:
             fail(f"database PostgreSQL major mismatch: server={server_major or 'unknown'}, client={client_major}")

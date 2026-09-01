@@ -74,6 +74,7 @@ def test_deployment_creates_private_verified_recovery_receipts_before_migration(
         "backup verification command failed: {label} ({classification})",
         "server/client version mismatch",
         "database PostgreSQL major mismatch: server=",
+        'r"\\b(\\d+)(?:\\.\\d+)?"',
     ):
         assert required in BACKUP_RECEIPTS
 
