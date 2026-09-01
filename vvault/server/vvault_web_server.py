@@ -4533,28 +4533,26 @@ def get_vault_files():
         user_email = current_user.get('email')
         if not user_email:
             return jsonify({"success": False, "error": "Invalid session"}), 401
-        user_role = current_user.get('role', 'user')
-        is_admin = user_role == 'admin'
         requested_path = (request.args.get('path') or '').strip().strip('/')
-        
+
         user_lookup_started_at = time.perf_counter()
         user_id = _get_authenticated_user_id()
         user_lookup_ms = int(round((time.perf_counter() - user_lookup_started_at) * 1000))
         user_name = current_user.get('name') or user_email.split('@')[0]
-        
-        if not is_admin and not user_id:
+
+        if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
         row_fetch_started_at = time.perf_counter()
         rows = VAULT_FILE_REPOSITORY.list_for_browser(
             user_id=user_id,
-            is_admin=is_admin,
+            is_admin=False,
             requested_path=requested_path,
         )
         row_fetch_ms = int(round((time.perf_counter() - row_fetch_started_at) * 1000))
 
         transform_started_at = time.perf_counter()
-        files = _transform_files_for_display(rows, is_admin=is_admin, user_id=None if is_admin else user_id)
+        files = _transform_files_for_display(rows, is_admin=False, user_id=user_id)
         if requested_path:
             files = _filter_transformed_vault_files_for_path(files, requested_path)
         transform_ms = int(round((time.perf_counter() - transform_started_at) * 1000))
@@ -4563,7 +4561,7 @@ def get_vault_files():
             "VAULT_FILES_LIST path=%s mode=%s admin=%s user_lookup_ms=%s row_fetch_ms=%s transform_ms=%s row_count=%s file_count=%s route_elapsed_ms=%s",
             requested_path or "ALL_FILES",
             "scoped" if requested_path else "all_files",
-            is_admin,
+            False,
             user_lookup_ms,
             row_fetch_ms,
             transform_ms,
@@ -4580,7 +4578,7 @@ def get_vault_files():
             "storage_owner": VAULT_FILE_OWNER,
             "files": files,
             "count": len(files),
-            "user_root": user_name if not is_admin else "Vault (Admin)"
+            "user_root": user_name
         })
     except Exception as e:
         logger.error(f"Error fetching vault files: {e}")
@@ -5039,10 +5037,8 @@ def memup_status():
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
-        user_role = current_user.get('role', 'user')
-        is_admin = user_role == 'admin'
         user_id = _get_authenticated_user_id()
-        if not user_id and not is_admin:
+        if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
         original_path = _original_capsule_path(construct_id)
@@ -5052,14 +5048,14 @@ def memup_status():
             storage_path=original_path,
             construct_id=construct_id,
             user_id=user_id,
-            is_admin=is_admin,
+            is_admin=False,
         )
         materialized_row = _lookup_exact_vault_preview_row(
             filename=materialized_path,
             storage_path=materialized_path,
             construct_id=construct_id,
             user_id=user_id,
-            is_admin=is_admin,
+            is_admin=False,
         )
 
         def _artifact_summary(row: Optional[Dict[str, Any]], path: str) -> Dict[str, Any]:
@@ -5433,33 +5429,19 @@ def get_vault_file(file_id):
     try:
         current_user = request.current_user
         user_email = current_user.get('email')
-        user_role = current_user.get('role', 'user')
+        user_id = _get_authenticated_user_id()
+        if not user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
 
-        row = VAULT_FILE_REPOSITORY.get_by_id(file_id)
+        row = VAULT_FILE_REPOSITORY.get_user_file(file_id=file_id, user_id=user_id)
 
         if not row:
             return jsonify({"success": False, "error": "File not found"}), 404
 
-        effective_user_id = row.get('user_id')
-        if user_role != 'admin':
-            user_id = _get_authenticated_user_id()
-
-            file_user_id = row.get('user_id')
-            is_system = row.get('is_system', False)
-
-            if file_user_id is None and not is_system:
-                log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "unassigned_file")
-                return jsonify({"success": False, "error": "Access denied"}), 403
-
-            if file_user_id is not None and file_user_id != user_id:
-                log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}", "denied", "not_owner")
-                return jsonify({"success": False, "error": "Access denied"}), 403
-            effective_user_id = user_id
-
         backing_row = _lookup_materialized_capsule_backing_row(
             row,
-            user_id=effective_user_id,
-            is_admin=user_role == 'admin',
+            user_id=user_id,
+            is_admin=False,
         )
         if backing_row and isinstance(backing_row.get('content'), str) and backing_row.get('content'):
             file_payload = _build_preview_payload_from_materialized_sibling(
@@ -5486,21 +5468,12 @@ def get_vault_file(file_id):
 
 
 def _get_authorized_vault_data_row(file_id):
-    row = VAULT_FILE_REPOSITORY.get_by_id(file_id)
+    user_id = _get_authenticated_user_id()
+    if not user_id:
+        return None, (jsonify({"success": False, "error": "User not found"}), 403)
+    row = VAULT_FILE_REPOSITORY.get_user_file(file_id=file_id, user_id=user_id)
     if not row:
         return None, (jsonify({"success": False, "error": "File not found"}), 404)
-    current_user = request.current_user
-    user_email = current_user.get("email")
-    if current_user.get("role", "user") != "admin":
-        user_id = _get_authenticated_user_id()
-        file_user_id = row.get("user_id")
-        is_system = row.get("is_system", False)
-        if file_user_id is None and not is_system:
-            log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}/data-url", "denied", "unassigned_file")
-            return None, (jsonify({"success": False, "error": "Access denied"}), 403)
-        if file_user_id is not None and file_user_id != user_id:
-            log_auth_decision("file_access", user_email, f"/api/vault/files/{file_id}/data-url", "denied", "not_owner")
-            return None, (jsonify({"success": False, "error": "Access denied"}), 403)
     return row, None
 
 
@@ -5543,6 +5516,100 @@ def get_vault_file_data_url(file_id):
         return jsonify({"success": False, "error": str(exc)}), 500
 
 
+@app.route('/api/vault/files/<file_id>/media')
+@require_auth
+def get_vault_file_media(file_id):
+    """Return authenticated, browser-previewable image, PDF, audio, or video bytes."""
+    try:
+        row, error_response = _get_authorized_vault_data_row(file_id)
+        if error_response:
+            return error_response
+        body, mime, unavailable_reason = _media_preview_bytes(row)
+        if unavailable_reason or body is None:
+            return _preview_unavailable_response(row, unavailable_reason or 'missing_content')
+        filename = os.path.basename(row.get('filename') or row.get('storage_path') or 'preview')
+        safe_filename = re.sub(r'[\r\n"\\\\]', '_', filename)
+        response = Response(body, status=200, mimetype=mime)
+        response.headers['Content-Disposition'] = f'inline; filename="{safe_filename}"'
+        response.headers['Content-Length'] = str(len(body))
+        response.headers['Cache-Control'] = 'private, max-age=300'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+    except Exception as exc:
+        logger.error("Error fetching vault media preview: %s", exc)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route('/api/vault/drive/files/<file_id>/download')
+@require_auth
+def download_vault_drive_file(file_id):
+    """Download exact owner-scoped file bytes without the preview size/type boundary."""
+    try:
+        row, error_response = _get_authorized_vault_data_row(file_id)
+        if error_response:
+            return error_response
+        if row.get("drive_trashed_at"):
+            return jsonify({"success": False, "error": "File is in Trash"}), 409
+        content = row.get("content")
+        metadata = _metadata_to_dict(row.get("metadata"))
+        body = None
+        if isinstance(content, bytes):
+            body = content
+        elif isinstance(content, str):
+            text = content.strip()
+            encoded = re.match(r"^data:[^;,]+;base64,(.+)$", text, re.I | re.S)
+            binary_like = str(row.get("file_type") or "").lower() in {"binary", "image", "pdf", "audio", "video"} or bool(metadata.get("original_size"))
+            if encoded or binary_like:
+                try:
+                    body = base64.b64decode(re.sub(r"\s+", "", encoded.group(1) if encoded else text), validate=True)
+                except (ValueError, TypeError):
+                    body = None
+            if body is None and not binary_like:
+                body = content.encode("utf-8")
+        if body is None:
+            stored = VAULT_FILE_REPOSITORY.load_bytes(row)
+            body = stored[0] if stored else None
+        if body is None:
+            return jsonify({"success": False, "error": "Canonical file bytes are unavailable"}), 409
+        digest = hashlib.sha256(body).hexdigest()
+        expected = str(row.get("sha256") or "").lower()
+        if re.fullmatch(r"[0-9a-f]{64}", expected) and digest != expected:
+            return jsonify({"success": False, "error": "Canonical file hash mismatch", "error_code": "CANONICAL_FILE_HASH_MISMATCH"}), 409
+        filename = os.path.basename(row.get("filename") or row.get("storage_path") or "download")
+        response = Response(body, status=200, content_type=str(row.get("content_type") or "application/octet-stream"))
+        response.headers["Content-Disposition"] = f"attachment; filename=\"{re.sub(r'[\r\n\"\\\\]', '_', filename)}\""
+        response.headers["Content-Length"] = str(len(body))
+        response.headers["ETag"] = f'"{digest}"'
+        response.headers["X-VVAULT-SHA256"] = digest
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except Exception as exc:
+        logger.error("VVAULT Drive download failed: %s", exc)
+        return jsonify({"success": False, "error": "Download failed", "error_code": type(exc).__name__}), 503
+
+
+@app.route('/api/vault/files/<file_id>/archive')
+@require_auth
+def get_vault_file_archive_preview(file_id):
+    """Return an authenticated, bounded listing for a ZIP archive."""
+    try:
+        row, error_response = _get_authorized_vault_data_row(file_id)
+        if error_response:
+            return error_response
+        preview, unavailable_reason = _archive_preview(row)
+        if unavailable_reason or preview is None:
+            return _preview_unavailable_response(row, unavailable_reason or 'missing_content')
+        return jsonify({
+            'success': True,
+            'file_id': row.get('id'),
+            'filename': row.get('filename'),
+            **preview,
+        })
+    except Exception as exc:
+        logger.error("Error building vault archive preview: %s", exc)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
 @app.route('/api/vault/files/preview', methods=['POST'])
 @require_auth
 def preview_vault_file():
@@ -5551,7 +5618,6 @@ def preview_vault_file():
     try:
         current_user = request.current_user
         user_email = current_user.get('email')
-        user_role = current_user.get('role', 'user')
         payload = request.get_json(silent=True) or {}
         filename = str(payload.get('filename') or payload.get('storage_path') or '').strip()
         storage_path = str(payload.get('storage_path') or filename).strip()
@@ -5563,11 +5629,9 @@ def preview_vault_file():
         if not filename:
             return jsonify({"success": False, "error": "filename is required"}), 400
 
-        effective_user_id = payload.get('user_id')
-        if user_role != 'admin':
-            effective_user_id = _get_authenticated_user_id()
-            if not effective_user_id:
-                return jsonify({"success": False, "error": "User not found"}), 403
+        effective_user_id = _get_authenticated_user_id()
+        if not effective_user_id:
+            return jsonify({"success": False, "error": "User not found"}), 403
 
         pseudo_row = {
             'id': payload.get('id'),
@@ -5592,7 +5656,7 @@ def preview_vault_file():
                 storage_path=storage_path,
                 construct_id=construct_id,
                 user_id=effective_user_id,
-                is_admin=user_role == 'admin',
+                is_admin=False,
             )
             requested_row = dict(matched_row or {})
             for key, value in pseudo_row.items():
@@ -5602,7 +5666,7 @@ def preview_vault_file():
             backing_row = _lookup_materialized_capsule_backing_row(
                 requested_row,
                 user_id=effective_user_id,
-                is_admin=user_role == 'admin',
+                is_admin=False,
             )
             if backing_row and isinstance(backing_row.get('content'), str) and backing_row.get('content'):
                 file_payload = _build_preview_payload_from_materialized_sibling(

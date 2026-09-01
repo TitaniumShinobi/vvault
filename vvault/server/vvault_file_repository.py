@@ -179,12 +179,14 @@ class VVaultFileRepository:
         return rows[0] if rows else None
 
     def list_for_browser(self, *, user_id: str | None, is_admin: bool, requested_path: str = "") -> list[dict[str, Any]]:
+        # Ordinary vault browsing is owner-scoped even for application admins.
+        # Administrative authority is intentionally limited to dedicated
+        # security workflows and never widens access to user files.
+        if not user_id:
+            return []
         normalized_path = str(requested_path or "").strip().strip("/")
-        scope = ""
-        params: list[Any] = []
-        if not is_admin:
-            scope = "AND user_id = %s AND coalesce(is_system, false) = false"
-            params.append(user_id)
+        scope = "AND user_id = %s AND coalesce(is_system, false) = false"
+        params: list[Any] = [user_id]
 
         if normalized_path == "instances":
             return []
@@ -196,23 +198,6 @@ class VVaultFileRepository:
             path_prefix = f"{normalized_path.rstrip('/')}/%"
             path_params: list[Any] = [parts[1], path_prefix, path_prefix]
             scoped_params = list(params)
-            codex_system_prefix = None if is_admin else _codex_system_prefix_for_browser_path(normalized_path)
-            if codex_system_prefix:
-                scope = """
-                AND (
-                    (user_id = %s AND coalesce(is_system, false) = false)
-                    OR (
-                        coalesce(is_system, false) = true
-                        AND (filename ILIKE %s OR storage_path ILIKE %s)
-                        AND (
-                            lower(coalesce(metadata->>'sourceProduct', '')) = 'codex'
-                            OR lower(coalesce(file_type, '')) IN ('transcript', 'codex-thread')
-                            OR metadata ? 'codexThreadArchiveSchemaVersion'
-                        )
-                    )
-                )
-                """
-                scoped_params = [user_id, codex_system_prefix, codex_system_prefix]
             params = [*path_params, *scoped_params]
             return self._fetch(
                 f"""
@@ -244,14 +229,6 @@ class VVaultFileRepository:
                 tuple(params),
             )
 
-        if is_admin:
-            return self._fetch(
-                f"""
-                SELECT {self._columns(include_content=False)}
-                FROM vault_files
-                ORDER BY coalesce(updated_at, created_at) DESC
-                """
-            )
         return self._fetch(
             f"""
             SELECT {self._columns(include_content=False)}
@@ -291,6 +268,8 @@ class VVaultFileRepository:
         user_id: str | None,
         is_admin: bool,
     ) -> dict[str, Any] | None:
+        if not user_id:
+            return None
         paths = [path.strip() for path in {filename, storage_path} if isinstance(path, str) and path.strip()]
         if not paths:
             return None
@@ -299,9 +278,8 @@ class VVaultFileRepository:
         if construct_id:
             conditions.append("construct_id = %s")
             params.append(construct_id)
-        if not is_admin and user_id:
-            conditions.append("user_id = %s")
-            params.append(user_id)
+        conditions.append("user_id = %s")
+        params.append(user_id)
         return self._one(
             f"""
             SELECT {self._columns(include_content=True)}
@@ -339,14 +317,15 @@ class VVaultFileRepository:
         )
 
     def get_user_file(self, *, file_id: str, construct_id: str | None = None, user_id: str | None = None) -> dict[str, Any] | None:
+        if not user_id:
+            return None
         conditions = ["id = %s"]
         params: list[Any] = [file_id]
         if construct_id:
             conditions.append("construct_id = %s")
             params.append(construct_id)
-        if user_id:
-            conditions.append("user_id = %s")
-            params.append(user_id)
+        conditions.append("user_id = %s")
+        params.append(user_id)
         return self._one(
             f"SELECT {self._columns(include_content=True)} FROM vault_files WHERE {' AND '.join(conditions)}",
             tuple(params),
