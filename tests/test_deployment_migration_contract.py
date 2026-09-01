@@ -68,3 +68,9 @@ def test_deployment_creates_private_verified_recovery_receipts_before_migration(
         "stdout contains only receipt paths and opaque receipt IDs",
     ):
         assert required in BACKUP_RECEIPTS
+
+
+def test_deployment_resolves_a_service_environment_file_without_printing_values():
+    assert 'systemctl show "$SERVICE" -p EnvironmentFiles --value' in DEPLOY
+    assert 'grep -q \'^VVAULT_BODY_DATABASE_URL=.\' "$candidate"' in DEPLOY
+    assert 'runtime database configuration is missing from the service environment files' in DEPLOY

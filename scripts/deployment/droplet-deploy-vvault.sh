@@ -21,16 +21,38 @@ MIGRATIONS_APPLIED=0
 
 log() { printf '[vvault-deploy] %s\n' "$*"; }
 
+resolve_runtime_env_file() {
+  local candidate service_files
+  # The service unit is authoritative when its EnvironmentFile has moved.  Do
+  # not print either file contents or values while locating it.
+  for candidate in "$ENV_FILE"; do
+    if [[ -r "$candidate" ]] && grep -q '^VVAULT_BODY_DATABASE_URL=.' "$candidate"; then
+      ENV_FILE="$candidate"
+      return 0
+    fi
+  done
+  service_files="$(systemctl show "$SERVICE" -p EnvironmentFiles --value 2>/dev/null || true)"
+  while IFS= read -r candidate; do
+    [[ "$candidate" = /* ]] || continue
+    if [[ -r "$candidate" ]] && grep -q '^VVAULT_BODY_DATABASE_URL=.' "$candidate"; then
+      ENV_FILE="$candidate"
+      return 0
+    fi
+  done < <(printf '%s\n' "$service_files" | grep -oE '/[^[:space:]()]+' || true)
+  log "runtime database configuration is missing from the service environment files"
+  return 1
+}
+
 verify_runtime_contract() {
   local service_properties env_metadata
   service_properties="$(systemctl show "$SERVICE" -p LoadState -p User -p Group)"
   [[ "$service_properties" == *"LoadState=loaded"* ]] || { log "service unit is not loaded"; return 1; }
   [[ "$service_properties" == *"User=$EXPECTED_SERVICE_USER"* ]] || { log "service user contract mismatch"; return 1; }
   [[ "$service_properties" == *"Group=$EXPECTED_SERVICE_GROUP"* ]] || { log "service group contract mismatch"; return 1; }
+  resolve_runtime_env_file
   [[ -f "$ENV_FILE" ]] || { log "runtime environment file is missing"; return 1; }
   env_metadata="$(stat -c '%U:%G:%a' "$ENV_FILE")"
   [[ "$env_metadata" == *":$EXPECTED_SERVICE_GROUP:640" ]] || { log "runtime environment ownership or mode mismatch"; return 1; }
-  grep -q '^VVAULT_BODY_DATABASE_URL=.' "$ENV_FILE" || { log "runtime database configuration is missing"; return 1; }
 }
 
 verify_readiness() {
