@@ -4,4 +4,4 @@ on: push
 
 repository: /opt/vvault-public
 branch: production
-script: /opt/deploy/trigger/deploy-vvault.sh
+script: /opt/vvault-public/scripts/deployment/droplet-deploy-vvault.sh

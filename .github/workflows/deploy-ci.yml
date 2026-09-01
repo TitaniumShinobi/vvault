@@ -54,4 +54,11 @@ jobs:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
             PY
-            /opt/deploy/trigger/deploy-trigger.sh vvault
+            # Do not delegate to an unmanaged host-side trigger.  Refresh the
+            # exact pushed production ref, then run the reviewed repository
+            # deployment contract directly.  That contract fails before any
+            # restart if migration recovery receipts are missing or invalid.
+            repo=/opt/vvault-public
+            git -C "$repo" fetch origin production
+            git -C "$repo" checkout -B production origin/production
+            exec "$repo/scripts/deployment/droplet-deploy-vvault.sh"

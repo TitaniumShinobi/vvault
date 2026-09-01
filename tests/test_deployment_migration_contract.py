@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = (ROOT / "scripts/deployment/droplet-deploy-vvault.sh").read_text(encoding="utf-8")
 RUNNER = (ROOT / "scripts/deployment/apply-vvault-enrollment-migrations.sh").read_text(encoding="utf-8")
+WORKFLOW = (ROOT / ".github/workflows/deploy-ci.yml").read_text(encoding="utf-8")
 
 
 def test_deploy_applies_enrollment_migrations_before_restart_and_refuses_automatic_rollback():
@@ -45,3 +46,9 @@ def test_migration_runner_has_a_no_database_dry_run_for_receipt_and_file_preflig
     assert 'VVAULT_MIGRATION_DRY_RUN' in RUNNER
     assert 'dry run passed' in RUNNER
     assert 'exit 0' in RUNNER
+
+
+def test_github_deployment_executes_the_reviewed_repository_contract_not_a_host_trigger():
+    assert "/opt/deploy/trigger/deploy-trigger.sh" not in WORKFLOW
+    assert 'git -C "$repo" checkout -B production origin/production' in WORKFLOW
+    assert 'exec "$repo/scripts/deployment/droplet-deploy-vvault.sh"' in WORKFLOW
