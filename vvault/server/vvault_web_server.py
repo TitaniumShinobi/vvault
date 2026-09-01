@@ -70,20 +70,11 @@ from vvault.security.pocketverse_guard import (
     enforce_pocketverse_authority,
     PocketverseAuthorityError,
 )
-if __package__:
-    from vvault.server import chatty_body_service
-    from vvault.server import vvault_access_assertion
-    from vvault.server import cleanhouse_files_evidence
-    from vvault.server import vvault_enrollment
-    from vvault.server.projection_classification import row_is_projection_excluded
-else:
-    # The production unit starts from vvault/server, whereas tests and other
-    # consumers import this module through the vvault.server package.
-    import chatty_body_service
-    import vvault_access_assertion
-    import cleanhouse_files_evidence
-    import vvault_enrollment
-    from projection_classification import row_is_projection_excluded
+from vvault.server import chatty_body_service
+from vvault.server import vvault_access_assertion
+from vvault.server import cleanhouse_files_evidence
+from vvault.server import vvault_enrollment
+from vvault.server.projection_classification import row_is_projection_excluded
 import vvault_auth_repository
 import vvault_file_repository
 try:
