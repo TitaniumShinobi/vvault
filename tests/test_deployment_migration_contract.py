@@ -32,11 +32,13 @@ def test_migration_runner_requires_verified_backup_receipts_and_uses_checksum_le
         assert required in RUNNER
 
 
-def test_migration_runner_does_not_attempt_backup_restore_or_print_database_url():
+def test_migration_runner_does_not_attempt_backup_restore_or_expose_database_url_to_psql_argv():
     assert "pg_dump" not in RUNNER
     assert "pg_restore" not in RUNNER
     assert 'log "$DATABASE_URL"' not in RUNNER
-    assert 'PGDATABASE="$DATABASE_URL" psql' in RUNNER
+    assert "PGSERVICEFILE=\"$connection_service\"" in RUNNER
+    assert "PGSERVICE=\"vvault_enrollment_migrations\"" in RUNNER
+    assert 'psql --no-psqlrc -X -v ON_ERROR_STOP=1 -f "$sql_file"' in RUNNER
 
 
 def test_migration_runner_has_a_no_database_dry_run_for_receipt_and_file_preflight():

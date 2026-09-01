@@ -72,10 +72,52 @@ fi
 require_command psql
 [[ -n "$DATABASE_URL" ]] || die "VVAULT_BODY_DATABASE_URL is required"
 
+# Create a restricted libpq service file so psql receives the full database
+# URL without placing credentials in its command-line arguments.  PGDATABASE
+# cannot carry a URI: libpq interprets it as a literal database name.
+connection_service="$(mktemp "${TMPDIR:-/tmp}/vvault-pg-service.XXXXXX")"
+chmod 0600 "$connection_service"
+python3 - "$DATABASE_URL" "$connection_service" <<'PY'
+import os
+import sys
+from urllib.parse import parse_qsl, unquote, urlsplit
+
+url, path = sys.argv[1:]
+parsed = urlsplit(url)
+if parsed.scheme not in {"postgres", "postgresql"} or parsed.fragment:
+    raise SystemExit("VVAULT_BODY_DATABASE_URL must be a PostgreSQL URL")
+
+query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+values = {
+    "host": query.pop("host", "") or (parsed.hostname or ""),
+    "port": query.pop("port", "") or (str(parsed.port) if parsed.port else ""),
+    "user": unquote(parsed.username or query.pop("user", "")),
+    "password": unquote(parsed.password or query.pop("password", "")),
+    "dbname": unquote(parsed.path.lstrip("/")),
+}
+for key in ("sslmode", "sslrootcert", "sslcert", "sslkey", "connect_timeout", "application_name"):
+    if key in query:
+        values[key] = query[key]
+if not values["dbname"]:
+    raise SystemExit("VVAULT_BODY_DATABASE_URL must include a database name")
+if any("\n" in value or "\r" in value for value in values.values()):
+    raise SystemExit("VVAULT_BODY_DATABASE_URL contains an invalid newline")
+
+def escape(value):
+    return value.replace("\\", "\\\\")
+
+fd = os.open(path, os.O_WRONLY | os.O_TRUNC)
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    handle.write("[vvault_enrollment_migrations]\n")
+    for key, value in values.items():
+        if value:
+            handle.write(f"{key}={escape(value)}\n")
+PY
+
 # Ledger creation and validation happen in the same advisory-locked database
 # transaction as application. Existing rows must match their checked-in bytes.
 sql_file="$(mktemp "${TMPDIR:-/tmp}/vvault-migrations.XXXXXX.sql")"
-trap 'rm -f "$sql_file"' EXIT
+trap 'rm -f "$sql_file" "$connection_service"' EXIT
 {
   printf '%s\n' 'BEGIN;'
   printf '%s\n' 'SELECT pg_advisory_xact_lock(hashtext('"'"'vvault-enrollment-migrations-0033-0035'"'"'));'
@@ -88,14 +130,15 @@ trap 'rm -f "$sql_file"' EXIT
     printf "\\if :apply_%s\n" "$version"
     printf "\\i %s\n" "$MIGRATION_DIR/${FILES[$index]}"
     printf "INSERT INTO ovvaults.schema_migrations(version, checksum) VALUES ('%s', '%s');\n" "$version" "$checksum"
-    printf "\\endif\n"
+    printf '%s\n' '\endif'
   done
   printf '%s\n' 'COMMIT;'
 } >"$sql_file"
 
 log "applying forward-only enrollment migrations 0033-0035"
 # Keep the connection string out of command-line arguments and all receipts.
-PGDATABASE="$DATABASE_URL" psql --no-psqlrc -X -v ON_ERROR_STOP=1 -f "$sql_file" >/dev/null
+PGSERVICEFILE="$connection_service" PGSERVICE="vvault_enrollment_migrations" \
+  psql --no-psqlrc -X -v ON_ERROR_STOP=1 -f "$sql_file" >/dev/null
 
 mkdir -p "$RECEIPT_DIR"
 chmod 0750 "$RECEIPT_DIR"

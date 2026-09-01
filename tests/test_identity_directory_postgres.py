@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +20,7 @@ DOWN = ROOT / "vvault/migrations/0033_identity_directory.down.sql"
 UP_0034 = ROOT / "vvault/migrations/0034_enrollment_session_hardening.up.sql"
 DOWN_0034 = ROOT / "vvault/migrations/0034_enrollment_session_hardening.down.sql"
 UP_0035 = ROOT / "vvault/migrations/0035_chatty_pairing_intents.up.sql"
+MIGRATION_RUNNER = ROOT / "scripts/deployment/apply-vvault-enrollment-migrations.sh"
 
 
 def _binary(name: str) -> str | None:
@@ -26,8 +28,8 @@ def _binary(name: str) -> str | None:
     return str(preferred) if preferred.exists() else shutil.which(name)
 
 
-def _run(command: list[str], *, input_text: str | None = None, check: bool = True):
-    return subprocess.run(command, input=input_text, text=True, capture_output=True, check=check)
+def _run(command: list[str], *, input_text: str | None = None, check: bool = True, env: dict[str, str] | None = None):
+    return subprocess.run(command, input=input_text, text=True, capture_output=True, check=check, env=env)
 
 
 @pytest.fixture(scope="module")
@@ -61,9 +63,23 @@ def identity_postgres():
             expires_at timestamptz NOT NULL, revoked_at timestamptz
           );
         """)
-        _run(psql, input_text=UP.read_text())
-        _run(psql, input_text=UP_0034.read_text())
-        _run(psql, input_text=UP_0035.read_text())
+        database_receipt = root / "database-backup.json"
+        object_receipt = root / "object-storage-backup.json"
+        database_receipt.write_text(json.dumps({"kind": "database", "backup_id": "test-db-0001", "verified": True}))
+        object_receipt.write_text(json.dumps({"kind": "object_storage", "backup_id": "test-obj-0001", "verified": True}))
+        runner_env = os.environ | {
+            "VVAULT_BODY_DATABASE_URL": f"postgresql:///postgres?host={socket}&port={port}&user=postgres",
+            "VVAULT_DATABASE_BACKUP_RECEIPT_PATH": str(database_receipt),
+            "VVAULT_DATABASE_BACKUP_RECEIPT_ID": "test-db-0001",
+            "VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_PATH": str(object_receipt),
+            "VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_ID": "test-obj-0001",
+            "VVAULT_MIGRATION_RECEIPT_DIR": str(root / "migration-receipts"),
+            "VVAULT_DEPLOY_REF": "disposable-postgres-proof",
+        }
+        migration = _run([str(MIGRATION_RUNNER)], env=runner_env, check=False)
+        assert migration.returncode == 0, migration.stderr
+        ledger = _run(psql + ["-tA"], input_text="SELECT version FROM ovvaults.schema_migrations ORDER BY version;")
+        assert ledger.stdout.split() == ["0033", "0034", "0035"]
         yield f"host={socket} port={port} user=postgres dbname=postgres"
     finally:
         if started:
