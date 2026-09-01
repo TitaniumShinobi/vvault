@@ -569,6 +569,9 @@ GITHUB_CLIENT_ID = os.environ.get("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.environ.get("GITHUB_CLIENT_SECRET")
 VVAULT_FRONTEND_URL = _resolve_frontend_origin() or "http://localhost:7784"
 VVAULT_BACKEND_URL = _resolve_backend_origin() or "http://localhost:8000"
+CHATTY_PAIRING_CALLBACK_URL = (os.environ.get("CHATTY_PAIRING_CALLBACK_URL") or "").strip()
+CHATTY_PAIRING_CLIENT_ID = (os.environ.get("CHATTY_PAIRING_CLIENT_ID") or "").strip()
+CHATTY_PAIRING_CLIENT_SECRET = (os.environ.get("CHATTY_PAIRING_CLIENT_SECRET") or "").strip()
 VVAULT_ADMIN_EMAILS = {
     email.strip().lower()
     for email in os.environ.get("VVAULT_ADMIN_EMAILS", "admin@vvault.com").split(",")
@@ -9616,6 +9619,103 @@ def _start_enrollment_session(user: dict, frontend: str):
     response = redirect(target)
     response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
     response.set_cookie("vvault_enrollment_session", token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=20 * 60, path="/")
+    return response
+
+
+def _chatty_pairing_callback() -> str | None:
+    """Return the one configured Chatty callback; browser input never chooses it."""
+    candidate = CHATTY_PAIRING_CALLBACK_URL.rstrip("/")
+    try:
+        parsed = urlparse(candidate)
+        parsed.port
+    except (TypeError, ValueError):
+        return None
+    if (not candidate or parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username or parsed.password or not parsed.path
+            or parsed.params or parsed.query or parsed.fragment):
+        return None
+    if _runtime_is_production():
+        if parsed.scheme != "https":
+            return None
+    elif parsed.scheme != "http" or parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
+        return None
+    return candidate
+
+
+@app.route('/api/auth/pairing-intents/chatty', methods=['POST'])
+@require_auth
+def create_chatty_pairing_intent():
+    """Begin an explicit optional pairing with Chatty for this active account.
+
+    The response contains only a 60-second opaque code and configured callback,
+    never an email, provider subject, session bearer, or VVAULT data.
+    """
+    callback = _chatty_pairing_callback()
+    current = getattr(request, "current_user", {})
+    if not callback:
+        return jsonify({"success": False, "error": "Chatty pairing is not configured"}), 503
+    if _normalize_origin(request.headers.get("Origin") or "") != _get_frontend_url():
+        return jsonify({"success": False, "error": "Same-origin pairing required"}), 403
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    code = identity_crypto.opaque_token()
+    created = AUTH_REPOSITORY.create_chatty_pairing_intent(
+        code_digest=identity_crypto.keyed_digest(code, _identity_hmac_key()),
+        user_id=str(current.get("id") or ""), session_id=str(current.get("session_id") or ""),
+        callback_uri=callback, expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    if not created:
+        return jsonify({"success": False, "error": "Pairing requires an active trusted session"}), 401
+    response = jsonify({"success": True, "audience": "chatty-developer-local", "pairing_code": code,
+                        "callback_uri": callback, "expires_in": 60})
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+def _chatty_pairing_client_authenticated() -> bool:
+    """Authenticate only the configured Chatty server, never a browser caller."""
+    client_id = str(request.headers.get("X-Chatty-Client-Id") or "")
+    authorization = str(request.headers.get("Authorization") or "")
+    prefix = "Bearer "
+    if not CHATTY_PAIRING_CLIENT_ID or not CHATTY_PAIRING_CLIENT_SECRET or not authorization.startswith(prefix):
+        return False
+    return hmac.compare_digest(client_id, CHATTY_PAIRING_CLIENT_ID) and hmac.compare_digest(
+        authorization[len(prefix):], CHATTY_PAIRING_CLIENT_SECRET,
+    )
+
+
+@app.route('/api/auth/pairing-intents/chatty/redeem', methods=['POST'])
+def redeem_chatty_pairing_intent():
+    """Server-to-server redemption for an explicit VVAULT-to-Chatty pairing.
+
+    The caller receives only the opaque link identifier. No VVAULT owner,
+    email, provider identity, cookie, data, or session material is disclosed.
+    """
+    if not _chatty_pairing_client_authenticated():
+        return jsonify({"success": False, "error": "Pairing client authentication failed"}), 401
+    callback = _chatty_pairing_callback()
+    payload = request.get_json(silent=True) or {}
+    if not callback or payload.get("audience") != "chatty-developer-local" or payload.get("callback_uri") != callback:
+        return jsonify({"success": False, "error": "Pairing request was rejected"}), 400
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    try:
+        pairing = AUTH_REPOSITORY.consume_chatty_pairing_intent(
+            code_digest=identity_crypto.keyed_digest(str(payload.get("pairing_code") or ""), _identity_hmac_key()),
+            callback_uri=callback, chatty_account_id=str(payload.get("chatty_account_id") or ""),
+        )
+    except ValueError:
+        pairing = None
+    if not pairing:
+        return jsonify({"success": False, "error": "Pairing request was rejected"}), 400
+    response = jsonify({"success": True, "audience": pairing["audience"], "link_id": str(pairing["link_id"])})
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
 

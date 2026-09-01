@@ -25,7 +25,7 @@ export default function EnrollmentFlow() {
     setStep('recovery');
   });
   return <main className="login-container"><section className="login-card"><h1 className="login-title">Secure enrollment</h1>
-    {step === 'consent' && <button disabled={working} onClick={() => run(async () => { await api('/api/auth/enrollment/consents', { method: 'POST', body: '{}' }); setStep('passkey'); })}>Accept Terms and Privacy</button>}
+    {step === 'consent' && <><p>Review and accept VVAULT’s Terms of Service and Privacy Notice before your personal vault is created.</p><button disabled={working} onClick={() => run(async () => { await api('/api/auth/enrollment/consents', { method: 'POST', body: '{}' }); setStep('passkey'); })}>Accept Terms and Privacy</button></>}
     {step === 'passkey' && <button disabled={working} onClick={passkey}>Register a passkey</button>}
     {step === 'recovery' && <button disabled={working} onClick={() => run(async () => { const result = await api('/api/auth/enrollment/recovery-codes', { method: 'POST', body: '{}' }); setCodes(result.recovery_codes || []); setStep('activate'); })}>Generate recovery codes</button>}
     {codes.length > 0 && <><p>Save these codes offline. They are shown once.</p><pre>{codes.join('\n')}</pre></>}

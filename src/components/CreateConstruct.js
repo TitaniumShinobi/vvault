@@ -102,16 +102,6 @@ const CreateConstruct = ({ user }) => {
     setLoading(true);
 
     try {
-      let token = null;
-      try {
-        const savedUser = localStorage.getItem('vvault_user');
-        if (savedUser) {
-          const parsed = JSON.parse(savedUser);
-          if (parsed.token) token = parsed.token;
-        }
-      } catch (err) {}
-      if (!token) token = localStorage.getItem('vvault_token') || null;
-
       const formData = new FormData();
       formData.append('name', name.trim());
       formData.append('callsign', callsign.trim());
@@ -121,14 +111,8 @@ const CreateConstruct = ({ user }) => {
       formData.append('color_hex', colorHex);
       if (centerImage) formData.append('center_image', centerImage);
 
-      const headers = {};
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-
-      const response = await fetch('/api/chatty/construct/create', {
+      const response = await authFetch('/api/chatty/construct/create', {
         method: 'POST',
-        headers,
         body: formData
       });
 

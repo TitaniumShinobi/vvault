@@ -351,18 +351,8 @@ const VaultBrowser = ({ user }) => {
     setUploadState({ active: true, progress: `Uploading ${fileList.length} file(s) (${sizeMB} MB)...`, result: null });
 
     try {
-      let token = null;
-      try {
-        const savedUser = localStorage.getItem('vvault_user');
-        if (savedUser) {
-          const parsed = JSON.parse(savedUser);
-          if (parsed.token) token = parsed.token;
-        }
-      } catch (e) {}
-      if (!token) token = localStorage.getItem('vvault_token');
-      const response = await fetch('/api/vault/knowledge-files/upload', {
+      const response = await authFetch('/api/vault/knowledge-files/upload', {
         method: 'POST',
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
         body: formData,
       });
       const data = await response.json();

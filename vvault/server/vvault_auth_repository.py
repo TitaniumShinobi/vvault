@@ -12,6 +12,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
+from uuid import UUID
 
 from vvault.server import vvault_auth_crypto
 
@@ -378,6 +379,54 @@ class VVaultAuthRepository:
                                    pkce_verifier_digest, pkce_verifier_ciphertext, redirect_uri,
                                    frontend_origin, initiating_user_id, initiating_session_id""",
                     (state_digest,),
+                )
+                result = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return result
+
+    def create_chatty_pairing_intent(
+        self, *, code_digest: str, user_id: str, session_id: str,
+        callback_uri: str, expires_at: datetime,
+    ) -> bool:
+        """Persist a short-lived opaque pairing code for an active VVAULT session."""
+        if not code_digest or not user_id or not session_id or not callback_uri:
+            raise ValueError("pairing intent arguments are incomplete")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO chatty_pairing_intents
+                       (code_digest, user_id, session_id, audience, callback_uri, expires_at)
+                       SELECT %s, sessions.user_id, sessions.id, 'chatty-developer-local', %s, %s
+                         FROM sessions JOIN users ON users.id=sessions.user_id
+                         JOIN enrollment_devices ON enrollment_devices.id=sessions.enrollment_device_id
+                        WHERE sessions.id=%s AND sessions.user_id=%s
+                          AND sessions.revoked_at IS NULL AND sessions.expires_at > now()
+                          AND sessions.enrollment_session_kind='NORMAL'
+                          AND users.account_state='ACTIVE'
+                          AND enrollment_devices.status='TRUSTED'
+                       RETURNING code_digest""",
+                    (code_digest, callback_uri, expires_at, session_id, user_id),
+                )
+                created = cur.fetchone() is not None
+            conn.commit()
+        return created
+
+    def consume_chatty_pairing_intent(
+        self, *, code_digest: str, callback_uri: str, chatty_account_id: str,
+    ) -> dict[str, Any] | None:
+        """Atomically bind a Chatty account and consume one opaque pairing code."""
+        try:
+            account_id = str(UUID(str(chatty_account_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("Chatty account identifier is invalid") from exc
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE chatty_pairing_intents SET consumed_at=now(), chatty_account_id=%s
+                         WHERE code_digest=%s AND audience='chatty-developer-local' AND callback_uri=%s
+                           AND consumed_at IS NULL AND expires_at > now()
+                       RETURNING link_id, audience""",
+                    (account_id, code_digest, callback_uri),
                 )
                 result = _row_to_dict(cur.fetchone())
             conn.commit()
