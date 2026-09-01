@@ -78,6 +78,8 @@ def test_frontend_restore_is_explicit_snapshot_only_and_never_runs_migrations():
     assert "snapshot must be a named VVAULT frontend backup" in restore
     assert "apply-vvault-enrollment-migrations.sh" not in restore
     assert "systemctl restart" not in restore
+    assert 'cp -R "$SNAPSHOT"/. "$FRONTEND"/' in restore
+    assert 'cp -a "$SNAPSHOT"/. "$FRONTEND"/' not in restore
     assert DEPLOY.rindex("ensure_backup_tools") < DEPLOY.rindex("prepare_enrollment_recovery_receipts")
     for required in (
         "pg_dump",

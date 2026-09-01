@@ -38,16 +38,18 @@ rollback="$(mktemp -d "$BACKUP_ROOT/vvault-frontend-restore-rollback.XXXXXX")"
 cleanup() { rm -rf "$rollback"; }
 trap cleanup EXIT
 
-cp -a "$FRONTEND"/. "$rollback"/
+# The deploy account may write web assets but does not own the web-root
+# directory metadata. Copy content, not owner/mode/timestamp metadata.
+cp -R "$FRONTEND"/. "$rollback"/
 restore_previous() {
   find "$FRONTEND" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-  cp -a "$rollback"/. "$FRONTEND"/
+  cp -R "$rollback"/. "$FRONTEND"/
 }
 trap 'restore_previous' ERR INT TERM
 
 log "restoring verified frontend snapshot"
 find "$FRONTEND" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-cp -a "$SNAPSHOT"/. "$FRONTEND"/
+cp -R "$SNAPSHOT"/. "$FRONTEND"/
 [[ -s "$FRONTEND/index.html" ]] || die "restored frontend is missing index.html"
 verify_backend
 
