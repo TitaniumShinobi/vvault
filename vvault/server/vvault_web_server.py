@@ -9918,12 +9918,14 @@ def google_oauth_login():
 @app.route('/api/auth/google', methods=['GET'])
 @app.route('/api/auth/oauth/google', methods=['GET'])
 def reject_google_oauth_query_submission():
-    """Invitation material is accepted only in a no-store POST body."""
-    return jsonify({
-        "success": False,
-        "error": "Google enrollment must be initiated with POST",
-        "errorCode": "OAUTH_POST_REQUIRED",
-    }), 405
+    """Allow browser navigation only when no invitation material is supplied."""
+    if request.args:
+        return jsonify({
+            "success": False,
+            "error": "Invitation material is accepted only in a POST body",
+            "errorCode": "OAUTH_QUERY_INVITATION_FORBIDDEN",
+        }), 405
+    return _begin_google_oauth(operation="signin")
 
 
 @app.route('/api/auth/identity-links/google', methods=['POST'])
