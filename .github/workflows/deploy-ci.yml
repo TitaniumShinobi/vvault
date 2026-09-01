@@ -14,6 +14,8 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      VVAULT_ENROLLMENT_HMAC_KEY: ${{ secrets.VVAULT_ENROLLMENT_HMAC_KEY }}
 
     steps:
       - name: Deploy to Droplet
@@ -22,19 +24,34 @@ jobs:
           host: 165.245.136.194
           username: deploy
           key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          envs: VVAULT_ENROLLMENT_HMAC_KEY
           script: |
-            set +e
-            if id -Gn | tr ' ' '\n' | grep -qx vvault; then
-              chgrp vvault /opt/vvault-public/.env || exit 1
-              chmod 640 /opt/vvault-public/.env || exit 1
-            else
-              printf 'vvault-env group-access-unavailable\n'
-              exit 1
-            fi
+            python3 - <<'PY'
+            import grp
+            import os
+            import stat
+            import tempfile
+            from pathlib import Path
+
+            secret = os.environ.get("VVAULT_ENROLLMENT_HMAC_KEY", "")
+            if len(secret) < 32:
+                raise SystemExit("VVAULT enrollment key is unavailable")
+            env_path = Path("/opt/vvault-public/.env")
+            group_id = grp.getgrnam("vvault").gr_gid
+            current = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+            lines = [line for line in current.splitlines() if not line.startswith("VVAULT_ENROLLMENT_HMAC_KEY=")]
+            lines.append(f"VVAULT_ENROLLMENT_HMAC_KEY={secret}")
+            descriptor, temporary = tempfile.mkstemp(prefix=".env.", dir=env_path.parent)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write("\n".join(lines) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chown(temporary, -1, group_id)
+                os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
+                os.replace(temporary, env_path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            PY
             /opt/deploy/trigger/deploy-trigger.sh vvault
-            deploy_status=$?
-            stat -c 'vvault-env uid=%u gid=%g mode=%a' /opt/vvault-public/.env || true
-            systemctl show vvault-backend.service \
-              -p User -p Group -p LoadState -p ActiveState -p SubState \
-              -p Result -p ExecMainCode -p ExecMainStatus || true
-            exit "$deploy_status"
