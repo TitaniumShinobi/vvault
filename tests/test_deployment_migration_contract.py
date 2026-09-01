@@ -68,6 +68,16 @@ def test_github_deployment_executes_the_reviewed_repository_contract_not_a_host_
 def test_deployment_creates_private_verified_recovery_receipts_before_migration():
     assert "create-vvault-enrollment-backup-receipts.py" in DEPLOY
     assert DEPLOY.index("prepare_enrollment_recovery_receipts") < DEPLOY.index("apply-vvault-enrollment-migrations.sh")
+
+
+def test_frontend_restore_is_explicit_snapshot_only_and_never_runs_migrations():
+    restore = (ROOT / "scripts/deployment/restore-vvault-frontend-snapshot.sh").read_text(encoding="utf-8")
+    assert 'inputs.operation == \'restore_frontend\'' in WORKFLOW
+    assert "VVAULT_FRONTEND_SNAPSHOT" in WORKFLOW
+    assert "restore-vvault-frontend-snapshot.sh" in WORKFLOW
+    assert "snapshot must be a named VVAULT frontend backup" in restore
+    assert "apply-vvault-enrollment-migrations.sh" not in restore
+    assert "systemctl restart" not in restore
     assert DEPLOY.rindex("ensure_backup_tools") < DEPLOY.rindex("prepare_enrollment_recovery_receipts")
     for required in (
         "pg_dump",
