@@ -4,9 +4,8 @@ import Dashboard from './components/Dashboard';
 import Capsules from './components/Capsules';
 import VaultBrowser from './components/VaultBrowser';
 import Settings from './components/Settings';
-import NativeEnrollmentLogin from './components/NativeEnrollmentLogin';
-import EnrollmentFlow from './components/EnrollmentFlow';
-import { SESSION_EXPIRED_EVENT } from './utils/authFetch';
+import CinematicLogin from './components/CinematicLogin';
+import { validateSession, SESSION_EXPIRED_EVENT } from './utils/authFetch';
 import vvaultLogo from '../assets/vvaultlogo_inverted.svg';
 import './App.css';
 
@@ -110,24 +109,49 @@ function App() {
   const [user, setUser] = useState(null);
   const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [pendingEnrollment, setPendingEnrollment] = useState(
-    () => new URLSearchParams(window.location.search).get('oauth_pending') === '1'
-  );
   
   useEffect(() => {
-    const loadNativeSession = async () => {
-      try {
-        const response = await fetch('/api/auth/verify', { credentials: 'same-origin' });
-        if (response.ok) {
-          const payload = await response.json();
-          setUser(payload.user || null);
-          setPendingEnrollment(false);
+    // Check for OAuth callback params in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const token = urlParams.get('token');
+    const email = urlParams.get('email');
+    const name = urlParams.get('name');
+    
+    if (token && email) {
+      // OAuth successful - save user session
+      const userData = {
+        email: decodeURIComponent(email),
+        name: name ? decodeURIComponent(name) : email.split('@')[0],
+        token: token
+      };
+      localStorage.setItem('vvault_user', JSON.stringify(userData));
+      localStorage.setItem('vvault_token', token);
+      setUser(userData);
+      
+      // Clean up URL
+      window.history.replaceState({}, document.title, window.location.pathname);
+      console.log('OAuth login successful:', userData.email);
+    } else {
+      const savedUser = localStorage.getItem('vvault_user');
+      if (savedUser) {
+        try {
+          const parsed = JSON.parse(savedUser);
+          setUser(parsed);
+          validateSession().then(valid => {
+            if (!valid) {
+              console.warn('Stored session is no longer valid — clearing');
+              localStorage.removeItem('vvault_user');
+              localStorage.removeItem('vvault_token');
+              setUser(null);
+            }
+          });
+        } catch (error) {
+          console.error('Failed to parse saved user:', error);
+          localStorage.removeItem('vvault_user');
+          localStorage.removeItem('vvault_token');
         }
-      } catch (_) {
-        setUser(null);
       }
-    };
-    loadNativeSession();
+    }
     
     // Load system info
     const loadSystemInfo = async () => {
@@ -147,11 +171,11 @@ function App() {
   
   const handleLogin = (userData) => {
     setUser(userData);
-    setPendingEnrollment(false);
   };
   
   const handleLogout = useCallback(() => {
-    fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+    localStorage.removeItem('vvault_user');
+    localStorage.removeItem('vvault_token');
     setUser(null);
   }, []);
 
@@ -178,9 +202,7 @@ function App() {
   
   // Show cinematic login screen if user is not authenticated
   if (!user) {
-    return pendingEnrollment
-      ? <EnrollmentFlow onComplete={handleLogin} />
-      : <NativeEnrollmentLogin />;
+    return <CinematicLogin onLogin={handleLogin} />;
   }
   
   return (
