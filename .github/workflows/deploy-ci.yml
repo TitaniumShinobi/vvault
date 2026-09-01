@@ -59,7 +59,7 @@ jobs:
             # deployment contract directly.  That contract fails before any
             # restart if migration recovery receipts are missing or invalid.
             repo=/opt/vvault-public
-            git -C "$repo" fetch origin production
+            git -C "$repo" fetch origin production:refs/remotes/origin/production
             if [ -n "$(git -C "$repo" status --porcelain --untracked-files=normal)" ]; then
               echo "refusing deployment: host checkout is dirty"
               exit 1
