@@ -17,6 +17,7 @@ OLD_REF=""
 BACKUP=""
 PUBLISHED=0
 RESTART_ATTEMPTED=0
+MIGRATIONS_APPLIED=0
 
 log() { printf '[vvault-deploy] %s\n' "$*"; }
 
@@ -48,6 +49,12 @@ assert payload.get("transcript_owner") == "ovvaults.transcripts"
 rollback() {
   local status=$?
   trap - ERR INT TERM
+  if (( MIGRATIONS_APPLIED )); then
+    log "deployment failed after forward-only database migrations; automatic code rollback is prohibited"
+    log "restore requires the independently verified database/object-storage backup receipts and an operator-led recovery"
+    exit "$status"
+  fi
+
   log "deployment failed; restoring the previous release"
 
   if (( PUBLISHED )) && [[ -n "$BACKUP" && -d "$BACKUP" ]]; then
@@ -90,6 +97,11 @@ git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
 git checkout -B "$BRANCH" "origin/$BRANCH"
 NEW_REF="$(git rev-parse HEAD)"
 
+log "validating backup receipts and applying enrollment migrations"
+VVAULT_DEPLOY_REF="$NEW_REF" \
+  "$REPO/scripts/deployment/apply-vvault-enrollment-migrations.sh"
+MIGRATIONS_APPLIED=1
+
 log "installing locked frontend dependencies"
 npm ci --ignore-scripts
 log "building frontend"
@@ -114,4 +126,4 @@ log "verifying canonical readiness"
 verify_readiness
 
 trap - ERR INT TERM
-log "deployment successful: $OLD_REF -> $NEW_REF"
+log "deployment successful: $OLD_REF -> $NEW_REF (database migrations are forward-only)"
