@@ -60,5 +60,13 @@ jobs:
             # restart if migration recovery receipts are missing or invalid.
             repo=/opt/vvault-public
             git -C "$repo" fetch origin production
+            if [ -n "$(git -C "$repo" status --porcelain --untracked-files=normal)" ]; then
+              echo "refusing deployment: host checkout is dirty"
+              exit 1
+            fi
+            # A clean tracked checkout may be reset safely.  This prevents a
+            # stale host-side deployment script from being executed after a
+            # successful fetch.
             git -C "$repo" checkout -B production origin/production
+            git -C "$repo" reset --hard origin/production
             exec "$repo/scripts/deployment/droplet-deploy-vvault.sh"

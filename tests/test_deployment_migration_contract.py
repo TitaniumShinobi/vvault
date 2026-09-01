@@ -52,6 +52,8 @@ def test_migration_runner_has_a_no_database_dry_run_for_receipt_and_file_preflig
 def test_github_deployment_executes_the_reviewed_repository_contract_not_a_host_trigger():
     assert "/opt/deploy/trigger/deploy-trigger.sh" not in WORKFLOW
     assert 'git -C "$repo" checkout -B production origin/production' in WORKFLOW
+    assert 'git -C "$repo" status --porcelain --untracked-files=normal' in WORKFLOW
+    assert 'git -C "$repo" reset --hard origin/production' in WORKFLOW
     assert 'exec "$repo/scripts/deployment/droplet-deploy-vvault.sh"' in WORKFLOW
 
 
