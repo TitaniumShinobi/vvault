@@ -160,21 +160,24 @@ with os.fdopen(fd, "w", encoding="utf-8") as handle:
 PY
 
 # Ledger creation and validation happen in the same advisory-locked database
-# transaction as application. Existing rows must match their checked-in bytes.
+# transaction as application. The production database already owns a legacy
+# `schema_migrations` table whose shape is not this release's contract. Do not
+# reinterpret or alter it: this release has a dedicated, additive ledger.
+# Existing rows in that ledger must match their checked-in bytes.
 sql_file="$(mktemp "${TMPDIR:-/tmp}/vvault-migrations.XXXXXX.sql")"
 trap 'rm -f "$sql_file" "$connection_service"' EXIT
 {
   printf '%s\n' 'BEGIN;'
   printf '%s\n' 'SELECT pg_advisory_xact_lock(hashtext('"'"'vvault-enrollment-migrations-0033-0035'"'"'));'
   printf '%s\n' 'CREATE SCHEMA IF NOT EXISTS ovvaults;'
-  printf '%s\n' 'CREATE TABLE IF NOT EXISTS ovvaults.schema_migrations (version TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());'
+  printf '%s\n' 'CREATE TABLE IF NOT EXISTS ovvaults.enrollment_schema_migrations (version TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());'
   for index in "${!VERSIONS[@]}"; do
     version="${VERSIONS[$index]}" checksum="${checksums[$index]}"
-    printf "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM ovvaults.schema_migrations WHERE version = '%s' AND checksum <> '%s') THEN RAISE EXCEPTION 'migration %% checksum mismatch', '%s'; END IF; END \$\$;\n" "$version" "$checksum" "$version"
-    printf "SELECT NOT EXISTS (SELECT 1 FROM ovvaults.schema_migrations WHERE version = '%s') AS apply_%s \\gset\n" "$version" "$version"
+    printf "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM ovvaults.enrollment_schema_migrations WHERE version = '%s' AND checksum <> '%s') THEN RAISE EXCEPTION 'migration %% checksum mismatch', '%s'; END IF; END \$\$;\n" "$version" "$checksum" "$version"
+    printf "SELECT NOT EXISTS (SELECT 1 FROM ovvaults.enrollment_schema_migrations WHERE version = '%s') AS apply_%s \\gset\n" "$version" "$version"
     printf "\\if :apply_%s\n" "$version"
     printf "\\i %s\n" "$MIGRATION_DIR/${FILES[$index]}"
-    printf "INSERT INTO ovvaults.schema_migrations(version, checksum) VALUES ('%s', '%s');\n" "$version" "$checksum"
+    printf "INSERT INTO ovvaults.enrollment_schema_migrations(version, checksum) VALUES ('%s', '%s');\n" "$version" "$checksum"
     printf '%s\n' '\endif'
   done
   printf '%s\n' 'COMMIT;'

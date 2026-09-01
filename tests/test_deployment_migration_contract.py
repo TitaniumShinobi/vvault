@@ -23,7 +23,7 @@ def test_migration_runner_requires_verified_backup_receipts_and_uses_checksum_le
         "VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_PATH",
         "VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_ID",
         'receipt.get("verified") is not True',
-        "ovvaults.schema_migrations",
+        "ovvaults.enrollment_schema_migrations",
         "pg_advisory_xact_lock",
         "checksum mismatch",
         "0033_identity_directory.up.sql",

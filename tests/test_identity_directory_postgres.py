@@ -62,6 +62,11 @@ def identity_postgres():
             token_hash text NOT NULL UNIQUE, created_at timestamptz NOT NULL DEFAULT now(),
             expires_at timestamptz NOT NULL, revoked_at timestamptz
           );
+          -- Production owns an older, unrelated migration ledger. The release
+          -- runner must leave it alone rather than assuming a `version` column.
+          CREATE TABLE ovvaults.schema_migrations (
+            migration_name text PRIMARY KEY, applied_on timestamptz NOT NULL DEFAULT now()
+          );
         """)
         database_receipt = root / "database-backup.json"
         object_receipt = root / "object-storage-backup.json"
@@ -78,7 +83,7 @@ def identity_postgres():
         }
         migration = _run([str(MIGRATION_RUNNER)], env=runner_env, check=False)
         assert migration.returncode == 0, migration.stderr
-        ledger = _run(psql + ["-tA"], input_text="SELECT version FROM ovvaults.schema_migrations ORDER BY version;")
+        ledger = _run(psql + ["-tA"], input_text="SELECT version FROM ovvaults.enrollment_schema_migrations ORDER BY version;")
         assert ledger.stdout.split() == ["0033", "0034", "0035"]
         yield f"host={socket} port={port} user=postgres dbname=postgres"
     finally:
