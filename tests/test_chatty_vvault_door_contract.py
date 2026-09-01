@@ -268,28 +268,18 @@ def test_cors_emits_only_an_exact_configured_origin(monkeypatch):
 def test_oauth_callback_origin_cannot_be_overridden_by_request_headers(monkeypatch):
     captured = {}
 
-    class FakeGoogleClient:
-        def prepare_request_uri(self, endpoint, *, redirect_uri, scope, prompt):
-            captured.update({
-                "endpoint": endpoint,
-                "redirect_uri": redirect_uri,
-                "scope": scope,
-                "prompt": prompt,
-            })
-            return "https://accounts.example/authorize"
-
-    class FakeProviderResponse:
+    class FakeAuthRepository:
         @staticmethod
-        def json():
-            return {"authorization_endpoint": "https://accounts.example/oauth"}
+        def create_oauth_transaction(**kwargs):
+            captured.update(kwargs)
 
     monkeypatch.setenv("CHATTY_VVAULT_DOOR", "private")
     monkeypatch.setattr(server, "_door_contract_cache", None)
-    monkeypatch.setattr(server, "google_client", FakeGoogleClient())
+    monkeypatch.setattr(server, "AUTH_REPOSITORY", FakeAuthRepository())
     monkeypatch.setattr(server, "_google_oauth_ready", lambda: True)
+    monkeypatch.setattr(server, "_identity_hmac_key", lambda: "h" * 32)
+    monkeypatch.setattr(server, "_identity_transaction_key", lambda: "6mP1wtOOpiMCBeihOVOJrZuOGK-R-zfkqrFHNUjUn9Q=")
     monkeypatch.setattr(server, "_rate_limit_key", lambda _route_type: None)
-    monkeypatch.setattr(server, "_oauth_identity_authority_available", lambda: (True, {}))
-    monkeypatch.setattr(server.requests, "get", lambda _url: FakeProviderResponse())
 
     response = server.app.test_client().get(
         "/api/auth/google",

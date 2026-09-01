@@ -9891,16 +9891,14 @@ def _identity_provider_config(provider: str) -> dict[str, str]:
         }
     if provider != "google" or not _google_oauth_ready():
         raise RuntimeError("identity provider is not configured")
-    payload = requests.get(GOOGLE_DISCOVERY_URL, timeout=(3.05, 5)).json()
-    allowed_hosts = {"accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com"}
-    result = {}
-    for key in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
-        value = str(payload.get(key) or "")
-        parsed = urlparse(value)
-        if parsed.scheme != "https" or parsed.hostname not in allowed_hosts:
-            raise ValueError("Google discovery endpoint is not allowed")
-        result[key] = value
-    return result
+    # Google publishes stable, provider-owned OAuth and JWKS endpoints.  Using
+    # this constrained map avoids making sign-in initiation depend on a second
+    # live discovery request while preserving the same HTTPS-origin boundary.
+    return {
+        "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_endpoint": "https://oauth2.googleapis.com/token",
+        "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+    }
 
 
 def _identity_callback_url(provider: str) -> str:
