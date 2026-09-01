@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 from uuid import UUID
 
+from psycopg.errors import UniqueViolation
+
 from vvault.server import vvault_auth_crypto
 
 try:
@@ -419,17 +421,22 @@ class VVaultAuthRepository:
             account_id = str(UUID(str(chatty_account_id)))
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValueError("Chatty account identifier is invalid") from exc
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """UPDATE chatty_pairing_intents SET consumed_at=now(), chatty_account_id=%s
-                         WHERE code_digest=%s AND audience='chatty-developer-local' AND callback_uri=%s
-                           AND consumed_at IS NULL AND expires_at > now()
-                       RETURNING link_id, audience""",
-                    (account_id, code_digest, callback_uri),
-                )
-                result = _row_to_dict(cur.fetchone())
-            conn.commit()
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE chatty_pairing_intents SET consumed_at=now(), chatty_account_id=%s
+                             WHERE code_digest=%s AND audience='chatty-developer-local' AND callback_uri=%s
+                               AND consumed_at IS NULL AND expires_at > now()
+                           RETURNING link_id, audience""",
+                        (account_id, code_digest, callback_uri),
+                    )
+                    result = _row_to_dict(cur.fetchone())
+                conn.commit()
+        except UniqueViolation:
+            # A different one-time code already bound this Chatty account.  This
+            # is an expected cross-request race/duplicate, not a server error.
+            return None
         return result
 
     def record_session_reauthentication(self, *, session_id: str, user_id: str, provider: str) -> bool:

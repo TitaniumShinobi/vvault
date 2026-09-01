@@ -18,6 +18,7 @@ UP = ROOT / "vvault/migrations/0033_identity_directory.up.sql"
 DOWN = ROOT / "vvault/migrations/0033_identity_directory.down.sql"
 UP_0034 = ROOT / "vvault/migrations/0034_enrollment_session_hardening.up.sql"
 DOWN_0034 = ROOT / "vvault/migrations/0034_enrollment_session_hardening.down.sql"
+UP_0035 = ROOT / "vvault/migrations/0035_chatty_pairing_intents.up.sql"
 
 
 def _binary(name: str) -> str | None:
@@ -62,6 +63,7 @@ def identity_postgres():
         """)
         _run(psql, input_text=UP.read_text())
         _run(psql, input_text=UP_0034.read_text())
+        _run(psql, input_text=UP_0035.read_text())
         yield f"host={socket} port={port} user=postgres dbname=postgres"
     finally:
         if started:
@@ -250,3 +252,56 @@ def test_0034_pending_device_requires_approval_or_one_time_recovery(repository):
         device_id=str(normal["enrollment_device_id"]),
     )
     assert repository.get_enrollment_session_by_hash("new-normal") is None
+
+
+def test_0035_pairing_intent_is_active_trusted_single_use_and_uniquely_bound(repository):
+    """Exercise the forward pairing migration against a disposable PostgreSQL server.
+
+    This is deliberately repository-level rather than a route mock: it proves the
+    migrated constraints and atomic UPDATE used by the server-to-server redeem path.
+    """
+    user, _ = repository.admit_verified_identity(
+        provider="google", provider_subject="pairing-owner", verified_email="pairing@example.com", name="Pairing",
+    )
+    with repository._connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET account_state='ACTIVE' WHERE id=%s", (user["id"],))
+            cur.execute(
+                """INSERT INTO enrollment_devices(user_id, device_secret_digest, status, approved_by_user_id, approved_at)
+                   VALUES(%s,'pairing-trusted-device','TRUSTED',%s,now()) RETURNING id""",
+                (user["id"], user["id"]),
+            )
+            device_id = str(cur.fetchone()["id"])
+            cur.execute(
+                """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id)
+                   VALUES(%s,'pairing-trusted-session',now()+interval '1 hour','NORMAL',%s) RETURNING id""",
+                (user["id"], device_id),
+            )
+            session_id = str(cur.fetchone()["id"])
+        conn.commit()
+
+    expiry = datetime.now(timezone.utc) + timedelta(seconds=60)
+    callback = "http://127.0.0.1:5050/api/vvault/pairing/callback"
+    assert repository.create_chatty_pairing_intent(
+        code_digest="pairing-code-one", user_id=str(user["id"]), session_id=session_id,
+        callback_uri=callback, expires_at=expiry,
+    )
+    account_id = "33333333-3333-4333-8333-333333333333"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda _: repository.consume_chatty_pairing_intent(
+                code_digest="pairing-code-one", callback_uri=callback, chatty_account_id=account_id,
+            ),
+            range(2),
+        ))
+    assert sum(result is not None for result in results) == 1
+    assert next(result for result in results if result)["audience"] == "chatty-developer-local"
+
+    assert repository.create_chatty_pairing_intent(
+        code_digest="pairing-code-two", user_id=str(user["id"]), session_id=session_id,
+        callback_uri=callback, expires_at=expiry,
+    )
+    # A Chatty account cannot be paired twice, even with distinct opaque codes.
+    assert repository.consume_chatty_pairing_intent(
+        code_digest="pairing-code-two", callback_uri=callback, chatty_account_id=account_id,
+    ) is None
