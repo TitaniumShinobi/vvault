@@ -87,6 +87,13 @@ def test_one_time_bootstrap_is_root_scoped_to_postgresql_client_only():
     assert 'VVAULT_DEPLOY_KEY' in BOOTSTRAP
 
 
+def test_existing_deployment_workflow_can_dispatch_the_scoped_bootstrap_without_deploying():
+    assert 'bootstrap_recovery_tools:' in WORKFLOW
+    assert 'if: ${{ inputs.bootstrap_recovery_tools == true }}' in WORKFLOW
+    assert 'if: ${{ inputs.bootstrap_recovery_tools != true }}' in WORKFLOW
+    assert 'username: root' in WORKFLOW
+
+
 def test_deployment_resolves_a_service_environment_file_without_printing_values():
     assert 'systemctl show "$SERVICE" -p EnvironmentFiles --value' in DEPLOY
     assert 'grep -q \'^VVAULT_BODY_DATABASE_URL=.\' "$candidate"' in DEPLOY

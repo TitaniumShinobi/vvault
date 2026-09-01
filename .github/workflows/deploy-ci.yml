@@ -5,13 +5,43 @@ on:
     branches:
       - production
   workflow_dispatch:
+    inputs:
+      bootstrap_recovery_tools:
+        description: Install the one-time PostgreSQL client prerequisite for recovery receipts.
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: vvault-production
   cancel-in-progress: false
 
 jobs:
+  bootstrap-recovery-tools:
+    if: ${{ inputs.bootstrap_recovery_tools == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install only PostgreSQL client tools required for recovery copies
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 165.245.136.194
+          username: root
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          script: |
+            set -Eeuo pipefail
+            if command -v pg_dump >/dev/null 2>&1 && command -v pg_restore >/dev/null 2>&1; then
+              echo "VVAULT recovery tools already available"
+              exit 0
+            fi
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+            command -v pg_dump >/dev/null 2>&1
+            command -v pg_restore >/dev/null 2>&1
+            echo "VVAULT recovery tools installed"
+
   deploy:
+    if: ${{ inputs.bootstrap_recovery_tools != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
