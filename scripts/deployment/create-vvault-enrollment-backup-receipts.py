@@ -97,10 +97,10 @@ def write_pg_service(database_url: str, destination: Path) -> None:
     destination.chmod(0o600)
 
 
-def run_checked(command: list[str], environment: dict[str, str]) -> None:
+def run_checked(command: list[str], environment: dict[str, str], label: str) -> None:
     result = subprocess.run(command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     if result.returncode:
-        fail("backup verification command failed")
+        fail(f"backup verification command failed: {label}")
 
 
 def backup_database(database_url: str, destination: Path) -> None:
@@ -111,8 +111,8 @@ def backup_database(database_url: str, destination: Path) -> None:
         write_pg_service(database_url, service)
         environment = os.environ.copy()
         environment.update({"PGSERVICEFILE": str(service), "PGSERVICE": "vvault_backup"})
-        run_checked(["pg_dump", "--format=custom", "--file", str(destination)], environment)
-        run_checked(["pg_restore", "--list", str(destination)], environment)
+        run_checked(["pg_dump", "--format=custom", "--file", str(destination)], environment, "pg_dump")
+        run_checked(["pg_restore", "--list", str(destination)], environment, "pg_restore")
     if not destination.is_file() or destination.stat().st_size == 0:
         fail("database backup is empty")
 
