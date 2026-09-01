@@ -71,7 +71,8 @@ def test_deployment_creates_private_verified_recovery_receipts_before_migration(
         "S3_SECRET_ACCESS_KEY",
         "stdout contains only receipt paths and opaque receipt IDs",
         "exist_ok=True",
-        "backup verification command failed: {label}",
+        "backup verification command failed: {label} ({classification})",
+        "server/client version mismatch",
     ):
         assert required in BACKUP_RECEIPTS
 

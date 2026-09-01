@@ -98,9 +98,22 @@ def write_pg_service(database_url: str, destination: Path) -> None:
 
 
 def run_checked(command: list[str], environment: dict[str, str], label: str) -> None:
-    result = subprocess.run(command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    result = subprocess.run(command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False)
     if result.returncode:
-        fail(f"backup verification command failed: {label}")
+        detail = result.stderr.lower()
+        if "server version" in detail:
+            classification = "server/client version mismatch"
+        elif "authentication failed" in detail or "password" in detail:
+            classification = "database authentication failure"
+        elif "permission denied" in detail or "certificate" in detail:
+            classification = "database credential-file permission failure"
+        elif "connection" in detail or "could not translate" in detail or "network" in detail:
+            classification = "database connection failure"
+        elif "shared libraries" in detail or "not found" in detail:
+            classification = "PostgreSQL client runtime failure"
+        else:
+            classification = "unclassified PostgreSQL client failure"
+        fail(f"backup verification command failed: {label} ({classification})")
 
 
 def backup_database(database_url: str, destination: Path) -> None:
