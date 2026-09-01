@@ -73,4 +73,7 @@ def test_deployment_creates_private_verified_recovery_receipts_before_migration(
 def test_deployment_resolves_a_service_environment_file_without_printing_values():
     assert 'systemctl show "$SERVICE" -p EnvironmentFiles --value' in DEPLOY
     assert 'grep -q \'^VVAULT_BODY_DATABASE_URL=.\' "$candidate"' in DEPLOY
-    assert 'runtime database configuration is missing from the service environment files' in DEPLOY
+    assert 'systemctl show "$SERVICE" -p Environment --value 2>/dev/null | grep \'VVAULT_BODY_DATABASE_URL=\' >/dev/null' in DEPLOY
+    assert 'runtime database configuration is missing from the service' in DEPLOY
+    assert 'read_systemd_environment' in BACKUP_RECEIPTS
+    assert 'stdout=subprocess.PIPE' in BACKUP_RECEIPTS

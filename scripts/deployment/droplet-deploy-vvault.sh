@@ -39,7 +39,6 @@ resolve_runtime_env_file() {
       return 0
     fi
   done < <(printf '%s\n' "$service_files" | grep -oE '/[^[:space:]()]+' || true)
-  log "runtime database configuration is missing from the service environment files"
   return 1
 }
 
@@ -49,7 +48,14 @@ verify_runtime_contract() {
   [[ "$service_properties" == *"LoadState=loaded"* ]] || { log "service unit is not loaded"; return 1; }
   [[ "$service_properties" == *"User=$EXPECTED_SERVICE_USER"* ]] || { log "service user contract mismatch"; return 1; }
   [[ "$service_properties" == *"Group=$EXPECTED_SERVICE_GROUP"* ]] || { log "service group contract mismatch"; return 1; }
-  resolve_runtime_env_file
+  if ! resolve_runtime_env_file; then
+    # Values supplied directly through systemd Environment= are intentionally
+    # not printed; the backup helper reads them in-process when necessary.
+    systemctl show "$SERVICE" -p Environment --value 2>/dev/null | grep 'VVAULT_BODY_DATABASE_URL=' >/dev/null || {
+      log "runtime database configuration is missing from the service"
+      return 1
+    }
+  fi
   [[ -f "$ENV_FILE" ]] || { log "runtime environment file is missing"; return 1; }
   env_metadata="$(stat -c '%U:%G:%a' "$ENV_FILE")"
   [[ "$env_metadata" == *":$EXPECTED_SERVICE_GROUP:640" ]] || { log "runtime environment ownership or mode mismatch"; return 1; }
@@ -78,7 +84,7 @@ prepare_enrollment_recovery_receipts() {
       VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_ID) object_id="$value" ;;
       *) log "backup receipt generator returned an invalid field"; return 1 ;;
     esac
-  done < <(python3 "$REPO/scripts/deployment/create-vvault-enrollment-backup-receipts.py" --env-file "$ENV_FILE")
+  done < <(python3 "$REPO/scripts/deployment/create-vvault-enrollment-backup-receipts.py" --env-file "$ENV_FILE" --systemd-service "$SERVICE")
   [[ "$database_path" = /* && "$object_path" = /* && -n "$database_id" && -n "$object_id" ]] || {
     log "backup receipt generator returned incomplete data"
     return 1

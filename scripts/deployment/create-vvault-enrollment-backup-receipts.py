@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,29 @@ def read_env(path: Path) -> dict[str, str]:
             except (SyntaxError, ValueError):
                 fail("runtime environment has an invalid quoted value")
         values[key] = value
+    return values
+
+
+def read_systemd_environment(service: str) -> dict[str, str]:
+    """Read service Environment= entries without ever writing them to output."""
+    result = subprocess.run(
+        ["systemctl", "show", service, "-p", "Environment", "--value"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        return {}
+    values: dict[str, str] = {}
+    try:
+        entries = shlex.split(result.stdout)
+    except ValueError:
+        fail("service environment metadata is malformed")
+    for entry in entries:
+        key, separator, value = entry.partition("=")
+        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            values[key] = value
     return values
 
 
@@ -202,8 +226,12 @@ def main() -> None:
     parser.add_argument("--env-file", default="/opt/vvault-public/.env")
     parser.add_argument("--backup-root", default="/opt/deploy/backups/vvault-enrollment")
     parser.add_argument("--receipt-dir", default="/opt/deploy/receipts")
+    parser.add_argument("--systemd-service", default="vvault-backend.service")
     args = parser.parse_args()
     values = read_env(Path(args.env_file))
+    # A hardened systemd unit may carry database/object-storage values directly
+    # instead of in the writable deployment environment file.  Unit values win.
+    values.update(read_systemd_environment(args.systemd_service))
     database_url = values.get("VVAULT_BODY_DATABASE_URL")
     if not database_url:
         fail("runtime database configuration is missing")
