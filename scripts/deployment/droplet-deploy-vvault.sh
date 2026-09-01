@@ -100,7 +100,7 @@ ensure_backup_tools() {
     return 0
   fi
   local tool_root="${VVAULT_BACKUP_TOOL_ROOT:-$BACKUP_ROOT/.tools/postgresql-client}"
-  command -v apt-get >/dev/null 2>&1 && command -v apt-cache >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1 || {
+  command -v apt-get >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v gpg >/dev/null 2>&1 || {
     log "PostgreSQL client tools are missing and no portable package bootstrap is available"
     return 1
   }
@@ -117,7 +117,24 @@ ensure_backup_tools() {
     mkdir -p "$tool_root"
     if ! (
       cd "$temporary"
-      apt-get download "$client_package" libpq5 >/dev/null
+      if ! apt-get download "$client_package" libpq5 >/dev/null 2>&1; then
+        codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")"
+        [[ "$codename" =~ ^[a-z]+$ ]] || exit 1
+        mkdir -p "$temporary/apt-state/lists/partial" "$temporary/apt-cache/archives/partial"
+        curl --fail --silent --show-error --location --output "$temporary/postgresql.asc" \
+          https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        gpg --dearmor --yes --output "$temporary/postgresql.gpg" "$temporary/postgresql.asc"
+        printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+          "$temporary/postgresql.gpg" "$codename" >"$temporary/postgresql.list"
+        apt-get -o Dir::Etc::sourcelist="$temporary/postgresql.list" \
+          -o Dir::Etc::sourceparts="-" -o Dir::Etc::trusted="$temporary/postgresql.gpg" \
+          -o Dir::Etc::trustedparts="-" -o Dir::State="$temporary/apt-state" \
+          -o Dir::Cache="$temporary/apt-cache" update -qq
+        apt-get -o Dir::Etc::sourcelist="$temporary/postgresql.list" \
+          -o Dir::Etc::sourceparts="-" -o Dir::Etc::trusted="$temporary/postgresql.gpg" \
+          -o Dir::Etc::trustedparts="-" -o Dir::State="$temporary/apt-state" \
+          -o Dir::Cache="$temporary/apt-cache" download "$client_package" libpq5 >/dev/null
+      fi
       for package in ./*.deb; do
         dpkg-deb -x "$package" "$tool_root"
       done
