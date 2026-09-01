@@ -7,7 +7,8 @@ set -Eeuo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MIGRATION_DIR="${VVAULT_MIGRATION_DIR:-$REPO_ROOT/vvault/migrations}"
 RECEIPT_DIR="${VVAULT_MIGRATION_RECEIPT_DIR:-/opt/deploy/receipts}"
-DATABASE_URL="${VVAULT_BODY_DATABASE_URL:-}"
+RUNTIME_ENV_FILE="${VVAULT_RUNTIME_ENV_FILE:-/opt/vvault-public/.env}"
+SYSTEMD_SERVICE="${VVAULT_SYSTEMD_SERVICE:-vvault-backend.service}"
 DATABASE_BACKUP_RECEIPT_PATH="${VVAULT_DATABASE_BACKUP_RECEIPT_PATH:-}"
 DATABASE_BACKUP_RECEIPT_ID="${VVAULT_DATABASE_BACKUP_RECEIPT_ID:-}"
 OBJECT_BACKUP_RECEIPT_PATH="${VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_PATH:-}"
@@ -70,19 +71,63 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 require_command psql
-[[ -n "$DATABASE_URL" ]] || die "VVAULT_BODY_DATABASE_URL is required"
 
 # Create a restricted libpq service file so psql receives the full database
-# URL without placing credentials in its command-line arguments.  PGDATABASE
-# cannot carry a URI: libpq interprets it as a literal database name.
+# URL without placing credentials in command-line arguments or logs.  Runtime
+# values may be supplied directly by systemd instead of the deploy .env file.
 connection_service="$(mktemp "${TMPDIR:-/tmp}/vvault-pg-service.XXXXXX")"
 chmod 0600 "$connection_service"
-python3 - "$DATABASE_URL" "$connection_service" <<'PY'
+python3 - "$RUNTIME_ENV_FILE" "$SYSTEMD_SERVICE" "$connection_service" <<'PY'
+import ast
 import os
+import re
+import shlex
+import subprocess
 import sys
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-url, path = sys.argv[1:]
+env_path, service, path = sys.argv[1:]
+values = {}
+if os.environ.get("VVAULT_BODY_DATABASE_URL"):
+    values["VVAULT_BODY_DATABASE_URL"] = os.environ["VVAULT_BODY_DATABASE_URL"]
+pattern = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+try:
+    lines = open(env_path, encoding="utf-8").read().splitlines()
+except OSError:
+    lines = []
+for raw in lines:
+    match = pattern.fullmatch(raw.strip())
+    if not match:
+        continue
+    key, value = match.groups()
+    value = value.strip()
+    if value[:1] in {"'", '"'}:
+        try:
+            value = ast.literal_eval(value)
+        except (SyntaxError, ValueError):
+            raise SystemExit("runtime environment has an invalid quoted value")
+    values[key] = value
+
+try:
+    result = subprocess.run(
+        ["systemctl", "show", service, "-p", "Environment", "--value"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False,
+    )
+except FileNotFoundError:
+    result = None
+if result is not None and result.returncode == 0:
+    try:
+        entries = shlex.split(result.stdout)
+    except ValueError as exc:
+        raise SystemExit("service environment metadata is malformed") from exc
+    for entry in entries:
+        key, separator, value = entry.partition("=")
+        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            values[key] = value
+
+url = values.get("VVAULT_BODY_DATABASE_URL", "")
+if not url:
+    raise SystemExit("runtime database configuration is unavailable")
 parsed = urlsplit(url)
 if parsed.scheme not in {"postgres", "postgresql"} or parsed.fragment:
     raise SystemExit("VVAULT_BODY_DATABASE_URL must be a PostgreSQL URL")

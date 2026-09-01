@@ -49,6 +49,13 @@ def test_migration_runner_has_a_no_database_dry_run_for_receipt_and_file_preflig
     assert 'exit 0' in RUNNER
 
 
+def test_migration_runner_resolves_database_configuration_from_systemd_without_printing_it():
+    assert 'RUNTIME_ENV_FILE="${VVAULT_RUNTIME_ENV_FILE:-/opt/vvault-public/.env}"' in RUNNER
+    assert '["systemctl", "show", service, "-p", "Environment", "--value"]' in RUNNER
+    assert 'runtime database configuration is unavailable' in RUNNER
+    assert 'log "$DATABASE_URL"' not in RUNNER
+
+
 def test_github_deployment_executes_the_reviewed_repository_contract_not_a_host_trigger():
     assert "/opt/deploy/trigger/deploy-trigger.sh" not in WORKFLOW
     assert 'git -C "$repo" fetch origin production:refs/remotes/origin/production' in WORKFLOW
