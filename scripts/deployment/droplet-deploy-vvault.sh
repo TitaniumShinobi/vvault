@@ -127,7 +127,12 @@ ensure_backup_tools() {
     fi
     rm -rf "$temporary"
   fi
-  export PATH="$tool_root/usr/bin:$PATH"
+  local bin_dir
+  for bin_dir in "$tool_root/usr/bin" "$tool_root"/usr/lib/postgresql/*/bin; do
+    [[ -d "$bin_dir" ]] || continue
+    PATH="$bin_dir:$PATH"
+  done
+  export PATH
   export LD_LIBRARY_PATH="$tool_root/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   command -v pg_dump >/dev/null 2>&1 && command -v pg_restore >/dev/null 2>&1 || {
     log "private PostgreSQL client bootstrap did not provide pg_dump and pg_restore"

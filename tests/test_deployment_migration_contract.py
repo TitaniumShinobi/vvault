@@ -80,6 +80,7 @@ def test_deployment_installs_postgres_client_only_when_required_for_recovery_cop
     assert 'for package in ./*.deb; do' in DEPLOY
     assert 'dpkg-deb -x "$package" "$tool_root"' in DEPLOY
     assert 'VVAULT_BACKUP_TOOL_ROOT' in DEPLOY
+    assert '"$tool_root"/usr/lib/postgresql/*/bin' in DEPLOY
     assert 'sudo apt-get' not in DEPLOY
 
 
