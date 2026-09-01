@@ -54,8 +54,4 @@ jobs:
                 if os.path.exists(temporary_path):
                     os.unlink(temporary_path)
             PY
-            if ! /opt/deploy/trigger/deploy-trigger.sh vvault; then
-              sudo systemctl show vvault-backend.service \
-                -p ActiveState -p SubState -p Result -p ExecMainCode -p ExecMainStatus || true
-              exit 1
-            fi
+            /opt/deploy/trigger/deploy-trigger.sh vvault
