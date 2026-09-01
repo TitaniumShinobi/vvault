@@ -16,6 +16,8 @@ from vvault.server import vvault_auth_repository as auth_repository
 ROOT = Path(__file__).resolve().parents[1]
 UP = ROOT / "vvault/migrations/0033_identity_directory.up.sql"
 DOWN = ROOT / "vvault/migrations/0033_identity_directory.down.sql"
+UP_0034 = ROOT / "vvault/migrations/0034_enrollment_session_hardening.up.sql"
+DOWN_0034 = ROOT / "vvault/migrations/0034_enrollment_session_hardening.down.sql"
 
 
 def _binary(name: str) -> str | None:
@@ -59,6 +61,7 @@ def identity_postgres():
           );
         """)
         _run(psql, input_text=UP.read_text())
+        _run(psql, input_text=UP_0034.read_text())
         yield f"host={socket} port={port} user=postgres dbname=postgres"
     finally:
         if started:
@@ -160,3 +163,90 @@ def test_rollback_refuses_destructive_identity_removal(identity_postgres):
     with psycopg.connect(identity_postgres) as conn:
         with pytest.raises(psycopg.Error, match="Refusing destructive rollback"):
             conn.execute(DOWN.read_text())
+        conn.rollback()
+        with pytest.raises(psycopg.Error, match="Refusing destructive rollback"):
+            conn.execute(DOWN_0034.read_text())
+
+
+def test_0034_completes_enrollment_with_rotated_device_bound_session(repository):
+    user, _ = repository.admit_verified_identity(
+        provider="google", provider_subject="enrollment-subject", verified_email="enroll@example.com", name="Enroll",
+        issuer="https://accounts.google.com",
+    )
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    pending = repository.create_pending_enrollment_session(
+        user_id=str(user["id"]), device_secret_digest="pending-device-digest", token_hash="pending-token",
+        expires_at=expires, label="Test browser",
+    )
+    assert pending and pending["enrollment_session_kind"] == "PENDING_ENROLLMENT"
+    documents = [
+        {"key": "terms", "version": "2026-09", "sha256": "terms-hash"},
+        {"key": "privacy", "version": "2026-09", "sha256": "privacy-hash"},
+    ]
+    assert repository.record_enrollment_consents(
+        user_id=str(user["id"]), session_id=str(pending["id"]), documents=documents,
+    )
+    assert repository.create_webauthn_registration_challenge(
+        user_id=str(user["id"]), session_id=str(pending["id"]), challenge_digest="challenge-digest",
+        rp_id="vvault.example", allowed_origin="https://vvault.example", expires_at=expires,
+    )
+    assert repository.consume_webauthn_registration_challenge(
+        user_id=str(user["id"]), session_id=str(pending["id"]), challenge_digest="challenge-digest",
+    ) == {"rp_id": "vvault.example", "allowed_origin": "https://vvault.example"}
+    assert repository.store_webauthn_credential(
+        user_id=str(user["id"]), credential_id="credential_identifier_012345", public_key=b"public-key",
+        sign_count=0, transports=["internal"], user_verified=True,
+    )
+    assert repository.replace_recovery_codes(
+        user_id=str(user["id"]), session_id=str(pending["id"]),
+        code_digests=[f"recovery-{index}" for index in range(8)],
+    )
+    normal = repository.complete_enrollment(
+        user_id=str(user["id"]), pending_session_id=str(pending["id"]),
+        device_id=str(pending["enrollment_device_id"]), normal_token_hash="normal-token",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1), required_documents=documents,
+    )
+    assert normal and normal["enrollment_session_kind"] == "NORMAL"
+    assert repository.get_enrollment_session_by_hash("pending-token") is None
+    current = repository.get_enrollment_session_by_hash("normal-token")
+    assert current and current["account_state"] == "ACTIVE" and current["device_status"] == "TRUSTED"
+
+
+def test_0034_pending_device_requires_approval_or_one_time_recovery(repository):
+    user, _ = repository.admit_verified_identity(
+        provider="github", provider_subject="active-owner-subject", verified_email="active@example.com", name="Active",
+    )
+    with repository._connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET account_state='ACTIVE' WHERE id=%s", (user["id"],))
+            cur.execute(
+                """INSERT INTO enrollment_devices(user_id, device_secret_digest, status, approved_by_user_id, approved_at)
+                   VALUES(%s,'trusted-device','TRUSTED',%s,now()) RETURNING id""",
+                (user["id"], user["id"]),
+            )
+            trusted_device = str(cur.fetchone()["id"])
+            cur.execute(
+                """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id)
+                   VALUES(%s,'trusted-session',now()+interval '1 hour','NORMAL',%s) RETURNING id""",
+                (user["id"], trusted_device),
+            )
+            trusted_session = str(cur.fetchone()["id"])
+            for index in range(8):
+                cur.execute("INSERT INTO enrollment_recovery_codes(user_id, code_digest) VALUES(%s,%s)", (user["id"], f"recover-{index}"))
+        conn.commit()
+    pending = repository.issue_pending_device_session(
+        user_id=str(user["id"]), device_secret_digest="new-device", token_hash="new-pending",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    assert pending and pending["enrollment_session_kind"] == "PENDING_DEVICE"
+    normal = repository.approve_pending_device(
+        actor_user_id=str(user["id"]), actor_session_id=trusted_session,
+        pending_session_id=str(pending["id"]), normal_token_hash="new-normal",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    assert normal and normal["enrollment_session_kind"] == "NORMAL"
+    assert repository.revoke_enrollment_device(
+        actor_user_id=str(user["id"]), actor_session_id=trusted_session,
+        device_id=str(normal["enrollment_device_id"]),
+    )
+    assert repository.get_enrollment_session_by_hash("new-normal") is None

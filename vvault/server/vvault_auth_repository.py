@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import hmac
 import hashlib
+import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from vvault.server import vvault_auth_crypto
 
@@ -219,12 +220,17 @@ class VVaultAuthRepository:
                         sessions.user_id,
                         sessions.created_at AS session_created_at,
                         sessions.expires_at,
+                        sessions.enrollment_session_kind,
+                        sessions.enrollment_device_id,
                         users.email,
                         users.name,
                         users.role,
-                        users.auth_provider
+                        users.auth_provider,
+                        users.account_state,
+                        enrollment_devices.status AS enrollment_device_status
                     FROM sessions
                     JOIN users ON users.id = sessions.user_id
+                    LEFT JOIN enrollment_devices ON enrollment_devices.id = sessions.enrollment_device_id
                     WHERE sessions.token_hash = %s
                       AND sessions.revoked_at IS NULL
                       AND sessions.expires_at > now()
@@ -523,3 +529,358 @@ class VVaultAuthRepository:
                 result = _row_to_dict(cur.fetchone())
             conn.commit()
         return result
+
+    # Enrollment/session API.  The web layer verifies provider and WebAuthn
+    # proofs; this repository persists only their bounded, already-validated
+    # results.  All new session state uses the 0034 enrollment_* namespace so
+    # legacy 0033 sessions remain readable during staged rollout.
+    def create_pending_enrollment_session(
+        self, *, user_id: str, device_secret_digest: str, token_hash: str,
+        expires_at: datetime, ip_hash: str | None = None,
+        user_agent_hash: str | None = None, label: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not device_secret_digest or not token_hash:
+            raise ValueError("device and session token digests are required")
+        label = vvault_auth_crypto.normalize_device_label(label)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id FROM users WHERE id=%s AND account_state='PENDING_ENROLLMENT' FOR UPDATE""",
+                    (user_id,),
+                )
+                if not cur.fetchone():
+                    conn.rollback(); return None
+                cur.execute(
+                    """INSERT INTO enrollment_devices
+                       (user_id, device_secret_digest, label, status, ip_hash, user_agent_hash)
+                       VALUES (%s,%s,%s,'PENDING',%s,%s) RETURNING id""",
+                    (user_id, device_secret_digest, label, ip_hash, user_agent_hash),
+                )
+                device = _row_to_dict(cur.fetchone())
+                cur.execute(
+                    """INSERT INTO sessions
+                       (user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id)
+                       VALUES (%s,%s,%s,'PENDING_ENROLLMENT',%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (user_id, token_hash, expires_at, device["id"]),
+                )
+                session = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return session
+
+    def get_enrollment_session_by_hash(self, token_hash: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT sessions.id AS session_id, sessions.user_id, sessions.expires_at,
+                              sessions.enrollment_session_kind, sessions.enrollment_device_id,
+                              users.account_state, enrollment_devices.status AS device_status
+                         FROM sessions
+                         JOIN users ON users.id=sessions.user_id
+                         LEFT JOIN enrollment_devices ON enrollment_devices.id=sessions.enrollment_device_id
+                        WHERE sessions.token_hash=%s AND sessions.revoked_at IS NULL
+                          AND sessions.expires_at > now()""",
+                    (token_hash,),
+                )
+                return _row_to_dict(cur.fetchone())
+
+    def record_enrollment_consents(
+        self, *, user_id: str, session_id: str,
+        documents: Sequence[Mapping[str, str]], ip_hash: str | None = None,
+        user_agent_hash: str | None = None,
+    ) -> bool:
+        receipts = {(str(row.get("key") or ""), str(row.get("version") or ""), str(row.get("sha256") or "")) for row in documents}
+        if not receipts or any(not all(receipt) for receipt in receipts):
+            raise ValueError("complete consent receipts are required")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT 1 FROM sessions JOIN users ON users.id=sessions.user_id
+                        WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                          AND sessions.expires_at > now()
+                          AND sessions.enrollment_session_kind='PENDING_ENROLLMENT'
+                          AND users.account_state='PENDING_ENROLLMENT' FOR UPDATE""",
+                    (session_id, user_id),
+                )
+                if not cur.fetchone():
+                    conn.rollback(); return False
+                for key, version, sha256 in receipts:
+                    cur.execute(
+                        """INSERT INTO enrollment_consents
+                           (user_id, document_key, document_version, document_sha256, ip_hash, user_agent_hash)
+                           VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                        (user_id, key, version, sha256, ip_hash, user_agent_hash),
+                    )
+            conn.commit()
+        return True
+
+    def create_webauthn_registration_challenge(
+        self, *, user_id: str, session_id: str, challenge_digest: str,
+        rp_id: str, allowed_origin: str, expires_at: datetime,
+    ) -> bool:
+        if not challenge_digest or not rp_id or not allowed_origin:
+            raise ValueError("complete WebAuthn challenge binding is required")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO enrollment_webauthn_challenges
+                       (challenge_digest, user_id, session_id, rp_id, allowed_origin, expires_at)
+                       SELECT %s,%s,%s,%s,%s,%s WHERE EXISTS (
+                         SELECT 1 FROM sessions JOIN users ON users.id=sessions.user_id
+                          WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                            AND sessions.expires_at > now()
+                            AND sessions.enrollment_session_kind='PENDING_ENROLLMENT'
+                            AND users.account_state='PENDING_ENROLLMENT'
+                       ) RETURNING challenge_digest""",
+                    (challenge_digest, user_id, session_id, rp_id, allowed_origin, expires_at, session_id, user_id),
+                )
+                created = cur.fetchone() is not None
+            conn.commit()
+        return created
+
+    def consume_webauthn_registration_challenge(
+        self, *, user_id: str, session_id: str, challenge_digest: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE enrollment_webauthn_challenges SET consumed_at=now()
+                         WHERE challenge_digest=%s AND user_id=%s AND session_id=%s
+                           AND consumed_at IS NULL AND expires_at > now()
+                         RETURNING rp_id, allowed_origin""",
+                    (challenge_digest, user_id, session_id),
+                )
+                result = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return result
+
+    def store_webauthn_credential(
+        self, *, user_id: str, credential_id: str, public_key: bytes,
+        sign_count: int, transports: Sequence[str], user_verified: bool,
+    ) -> bool:
+        credential_id = vvault_auth_crypto.normalize_webauthn_credential_id(credential_id)
+        if not public_key or sign_count < 0 or not user_verified:
+            return False
+        allowed_transports = {"ble", "hybrid", "internal", "nfc", "usb"}
+        normalized_transports = sorted({str(value) for value in transports})
+        if any(value not in allowed_transports for value in normalized_transports):
+            raise ValueError("WebAuthn transport is invalid")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO enrollment_webauthn_credentials
+                       (credential_id, user_id, public_key, sign_count, transports, user_verified_at)
+                       VALUES (%s,%s,%s,%s,%s::jsonb,now())
+                       ON CONFLICT (credential_id) DO NOTHING RETURNING credential_id""",
+                    (credential_id, user_id, bytes(public_key), sign_count, json.dumps(normalized_transports)),
+                )
+                stored = cur.fetchone() is not None
+            conn.commit()
+        return stored
+
+    def replace_recovery_codes(
+        self, *, user_id: str, session_id: str, code_digests: Sequence[str],
+    ) -> bool:
+        digests = [str(value) for value in code_digests]
+        if not 8 <= len(digests) <= 20 or len(digests) != len(set(digests)) or any(not value for value in digests):
+            raise ValueError("8-20 unique recovery code digests are required")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT 1 FROM sessions JOIN users ON users.id=sessions.user_id
+                        WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                          AND sessions.expires_at > now() AND sessions.enrollment_session_kind='PENDING_ENROLLMENT'
+                          AND users.account_state='PENDING_ENROLLMENT' FOR UPDATE""",
+                    (session_id, user_id),
+                )
+                if not cur.fetchone():
+                    conn.rollback(); return False
+                cur.execute("SELECT 1 FROM enrollment_recovery_codes WHERE user_id=%s LIMIT 1 FOR UPDATE", (user_id,))
+                if cur.fetchone():
+                    conn.rollback(); return False
+                for digest in digests:
+                    cur.execute("INSERT INTO enrollment_recovery_codes(user_id, code_digest) VALUES(%s,%s)", (user_id, digest))
+            conn.commit()
+        return True
+
+    def complete_enrollment(
+        self, *, user_id: str, pending_session_id: str, device_id: str,
+        normal_token_hash: str, expires_at: datetime,
+        required_documents: Sequence[Mapping[str, str]],
+    ) -> dict[str, Any] | None:
+        required = {(str(row.get("key") or ""), str(row.get("version") or ""), str(row.get("sha256") or "")) for row in required_documents}
+        if not required or not normal_token_hash:
+            raise ValueError("enrollment completion arguments are incomplete")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT sessions.id FROM sessions JOIN users ON users.id=sessions.user_id
+                        JOIN enrollment_devices ON enrollment_devices.id=sessions.enrollment_device_id
+                        WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.enrollment_device_id=%s
+                          AND sessions.revoked_at IS NULL AND sessions.expires_at > now()
+                          AND sessions.enrollment_session_kind='PENDING_ENROLLMENT'
+                          AND users.account_state='PENDING_ENROLLMENT'
+                          AND enrollment_devices.status='PENDING' FOR UPDATE OF sessions, users, enrollment_devices""",
+                    (pending_session_id, user_id, device_id),
+                )
+                if not cur.fetchone():
+                    conn.rollback(); return None
+                cur.execute("SELECT document_key, document_version, document_sha256 FROM enrollment_consents WHERE user_id=%s", (user_id,))
+                actual = {(str(row["document_key"]), str(row["document_version"]), str(row["document_sha256"])) for row in cur.fetchall()}
+                if not required.issubset(actual):
+                    conn.rollback(); return None
+                cur.execute("SELECT 1 FROM enrollment_webauthn_credentials WHERE user_id=%s AND revoked_at IS NULL LIMIT 1", (user_id,))
+                if not cur.fetchone():
+                    conn.rollback(); return None
+                cur.execute("SELECT count(*) AS count FROM enrollment_recovery_codes WHERE user_id=%s AND used_at IS NULL", (user_id,))
+                if int(cur.fetchone()["count"]) < 8:
+                    conn.rollback(); return None
+                cur.execute("UPDATE users SET account_state='ACTIVE', updated_at=now() WHERE id=%s", (user_id,))
+                cur.execute("UPDATE enrollment_devices SET status='TRUSTED', approved_by_user_id=%s, approved_at=now() WHERE id=%s", (user_id, device_id))
+                cur.execute("UPDATE sessions SET revoked_at=now() WHERE id=%s", (pending_session_id,))
+                cur.execute(
+                    """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id, rotated_from_session_id)
+                       VALUES(%s,%s,%s,'NORMAL',%s,%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (user_id, normal_token_hash, expires_at, device_id, pending_session_id),
+                )
+                result = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return result
+
+    def issue_pending_device_session(
+        self, *, user_id: str, device_secret_digest: str, token_hash: str,
+        expires_at: datetime, ip_hash: str | None = None,
+        user_agent_hash: str | None = None, label: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not device_secret_digest or not token_hash:
+            raise ValueError("device and session token digests are required")
+        label = vvault_auth_crypto.normalize_device_label(label)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM users WHERE id=%s AND account_state='ACTIVE' FOR UPDATE", (user_id,))
+                if not cur.fetchone():
+                    conn.rollback(); return None
+                cur.execute(
+                    """INSERT INTO enrollment_devices(user_id, device_secret_digest, label, status, ip_hash, user_agent_hash)
+                       VALUES(%s,%s,%s,'PENDING',%s,%s) RETURNING id""",
+                    (user_id, device_secret_digest, label, ip_hash, user_agent_hash),
+                )
+                device = _row_to_dict(cur.fetchone())
+                cur.execute(
+                    """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id)
+                       VALUES(%s,%s,%s,'PENDING_DEVICE',%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (user_id, token_hash, expires_at, device["id"]),
+                )
+                result = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return result
+
+    def _trusted_actor_locked(self, cur: Any, *, actor_user_id: str, actor_session_id: str) -> bool:
+        cur.execute(
+            """SELECT 1 FROM sessions JOIN users ON users.id=sessions.user_id
+                JOIN enrollment_devices ON enrollment_devices.id=sessions.enrollment_device_id
+                WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                  AND sessions.expires_at > now() AND sessions.enrollment_session_kind='NORMAL'
+                  AND users.account_state='ACTIVE' AND enrollment_devices.status='TRUSTED' FOR UPDATE OF sessions""",
+            (actor_session_id, actor_user_id),
+        )
+        return cur.fetchone() is not None
+
+    def approve_pending_device(
+        self, *, actor_user_id: str, actor_session_id: str, pending_session_id: str,
+        normal_token_hash: str, expires_at: datetime,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if not self._trusted_actor_locked(cur, actor_user_id=actor_user_id, actor_session_id=actor_session_id):
+                    conn.rollback(); return None
+                cur.execute(
+                    """SELECT sessions.user_id, sessions.enrollment_device_id FROM sessions
+                         JOIN enrollment_devices ON enrollment_devices.id=sessions.enrollment_device_id
+                        WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                          AND sessions.expires_at > now() AND sessions.enrollment_session_kind='PENDING_DEVICE'
+                          AND enrollment_devices.status='PENDING' FOR UPDATE OF sessions, enrollment_devices""",
+                    (pending_session_id, actor_user_id),
+                )
+                pending = _row_to_dict(cur.fetchone())
+                if not pending:
+                    conn.rollback(); return None
+                device_id = str(pending["enrollment_device_id"])
+                cur.execute("UPDATE enrollment_devices SET status='TRUSTED', approved_by_user_id=%s, approved_at=now() WHERE id=%s", (actor_user_id, device_id))
+                cur.execute("UPDATE sessions SET revoked_at=now() WHERE id=%s", (pending_session_id,))
+                cur.execute(
+                    """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id, rotated_from_session_id)
+                       VALUES(%s,%s,%s,'NORMAL',%s,%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (actor_user_id, normal_token_hash, expires_at, device_id, pending_session_id),
+                )
+                result = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return result
+
+    def recover_pending_device(
+        self, *, user_id: str, pending_session_id: str, recovery_code_digest: str,
+        normal_token_hash: str, expires_at: datetime,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT sessions.enrollment_device_id FROM sessions JOIN enrollment_devices
+                         ON enrollment_devices.id=sessions.enrollment_device_id JOIN users ON users.id=sessions.user_id
+                        WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                          AND sessions.expires_at > now() AND sessions.enrollment_session_kind='PENDING_DEVICE'
+                          AND enrollment_devices.status='PENDING' AND users.account_state='ACTIVE'
+                        FOR UPDATE OF sessions, enrollment_devices""",
+                    (pending_session_id, user_id),
+                )
+                pending = _row_to_dict(cur.fetchone())
+                if not pending:
+                    conn.rollback(); return None
+                cur.execute(
+                    """UPDATE enrollment_recovery_codes SET used_at=now()
+                         WHERE user_id=%s AND code_digest=%s AND used_at IS NULL RETURNING id""",
+                    (user_id, recovery_code_digest),
+                )
+                if not cur.fetchone():
+                    conn.rollback(); return None
+                device_id = str(pending["enrollment_device_id"])
+                cur.execute("UPDATE enrollment_devices SET status='TRUSTED', approved_by_user_id=%s, approved_at=now() WHERE id=%s", (user_id, device_id))
+                cur.execute("UPDATE sessions SET revoked_at=now() WHERE id=%s", (pending_session_id,))
+                cur.execute(
+                    """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id, rotated_from_session_id)
+                       VALUES(%s,%s,%s,'NORMAL',%s,%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (user_id, normal_token_hash, expires_at, device_id, pending_session_id),
+                )
+                result = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return result
+
+    def revoke_enrollment_device(self, *, actor_user_id: str, actor_session_id: str, device_id: str) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if not self._trusted_actor_locked(cur, actor_user_id=actor_user_id, actor_session_id=actor_session_id):
+                    conn.rollback(); return False
+                cur.execute(
+                    """UPDATE enrollment_devices SET status='REVOKED', revoked_at=now()
+                         WHERE id=%s AND user_id=%s AND status <> 'REVOKED' RETURNING id""",
+                    (device_id, actor_user_id),
+                )
+                if not cur.fetchone():
+                    conn.rollback(); return False
+                cur.execute("UPDATE sessions SET revoked_at=now() WHERE enrollment_device_id=%s AND revoked_at IS NULL", (device_id,))
+            conn.commit()
+        return True
+
+    def revoke_all_user_sessions(self, *, user_id: str, except_session_id: str | None = None) -> int:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if except_session_id:
+                    cur.execute("UPDATE sessions SET revoked_at=now() WHERE user_id=%s AND id<>%s AND revoked_at IS NULL", (user_id, except_session_id))
+                else:
+                    cur.execute("UPDATE sessions SET revoked_at=now() WHERE user_id=%s AND revoked_at IS NULL", (user_id,))
+                changed = int(cur.rowcount or 0)
+            conn.commit()
+        return changed

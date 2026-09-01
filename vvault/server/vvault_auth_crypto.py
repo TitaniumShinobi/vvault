@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import secrets
+from collections.abc import Iterable
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -79,3 +80,54 @@ def normalize_email(value: str) -> str:
     if not local or not domain or "." not in domain:
         raise ValueError("a valid email address is required")
     return email
+
+
+def normalize_recovery_code(value: str) -> str:
+    """Normalize a human-entered recovery code before keyed hashing.
+
+    The normalized form is deliberately small and unambiguous; callers never
+    persist or log it.  A code has 128 bits of entropy before formatting.
+    """
+    code = value.strip().upper().replace("-", "")
+    if len(code) != 32 or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" for character in code):
+        raise ValueError("recovery code is invalid")
+    return code
+
+
+def recovery_codes(*, count: int = 10) -> list[str]:
+    """Create display-once recovery codes without persisting raw values."""
+    if not 1 <= count <= 20:
+        raise ValueError("recovery code count must be between 1 and 20")
+    generated: set[str] = set()
+    while len(generated) < count:
+        raw = base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+        generated.add(f"{raw[:8]}-{raw[8:16]}-{raw[16:24]}-{raw[24:32]}")
+    return sorted(generated)
+
+
+def digest_recovery_codes(values: Iterable[str], key: str) -> list[str]:
+    digests = [keyed_digest(normalize_recovery_code(value), key) for value in values]
+    if not digests or len(digests) != len(set(digests)):
+        raise ValueError("recovery codes must be non-empty and unique")
+    return digests
+
+
+def normalize_device_label(value: str | None) -> str | None:
+    if value is None:
+        return None
+    label = " ".join(value.split())
+    if not label:
+        return None
+    if len(label) > 120:
+        raise ValueError("device label is too long")
+    return label
+
+
+def normalize_webauthn_credential_id(value: str) -> str:
+    """Accept URL-safe base64 credential identifiers without decoding them."""
+    credential_id = value.strip()
+    if not 16 <= len(credential_id) <= 2048:
+        raise ValueError("WebAuthn credential ID is invalid")
+    if any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for character in credential_id):
+        raise ValueError("WebAuthn credential ID is invalid")
+    return credential_id

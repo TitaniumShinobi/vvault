@@ -1603,14 +1603,7 @@ def _get_authenticated_user_id() -> Optional[str]:
     current_user_id = current_user.get('id') or current_user.get('user_id')
     if _is_uuid(current_user_id):
         return current_user_id.strip()
-
-    user_email = _get_current_user_email()
-    if not user_email:
-        return None
-    user = db_get_user(user_email)
-    if not user:
-        return None
-    return user.get('id')
+    return None
 
 
 def _ensure_vvault_user(email: str, name: Optional[str] = None) -> Dict[str, Any]:
@@ -3089,6 +3082,10 @@ def db_get_session(token: str) -> Optional[Dict]:
             'expires_at': session_data.get('expires_at'),
             'created_at': session_data.get('session_created_at'),
             'source': 'vvault_auth',
+            'account_state': session_data.get('account_state'),
+            'enrollment_session_kind': session_data.get('enrollment_session_kind'),
+            'enrollment_device_id': str(session_data.get('enrollment_device_id') or ''),
+            'enrollment_device_status': session_data.get('enrollment_device_status'),
         }
     except Exception as e:
         logger.debug(f"VVAULT auth session lookup failed: {type(e).__name__}")
@@ -3171,17 +3168,24 @@ def verify_standalone_auth_session_token(raw_token: str, secret: str) -> Optiona
 def get_current_user():
     """Extract and validate current user from request token (database-backed)"""
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
+        auth_header = request.headers.get('Authorization') or ''
+        token = auth_header.split(' ', 1)[1] if auth_header.startswith('Bearer ') else str(request.cookies.get('vvault_session') or '')
+        if not token:
             return None, None
-        
-        token = auth_header.split(' ')[1]
         
         session = db_get_session(token)
         if not session:
             return None, None
-        
-        return session, token
+        state = str(session.get('account_state') or 'LEGACY')
+        kind = str(session.get('enrollment_session_kind') or 'LEGACY')
+        device_status = str(session.get('enrollment_device_status') or '')
+        if state == 'ACTIVE' and kind == 'NORMAL' and device_status == 'TRUSTED':
+            return session, token
+        # Existing sessions remain usable only during the explicitly staged
+        # migration window. New pending/device sessions never reach data routes.
+        if state == 'LEGACY' and kind == 'LEGACY' and str(os.environ.get('VVAULT_ENROLLMENT_ENFORCE') or '').lower() not in {'1', 'true', 'yes'}:
+            return session, token
+        return None, None
     except Exception as e:
         logger.error(f"Error in get_current_user: {e}")
         return None, None
@@ -3218,6 +3222,28 @@ def require_auth(f):
         request.current_token = token
         return f(*args, **kwargs)
     return decorated_function
+
+
+@app.before_request
+def deny_untrusted_data_route_access():
+    """One owner-bound session is the only browser authority for vault data.
+
+    This runs before legacy `require_chatty_auth` decorators, preventing
+    caller-controlled email/header values or admin role from selecting a
+    tenant. Internal service contracts are rebuilt in Plan 4 with signed,
+    owner-bound assertions rather than this compatibility bypass.
+    """
+    path = request.path
+    if not (path.startswith('/api/vault/') or path.startswith('/api/chatty/')):
+        return None
+    if path in {'/api/vault/health', '/api/chatty/health'}:
+        return None
+    session, token = get_current_user()
+    if not session:
+        return jsonify({"success": False, "error": "Active trusted-device session required"}), 401
+    request.current_user = session
+    request.current_token = token
+    return None
 
 def require_chatty_auth(f):
     """Auth decorator for Chatty integration endpoints.
@@ -4471,7 +4497,7 @@ def get_vault_user_info():
         user_email = current_user.get('email')
         if not user_email:
             return jsonify({"success": False, "error": "Invalid session"}), 401
-        user_role = current_user.get('role', 'user')
+        user_role = 'user'
         local_user = AUTH_REPOSITORY.get_user_by_email(user_email)
         display_name = (
             (local_user or {}).get('name')
@@ -4537,8 +4563,9 @@ def get_vault_files():
         user_email = current_user.get('email')
         if not user_email:
             return jsonify({"success": False, "error": "Invalid session"}), 401
-        user_role = current_user.get('role', 'user')
-        is_admin = user_role == 'admin'
+        # Ordinary account sessions are never cross-owner, including admin
+        # roles. Support impersonation requires a separately audited contract.
+        is_admin = False
         requested_path = (request.args.get('path') or '').strip().strip('/')
         
         user_lookup_started_at = time.perf_counter()
@@ -4546,7 +4573,7 @@ def get_vault_files():
         user_lookup_ms = int(round((time.perf_counter() - user_lookup_started_at) * 1000))
         user_name = current_user.get('name') or user_email.split('@')[0]
         
-        if not is_admin and not user_id:
+        if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
         row_fetch_started_at = time.perf_counter()
@@ -4725,10 +4752,7 @@ def upload_knowledge_files():
 
         callsign = _normalize_callsign(construct_id)
         user_email = current_user.get('email')
-        user_role = current_user.get('role', 'user')
         user_id = _get_authenticated_user_id()
-        if not user_id and user_role == 'admin':
-            user_id = _resolve_construct_owner_user_id(callsign)
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
         uploaded_files = request.files.getlist('files')
@@ -4937,10 +4961,7 @@ def sync_memup():
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
-        user_role = current_user.get('role', 'user')
         user_id = _get_authenticated_user_id()
-        if not user_id and user_role == 'admin':
-            user_id = _resolve_construct_owner_user_id(construct_id)
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
@@ -4973,10 +4994,7 @@ def materialize_memup():
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
-        user_role = current_user.get('role', 'user')
         user_id = _get_authenticated_user_id()
-        if not user_id and user_role == 'admin':
-            user_id = _resolve_construct_owner_user_id(construct_id)
         if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
@@ -5043,10 +5061,9 @@ def memup_status():
         if not construct_id:
             return jsonify({"success": False, "error": "construct_id is required"}), 400
 
-        user_role = current_user.get('role', 'user')
-        is_admin = user_role == 'admin'
+        is_admin = False
         user_id = _get_authenticated_user_id()
-        if not user_id and not is_admin:
+        if not user_id:
             return jsonify({"success": False, "error": "User not found"}), 403
 
         original_path = _original_capsule_path(construct_id)
@@ -5437,7 +5454,7 @@ def get_vault_file(file_id):
     try:
         current_user = request.current_user
         user_email = current_user.get('email')
-        user_role = current_user.get('role', 'user')
+        user_role = 'user'
 
         row = VAULT_FILE_REPOSITORY.get_by_id(file_id)
 
@@ -5463,7 +5480,7 @@ def get_vault_file(file_id):
         backing_row = _lookup_materialized_capsule_backing_row(
             row,
             user_id=effective_user_id,
-            is_admin=user_role == 'admin',
+            is_admin=False,
         )
         if backing_row and isinstance(backing_row.get('content'), str) and backing_row.get('content'):
             file_payload = _build_preview_payload_from_materialized_sibling(
@@ -5555,7 +5572,7 @@ def preview_vault_file():
     try:
         current_user = request.current_user
         user_email = current_user.get('email')
-        user_role = current_user.get('role', 'user')
+        user_role = 'user'
         payload = request.get_json(silent=True) or {}
         filename = str(payload.get('filename') or payload.get('storage_path') or '').strip()
         storage_path = str(payload.get('storage_path') or filename).strip()
@@ -5596,7 +5613,7 @@ def preview_vault_file():
                 storage_path=storage_path,
                 construct_id=construct_id,
                 user_id=effective_user_id,
-                is_admin=user_role == 'admin',
+                is_admin=False,
             )
             requested_row = dict(matched_row or {})
             for key, value in pseudo_row.items():
@@ -5606,7 +5623,7 @@ def preview_vault_file():
             backing_row = _lookup_materialized_capsule_backing_row(
                 requested_row,
                 user_id=effective_user_id,
-                is_admin=user_role == 'admin',
+                is_admin=False,
             )
             if backing_row and isinstance(backing_row.get('content'), str) and backing_row.get('content'):
                 file_payload = _build_preview_payload_from_materialized_sibling(
@@ -7960,7 +7977,7 @@ def get_chatty_constructs():
 
         current_user = request.current_user
         user_email = current_user.get('email')
-        user_role = current_user.get('role', 'user')
+        user_role = 'user'
         is_admin = user_role == 'admin'
 
         if is_admin:
@@ -8778,20 +8795,15 @@ def register():
 def logout():
     """User logout endpoint (database-backed)"""
     try:
-        auth_header = request.headers.get('Authorization')
         ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        
-        if auth_header and auth_header.startswith('Bearer '):
-            token = auth_header.split(' ')[1]
-            session = db_get_session(token)
-            
-            if session:
-                user_email = session['email']
-                db_delete_session(token)
-                log_auth_decision("logout", user_email, "/api/auth/logout", "allowed", "session_terminated", ip)
-                logger.info(f"User logged out: {user_email}")
-        
-        return jsonify({"success": True, "message": "Logged out successfully"})
+        session, token = get_current_user()
+        if session and token:
+            db_delete_session(token)
+            log_auth_decision("logout", session.get('email', 'unknown'), "/api/auth/logout", "allowed", "session_terminated", ip)
+        response = jsonify({"success": True, "message": "Logged out successfully"})
+        response.delete_cookie("vvault_session", path="/")
+        response.delete_cookie("vvault_enrollment_session", path="/")
+        return response
         
     except Exception as e:
         logger.error(f"Logout error: {e}")
@@ -8801,13 +8813,7 @@ def logout():
 def verify_token():
     """Verify authentication token (database-backed)"""
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({"success": False, "error": "No token provided"}), 401
-        
-        token = auth_header.split(' ')[1]
-        
-        session = db_get_session(token)
+        session, token = get_current_user()
         if not session:
             return jsonify({"success": False, "error": "Invalid or expired token"}), 401
         
@@ -8823,7 +8829,7 @@ def verify_token():
         return jsonify({
             "success": True,
             "user": user_info,
-            "token": token
+            "token": None
         })
         
     except Exception as e:
@@ -9560,6 +9566,203 @@ def get_construct_ledger(construct_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+# Enrollment helpers. These cookies hold only opaque, server-validated session
+# material; they are never browser-readable bearer tokens.
+def _enrollment_documents() -> list[dict[str, str]]:
+    documents = []
+    for key, filename in (("vvault:terms", "VVAULT_TERMS_OF_SERVICE.md"), ("vvault:privacy", "VVAULT_PRIVACY_NOTICE.md")):
+        content = (_repo_root / "docs" / "legal" / filename).read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        documents.append({"key": key, "version": digest, "sha256": digest})
+    return documents
+
+
+def _enrollment_session_from_request() -> dict | None:
+    raw = str(request.cookies.get("vvault_enrollment_session") or "")
+    if not raw:
+        return None
+    try:
+        return AUTH_REPOSITORY.get_enrollment_session_by_hash(_session_token_hash(raw))
+    except Exception:
+        return None
+
+
+def _enrollment_response(payload: dict, *, pending_token: str | None = None, normal_token: str | None = None, status: int = 200):
+    response = jsonify(payload); response.status_code = status
+    response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
+    secure = _runtime_is_production()
+    if pending_token:
+        response.set_cookie("vvault_enrollment_session", pending_token, httponly=True, secure=secure, samesite="Strict", max_age=20 * 60, path="/")
+    if normal_token:
+        response.set_cookie("vvault_session", normal_token, httponly=True, secure=secure, samesite="Strict", max_age=30 * 24 * 60 * 60, path="/")
+        response.delete_cookie("vvault_enrollment_session", path="/")
+    return response
+
+
+def _start_enrollment_session(user: dict, frontend: str):
+    from flask import redirect
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    user_id = str(user.get("id") or "")
+    device_secret, token = identity_crypto.opaque_token(), identity_crypto.opaque_token()
+    state = str(user.get("account_state") or "")
+    args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=_session_token_hash(token), expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
+    session = AUTH_REPOSITORY.create_pending_enrollment_session(**args) if state == "PENDING_ENROLLMENT" else AUTH_REPOSITORY.issue_pending_device_session(**args)
+    if not session:
+        raise RuntimeError("cannot issue enrollment session")
+    target = f"{frontend.rstrip('/')}/?identity_pending=1" if state == "PENDING_ENROLLMENT" else f"{frontend.rstrip('/')}/?device_approval_required=1"
+    response = redirect(target)
+    response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
+    response.set_cookie("vvault_enrollment_session", token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=20 * 60, path="/")
+    return response
+
+
+@app.route('/api/auth/enrollment/consents', methods=['POST'])
+def accept_canonical_enrollment_consents():
+    pending = _enrollment_session_from_request()
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_ENROLLMENT":
+        return jsonify({"success": False, "error": "Pending enrollment session required"}), 401
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    accepted = AUTH_REPOSITORY.record_enrollment_consents(user_id=str(pending["user_id"]), session_id=str(pending["session_id"]), documents=_enrollment_documents(), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()))
+    if not accepted:
+        return jsonify({"success": False, "error": "Enrollment consent was denied"}), 403
+    return _enrollment_response({"success": True, "documents": _enrollment_documents()})
+
+
+@app.route('/api/auth/enrollment/webauthn/challenge', methods=['POST'])
+def canonical_webauthn_challenge():
+    pending = _enrollment_session_from_request()
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_ENROLLMENT":
+        return jsonify({"success": False, "error": "Pending enrollment session required"}), 401
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    origin = _get_frontend_url(); parsed = urlparse(origin)
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname or (parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1"}):
+        return jsonify({"success": False, "error": "WebAuthn origin is invalid"}), 503
+    challenge = secrets.token_bytes(32); encoded = base64.urlsafe_b64encode(challenge).rstrip(b"=").decode("ascii")
+    if not AUTH_REPOSITORY.create_webauthn_registration_challenge(user_id=str(pending["user_id"]), session_id=str(pending["session_id"]), challenge_digest=identity_crypto.keyed_digest(encoded, _identity_hmac_key()), rp_id=parsed.hostname, allowed_origin=origin, expires_at=datetime.now(timezone.utc) + timedelta(minutes=5)):
+        return jsonify({"success": False, "error": "WebAuthn challenge was denied"}), 403
+    return _enrollment_response({"success": True, "publicKey": {"challenge": encoded, "rp": {"id": parsed.hostname, "name": "VVAULT"}, "user": {"id": base64.urlsafe_b64encode(str(pending["user_id"]).encode()).rstrip(b"=").decode(), "name": str(pending["user_id"]), "displayName": "VVAULT user"}, "pubKeyCredParams": [{"type": "public-key", "alg": -7}, {"type": "public-key", "alg": -257}], "authenticatorSelection": {"residentKey": "preferred", "userVerification": "required"}, "attestation": "none", "timeout": 300000}})
+
+
+@app.route('/api/auth/enrollment/webauthn/register', methods=['POST'])
+def canonical_webauthn_register():
+    pending = _enrollment_session_from_request(); credential = request.get_json(silent=True) or {}
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_ENROLLMENT":
+        return jsonify({"success": False, "error": "Pending enrollment session required"}), 401
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    try:
+        encoded = str(((credential.get("response") or {}).get("clientDataJSON") or ""))
+        client_data = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8"))
+        if client_data.get("type") != "webauthn.create": raise ValueError("unexpected WebAuthn ceremony")
+        challenge = str(client_data.get("challenge") or "")
+        stored = AUTH_REPOSITORY.consume_webauthn_registration_challenge(user_id=str(pending["user_id"]), session_id=str(pending["session_id"]), challenge_digest=identity_crypto.keyed_digest(challenge, _identity_hmac_key()))
+        if not stored: raise ValueError("challenge expired")
+        from webauthn import verify_registration_response
+        from webauthn.helpers import parse_registration_credential_json
+        verified = verify_registration_response(credential=parse_registration_credential_json(credential), expected_challenge=base64.urlsafe_b64decode(challenge + "=" * (-len(challenge) % 4)), expected_rp_id=str(stored["rp_id"]), expected_origin=str(stored["allowed_origin"]), require_user_verification=True)
+        transports = ((credential.get("response") or {}).get("transports") or [])
+        if not AUTH_REPOSITORY.store_webauthn_credential(user_id=str(pending["user_id"]), credential_id=base64.urlsafe_b64encode(bytes(verified.credential_id)).rstrip(b"=").decode(), public_key=bytes(verified.credential_public_key), sign_count=int(verified.sign_count), transports=transports if isinstance(transports, list) else [], user_verified=True):
+            raise ValueError("credential rejected")
+        return _enrollment_response({"success": True, "webauthn_verified": True})
+    except Exception as exc:
+        logger.warning("WebAuthn enrollment rejected: %s", type(exc).__name__)
+        return jsonify({"success": False, "error": "WebAuthn registration was rejected"}), 400
+
+
+@app.route('/api/auth/enrollment/recovery-codes', methods=['POST'])
+def canonical_recovery_codes():
+    pending = _enrollment_session_from_request()
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_ENROLLMENT":
+        return jsonify({"success": False, "error": "Pending enrollment session required"}), 401
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    try:
+        codes = identity_crypto.recovery_codes()
+        if not AUTH_REPOSITORY.replace_recovery_codes(user_id=str(pending["user_id"]), session_id=str(pending["session_id"]), code_digests=identity_crypto.digest_recovery_codes(codes, _identity_hmac_key())):
+            raise ValueError("recovery preconditions incomplete")
+        return _enrollment_response({"success": True, "recovery_codes": codes})
+    except Exception as exc:
+        logger.warning("recovery code issue rejected: %s", type(exc).__name__)
+        return jsonify({"success": False, "error": "Recovery code issue was rejected"}), 400
+
+
+@app.route('/api/auth/enrollment/activate', methods=['POST'])
+def activate_canonical_enrollment():
+    pending = _enrollment_session_from_request()
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_ENROLLMENT":
+        return jsonify({"success": False, "error": "Pending enrollment session required"}), 401
+    token = secrets.token_urlsafe(32)
+    normal = AUTH_REPOSITORY.complete_enrollment(user_id=str(pending["user_id"]), pending_session_id=str(pending["session_id"]), device_id=str(pending["enrollment_device_id"]), normal_token_hash=_session_token_hash(token), expires_at=datetime.now(timezone.utc) + timedelta(days=30), required_documents=_enrollment_documents())
+    if not normal:
+        return jsonify({"success": False, "error": "Enrollment prerequisites are incomplete"}), 409
+    return _enrollment_response({"success": True, "account_state": "ACTIVE"}, normal_token=token)
+
+
+@app.route('/api/auth/devices/approve', methods=['POST'])
+@require_auth
+def approve_canonical_device():
+    pending = _enrollment_session_from_request(); current = getattr(request, "current_user", {})
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_DEVICE" or str(pending.get("user_id")) != str(current.get("id")):
+        return jsonify({"success": False, "error": "Pending device session required"}), 401
+    token = secrets.token_urlsafe(32)
+    normal = AUTH_REPOSITORY.approve_pending_device(actor_user_id=str(current["id"]), actor_session_id=str(current["session_id"]), pending_session_id=str(pending["session_id"]), normal_token_hash=_session_token_hash(token), expires_at=datetime.now(timezone.utc) + timedelta(days=30))
+    if not normal:
+        return jsonify({"success": False, "error": "Device approval was denied"}), 403
+    return _enrollment_response({"success": True, "device_status": "TRUSTED"}, normal_token=token)
+
+
+@app.route('/api/auth/devices/recover', methods=['POST'])
+def recover_canonical_device():
+    pending = _enrollment_session_from_request(); data = request.get_json(silent=True) or {}
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_DEVICE":
+        return jsonify({"success": False, "error": "Pending device session required"}), 401
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    try:
+        digest = identity_crypto.keyed_digest(identity_crypto.normalize_recovery_code(str(data.get("recovery_code") or "")), _identity_hmac_key())
+        token = secrets.token_urlsafe(32)
+        normal = AUTH_REPOSITORY.recover_pending_device(user_id=str(pending["user_id"]), pending_session_id=str(pending["session_id"]), recovery_code_digest=digest, normal_token_hash=_session_token_hash(token), expires_at=datetime.now(timezone.utc) + timedelta(days=30))
+        if not normal: raise ValueError("recovery denied")
+        return _enrollment_response({"success": True, "device_status": "TRUSTED"}, normal_token=token)
+    except Exception:
+        return jsonify({"success": False, "error": "Device recovery was denied"}), 403
+
+
+@app.route('/api/auth/devices/<device_id>/revoke', methods=['POST'])
+@require_auth
+def revoke_canonical_device(device_id: str):
+    current = getattr(request, "current_user", {})
+    if not AUTH_REPOSITORY.revoke_enrollment_device(actor_user_id=str(current.get("id") or ""), actor_session_id=str(current.get("session_id") or ""), device_id=device_id):
+        return jsonify({"success": False, "error": "Device revocation was denied"}), 403
+    return jsonify({"success": True})
+
+
+@app.route('/api/auth/logout-all', methods=['POST'])
+@require_auth
+def canonical_logout_all():
+    current = getattr(request, "current_user", {})
+    revoked = AUTH_REPOSITORY.revoke_all_user_sessions(user_id=str(current.get("id") or ""))
+    response = jsonify({"success": True, "revoked_sessions": revoked})
+    response.delete_cookie("vvault_session", path="/")
+    response.delete_cookie("vvault_enrollment_session", path="/")
+    return response
+
+
 # Canonical identity-directory routes.  Provider claims are verified here and
 # persisted only through VVaultAuthRepository; email never selects an account.
 def _identity_hmac_key() -> str:
@@ -9760,8 +9963,8 @@ def complete_canonical_oauth(provider: str = "google"):
         if not _allowed_redirect_base(frontend):
             frontend = _get_frontend_url()
         if transaction["purpose"] == "signin":
-            AUTH_REPOSITORY.admit_verified_identity(provider=provider, provider_subject=subject, verified_email=email, name=name, issuer=issuer)
-            return redirect(f"{frontend}/?identity_pending=1")
+            user, _created = AUTH_REPOSITORY.admit_verified_identity(provider=provider, provider_subject=subject, verified_email=email, name=name, issuer=issuer)
+            return _start_enrollment_session(user, frontend)
         if transaction["purpose"] == "reauth":
             if not AUTH_REPOSITORY.record_session_reauthentication(session_id=str(transaction["initiating_session_id"]), user_id=str(transaction["initiating_user_id"]), provider=provider):
                 raise ValueError("reauth denied")
@@ -9816,10 +10019,8 @@ def consume_email_magic_link():
         challenge = AUTH_REPOSITORY.consume_magic_link_challenge(identity_crypto.keyed_digest(token, _identity_hmac_key()))
         if not challenge or challenge.get("purpose") != "signin":
             return response, 400
-        AUTH_REPOSITORY.admit_verified_identity(provider="email", provider_subject=str(challenge["normalized_email"]), verified_email=str(challenge["normalized_email"]), name=None)
-        response = jsonify({"success": True, "enrollment_status": "PENDING_ENROLLMENT"})
-        response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
-        return response
+        user, _created = AUTH_REPOSITORY.admit_verified_identity(provider="email", provider_subject=str(challenge["normalized_email"]), verified_email=str(challenge["normalized_email"]), name=None)
+        return _start_enrollment_session(user, str(challenge.get("redirect_uri") or _get_frontend_url()))
     except Exception as exc:
         logger.warning("magic-link consume rejected: %s", type(exc).__name__)
         return response, 400

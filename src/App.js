@@ -5,7 +5,8 @@ import Capsules from './components/Capsules';
 import VaultBrowser from './components/VaultBrowser';
 import Settings from './components/Settings';
 import CinematicLogin from './components/CinematicLogin';
-import { validateSession, SESSION_EXPIRED_EVENT } from './utils/authFetch';
+import EnrollmentFlow from './components/EnrollmentFlow';
+import { SESSION_EXPIRED_EVENT } from './utils/authFetch';
 import vvaultLogo from '../assets/vvaultlogo_inverted.svg';
 import './App.css';
 
@@ -111,47 +112,12 @@ function App() {
   const [loading, setLoading] = useState(true);
   
   useEffect(() => {
-    // Check for OAuth callback params in URL
-    const urlParams = new URLSearchParams(window.location.search);
-    const token = urlParams.get('token');
-    const email = urlParams.get('email');
-    const name = urlParams.get('name');
-    
-    if (token && email) {
-      // OAuth successful - save user session
-      const userData = {
-        email: decodeURIComponent(email),
-        name: name ? decodeURIComponent(name) : email.split('@')[0],
-        token: token
-      };
-      localStorage.setItem('vvault_user', JSON.stringify(userData));
-      localStorage.setItem('vvault_token', token);
-      setUser(userData);
-      
-      // Clean up URL
-      window.history.replaceState({}, document.title, window.location.pathname);
-      console.log('OAuth login successful:', userData.email);
-    } else {
-      const savedUser = localStorage.getItem('vvault_user');
-      if (savedUser) {
-        try {
-          const parsed = JSON.parse(savedUser);
-          setUser(parsed);
-          validateSession().then(valid => {
-            if (!valid) {
-              console.warn('Stored session is no longer valid — clearing');
-              localStorage.removeItem('vvault_user');
-              localStorage.removeItem('vvault_token');
-              setUser(null);
-            }
-          });
-        } catch (error) {
-          console.error('Failed to parse saved user:', error);
-          localStorage.removeItem('vvault_user');
-          localStorage.removeItem('vvault_token');
-        }
-      }
-    }
+    // Canonical sessions are HttpOnly cookies. No identity or bearer token is
+    // accepted from query parameters or browser storage.
+    fetch('/api/auth/verify', { credentials: 'same-origin' })
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => { if (payload?.user) setUser(payload.user); })
+      .catch(() => setUser(null));
     
     // Load system info
     const loadSystemInfo = async () => {
@@ -174,8 +140,7 @@ function App() {
   };
   
   const handleLogout = useCallback(() => {
-    localStorage.removeItem('vvault_user');
-    localStorage.removeItem('vvault_token');
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
     setUser(null);
   }, []);
 
@@ -202,7 +167,9 @@ function App() {
   
   // Show cinematic login screen if user is not authenticated
   if (!user) {
-    return <CinematicLogin onLogin={handleLogin} />;
+    return new URLSearchParams(window.location.search).get('identity_pending') === '1'
+      ? <EnrollmentFlow />
+      : <CinematicLogin onLogin={handleLogin} />;
   }
   
   return (

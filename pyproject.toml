@@ -19,6 +19,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "requests>=2.32.5",
     "web3>=7.14.0",
+    "webauthn>=2.2.0",
 ]
 
 [project.optional-dependencies]
