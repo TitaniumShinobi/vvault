@@ -9914,6 +9914,7 @@ def _identity_frontend_url() -> str:
 
 def _begin_identity_oauth(provider: str, purpose: str = "signin", current: dict | None = None):
     from flask import redirect
+    failure_stage = "identity_transaction"
     try:
         from vvault.server import vvault_auth_crypto as identity_crypto
     except ImportError:
@@ -9924,14 +9925,17 @@ def _begin_identity_oauth(provider: str, purpose: str = "signin", current: dict 
         provider = identity_crypto.normalize_provider(provider)
         if provider == "email":
             raise ValueError("email does not use OAuth")
+        failure_stage = "provider_configuration"
         config = _identity_provider_config(provider)
         current = current or {}
         if purpose != "signin" and not current.get("id"):
             return jsonify({"success": False, "error": "Authentication required"}), 401
+        failure_stage = "transaction_protection"
         state = identity_crypto.opaque_token()
         verifier = identity_crypto.opaque_token(48)
         nonce = identity_crypto.opaque_token() if provider == "google" else None
         callback_url = _identity_callback_url(provider)
+        failure_stage = "transaction_storage"
         AUTH_REPOSITORY.create_oauth_transaction(
             state_digest=identity_crypto.keyed_digest(state, _identity_hmac_key()),
             provider=provider, purpose=purpose,
@@ -9956,7 +9960,12 @@ def _begin_identity_oauth(provider: str, purpose: str = "signin", current: dict 
         return redirect(f"{config['authorization_endpoint']}?{urlencode(params)}")
     except Exception as exc:
         logger.warning("identity OAuth begin rejected: %s", type(exc).__name__)
-        return jsonify({"success": False, "error": "Identity sign-in is unavailable"}), 503
+        safe_code = {
+            "provider_configuration": "provider_unavailable",
+            "transaction_protection": "transaction_protection_unavailable",
+            "transaction_storage": "identity_transaction_unavailable",
+        }.get(failure_stage, "identity_signin_unavailable")
+        return jsonify({"success": False, "error": "Identity sign-in is unavailable", "error_code": safe_code}), 503
 
 
 def _verified_provider_claims(provider: str, code: str, transaction: dict) -> tuple[str, str, str, str | None]:

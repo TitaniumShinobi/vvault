@@ -25,3 +25,9 @@ def test_google_authorization_uses_pinned_google_owned_endpoints_without_live_di
     assert "https://oauth2.googleapis.com/token" in provider_config
     assert "https://www.googleapis.com/oauth2/v3/certs" in provider_config
     assert "requests.get(GOOGLE_DISCOVERY_URL" not in provider_config
+
+
+def test_google_entry_reports_only_safe_failure_categories():
+    assert '"identity_transaction_unavailable"' in SOURCE
+    assert '"transaction_protection_unavailable"' in SOURCE
+    assert 'logger.warning("identity OAuth begin rejected: %s", type(exc).__name__)' in SOURCE
