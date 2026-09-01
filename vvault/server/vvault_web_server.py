@@ -10138,13 +10138,16 @@ def google_oauth_health():
     """Check if Google OAuth and VVAULT-native auth persistence are configured."""
     auth_ready, auth_state = _oauth_identity_authority_available()
     oauth_ready = _google_oauth_ready()
+    transaction_key_ready = bool(str(os.environ.get("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY") or "").strip())
     error = None
     if not oauth_ready:
         error = _google_oauth_config_error()
     elif not auth_ready:
         error = "VVAULT auth storage is currently unavailable. Sign-in is blocked to protect local identity/session persistence."
+    elif not transaction_key_ready:
+        error = "OAuth transaction protection is unavailable. Sign-in is blocked."
 
-    status_code = 200 if oauth_ready and auth_ready else 503
+    status_code = 200 if oauth_ready and auth_ready and transaction_key_ready else 503
     return jsonify({
         "oauth_configured": _google_oauth_ready(),
         "client_id_set": bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_ID not in _OAUTH_PLACEHOLDER_VALUES),
@@ -10153,6 +10156,7 @@ def google_oauth_health():
         "callback_url": f"{_get_backend_url()}/api/auth/google/callback",
         "frontend_url": _get_frontend_url(),
         "vvault_auth_ready": auth_ready,
+        "oauth_transaction_protection_ready": transaction_key_ready,
         "auth_owner": auth_state.get("auth_owner") or AUTH_OWNER,
         "session_owner": auth_state.get("session_owner") or SESSION_OWNER,
         "auth_status": auth_state.get("status") or "unknown",
