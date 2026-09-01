@@ -71,52 +71,10 @@ from vvault.security.pocketverse_guard import (
     PocketverseAuthorityError,
 )
 from vvault.server import chatty_body_service
-from vvault.server import conversation_thread_service as conversation_thread_service_module
-from vvault.server import singleton_construct_authorization as singleton_construct_authorization_module
-from vvault.server.conversation_thread_service import (
-    ConversationContractError,
-    conversation_thread_service,
-)
-from vvault.server.singleton_construct_authorization import (
-    singleton_construct_authorization_service,
-)
-from vvault.server import offline_snapshot_service
-from vvault.server import canonical_projection_signing
-from vvault.server import auto_runtime_service
-from vvault.server import canonical_data_contract
-from vvault.server import canonical_context_service
-from vvault.server import construct_work_loop_service as construct_work_loop_service_module
-from vvault.server.construct_work_loop_service import (
-    ConstructWorkLoopError,
-    construct_work_loop_service,
-)
-from vvault.server import construct_execution_service as construct_execution_service_module
-from vvault.server.construct_execution_service import (
-    ConstructExecutionError,
-    construct_execution_service,
-)
-from vvault.server import knowledge_contract
-from vvault.server import account_context_service, human_context_service, knowledge_activation_service, knowledge_publication_service
 from vvault.server import vvault_access_assertion
-from vvault.server import life_capsule_resolver
-from vvault.server import marketplace_service
 from vvault.server import cleanhouse_files_evidence
 from vvault.server import vvault_enrollment
-from vvault.server.vault_drive_repository import VAULT_DRIVE_REPOSITORY
-from vvault.server.avatar_canonicalization import (
-    AvatarCanonicalizationError,
-    normalize_avatar_payload_to_png,
-)
-from vvault.server.construct_taxonomy import (
-    canonical_category,
-    canonical_category_for_scope,
-    taxonomy_payload,
-)
 from vvault.server.projection_classification import row_is_projection_excluded
-from vvault.server.upload_path_contract import (
-    preserved_upload_path,
-    safe_upload_relative_path,
-)
 import vvault_auth_repository
 import vvault_file_repository
 try:
@@ -562,6 +520,10 @@ def _security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["X-XSS-Protection"] = "1; mode=block"
+    if request.path.startswith("/api/auth/") or request.path == "/api/vault/session-bridge":
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
 
@@ -4653,13 +4615,18 @@ def get_vault_user_info():
 @app.route('/api/v1/contracts/life.vvault.data-layout/1.0.0')
 @require_chatty_auth
 def get_canonical_data_contract_v1():
-    """Return the normative machine-readable VVAULT data contract."""
-    return jsonify(canonical_data_contract.load_registry())
+    """This optional migration API is intentionally unavailable in this release."""
+    return jsonify({
+        "success": False,
+        "error": "canonical data-contract services are not included in this release",
+        "error_code": "VVAULT_CANONICAL_DATA_CONTRACT_UNAVAILABLE",
+    }), 503
 
 
 @app.route('/api/v1/artifacts/<path:artifact_id>')
 @require_chatty_auth
 def get_canonical_artifact_v1(artifact_id: str):
+    return jsonify({"success": False, "error_code": "VVAULT_CANONICAL_DATA_CONTRACT_UNAVAILABLE"}), 503
     instance_id = (request.args.get("instance_id") or "").strip()
     owner_user_id = _get_authenticated_user_id()
     if not owner_user_id:
@@ -4675,6 +4642,7 @@ def get_canonical_artifact_v1(artifact_id: str):
 @app.route('/api/v1/instances/<instance_id>/manifest')
 @require_chatty_auth
 def get_canonical_instance_manifest_v1(instance_id: str):
+    return jsonify({"success": False, "error_code": "VVAULT_CANONICAL_DATA_CONTRACT_UNAVAILABLE"}), 503
     owner_user_id = _get_authenticated_user_id()
     if not owner_user_id:
         return jsonify({"success": False, "error": "authenticated owner_user_id is required"}), 403
@@ -4688,6 +4656,7 @@ def get_canonical_instance_manifest_v1(instance_id: str):
 @app.route('/api/v1/migrations/canonical-layout/dry-run', methods=['POST'])
 @require_chatty_auth
 def dry_run_canonical_layout_migration_v1():
+    return jsonify({"success": False, "error_code": "VVAULT_CANONICAL_DATA_CONTRACT_UNAVAILABLE"}), 503
     owner_user_id = _get_authenticated_user_id()
     if not owner_user_id:
         return jsonify({"success": False, "error": "authenticated owner_user_id is required"}), 403
@@ -4707,6 +4676,7 @@ def dry_run_canonical_layout_migration_v1():
 @app.route('/api/v1/migrations/canonical-layout/apply', methods=['POST'])
 @require_role('admin')
 def apply_canonical_layout_migration_v1():
+    return jsonify({"success": False, "error_code": "VVAULT_CANONICAL_DATA_CONTRACT_UNAVAILABLE"}), 503
     payload = request.get_json(silent=True) or {}
     operation_ids = {
         str(value)
@@ -7280,6 +7250,23 @@ def update_construct_editor(construct_id):
 # END SERVICE API ENDPOINTS
 # ============================================================================
 
+def _chatty_construct_actor_user_id(callsign: str) -> tuple[str | None, tuple[dict[str, Any], int] | None]:
+    """Resolve the owner solely from the validated request session/assertion."""
+    current_user = getattr(request, "current_user", None) or {}
+    if not current_user:
+        return None, ({"success": False, "error": "Authentication required"}, 401)
+    user_id = _get_authenticated_user_id()
+    if not user_id:
+        return None, ({"success": False, "error": "User not found"}, 403)
+    normalized_callsign = _normalize_callsign(callsign)
+    if not _construct_is_projectable_cached(user_id, normalized_callsign):
+        return None, ({
+            "success": False,
+            "error": "Construct not found",
+            "error_code": "VVAULT_CONSTRUCT_NOT_PROJECTABLE",
+        }, 404)
+    return user_id, None
+
 @app.route('/api/chatty/transcript/<construct_id>')
 @require_chatty_auth
 def get_chatty_transcript(construct_id):
@@ -7289,7 +7276,14 @@ def get_chatty_transcript(construct_id):
     Returns the chat_with_zen-001.md content from the vault
     """
     try:
-        body_payload, body_status = chatty_body_service.transcript_body(construct_id).to_response()
+        actor_user_id, actor_error = _chatty_construct_actor_user_id(construct_id)
+        if actor_error:
+            return jsonify(actor_error[0]), actor_error[1]
+        body_payload, body_status = chatty_body_service.transcript_body(
+            construct_id,
+            max_chars=request.args.get('maxChars', type=int),
+            owner_user_id=actor_user_id,
+        ).to_response()
         return jsonify(body_payload), body_status
         enforce_pocketverse_authority(construct_id, _pocketverse_request_context())
         current_user = request.current_user
@@ -7375,8 +7369,13 @@ def update_chatty_transcript(construct_id):
     POST body: { "content": "full markdown content" }
     """
     try:
+        actor_user_id, actor_error = _chatty_construct_actor_user_id(construct_id)
+        if actor_error:
+            return jsonify(actor_error[0]), actor_error[1]
         data = request.get_json(silent=True) or {}
-        body_payload, body_status = chatty_body_service.update_transcript_body(construct_id, data).to_response()
+        body_payload, body_status = chatty_body_service.update_transcript_body(
+            construct_id, data, owner_user_id=actor_user_id,
+        ).to_response()
         return jsonify(body_payload), body_status
         if construct_id == 'zen-001' and _is_runtime_lock_active():
             return _runtime_lock_deferred_response(construct_id, 'transcript_update')
