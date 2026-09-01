@@ -54,6 +54,15 @@ def seal_transaction_secret(value: str, encryption_key: str) -> bytes:
         raise ValueError("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY is invalid") from exc
 
 
+def valid_transaction_encryption_key(encryption_key: str) -> bool:
+    """Validate Fernet key format without encrypting or exposing it."""
+    try:
+        Fernet(encryption_key.encode("ascii"))
+        return True
+    except (ValueError, UnicodeEncodeError):
+        return False
+
+
 def open_transaction_secret(ciphertext: bytes, encryption_key: str) -> str:
     if not ciphertext:
         raise ValueError("transaction secret ciphertext is required")

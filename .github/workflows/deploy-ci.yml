@@ -83,7 +83,13 @@ jobs:
                 "VVAULT_ENROLLMENT_HMAC_KEY": os.environ.get("VVAULT_ENROLLMENT_HMAC_KEY", ""),
                 "VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY": os.environ.get("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY", ""),
             }
-            if any(len(value) < 32 for value in secrets.values()):
+            import base64
+            def valid_fernet(value):
+                try:
+                    return len(base64.urlsafe_b64decode(value.encode("ascii"))) == 32
+                except Exception:
+                    return False
+            if len(secrets["VVAULT_ENROLLMENT_HMAC_KEY"]) < 32 or not valid_fernet(secrets["VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY"]):
                 raise SystemExit("required protected runtime key is unavailable")
             env_path = Path("/opt/vvault-public/.env")
             group_id = grp.getgrnam("vvault").gr_gid
@@ -138,7 +144,12 @@ jobs:
 
             name = "VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY"
             secret = os.environ.get(name, "")
-            if len(secret) < 32:
+            import base64
+            try:
+                valid_fernet = len(base64.urlsafe_b64decode(secret.encode("ascii"))) == 32
+            except Exception:
+                valid_fernet = False
+            if not valid_fernet:
                 raise SystemExit("required protected runtime key is unavailable")
             env_path = Path("/opt/vvault-public/.env")
             group_id = grp.getgrnam("vvault").gr_gid

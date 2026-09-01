@@ -30,6 +30,7 @@ def test_oauth_transaction_key_is_provisioned_only_from_github_secrets():
     assert "VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY: ${{ secrets.VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY }}" in WORKFLOW
     assert "oauth-transaction-protection-ready" in WORKFLOW
     assert "VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY=" not in WORKFLOW
+    assert "urlsafe_b64decode" in WORKFLOW
 
 
 def test_migration_runner_requires_verified_backup_receipts_and_uses_checksum_ledger():

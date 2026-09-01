@@ -15,6 +15,7 @@ def test_google_health_reports_transaction_protection_without_exposing_key_mater
     assert '"oauth_transaction_protection_ready": transaction_key_ready' in SOURCE
     assert "OAuth transaction protection is unavailable" in SOURCE
     assert '"VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY"' in SOURCE
+    assert "valid_transaction_encryption_key" in SOURCE
 
 
 def test_google_authorization_uses_pinned_google_owned_endpoints_without_live_discovery():

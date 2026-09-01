@@ -9874,7 +9874,11 @@ def _identity_hmac_key() -> str:
 
 def _identity_transaction_key() -> str:
     key = str(os.environ.get("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY") or "").strip()
-    if not key:
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    if not identity_crypto.valid_transaction_encryption_key(key):
         raise RuntimeError("identity transaction encryption is not configured")
     return key
 
@@ -10145,7 +10149,13 @@ def google_oauth_health():
     """Check if Google OAuth and VVAULT-native auth persistence are configured."""
     auth_ready, auth_state = _oauth_identity_authority_available()
     oauth_ready = _google_oauth_ready()
-    transaction_key_ready = bool(str(os.environ.get("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY") or "").strip())
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    transaction_key_ready = identity_crypto.valid_transaction_encryption_key(
+        str(os.environ.get("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY") or "").strip()
+    )
     error = None
     if not oauth_ready:
         error = _google_oauth_config_error()
