@@ -9,6 +9,9 @@ BRANCH="production"
 SERVICE="vvault-backend.service"
 READY_URL="http://127.0.0.1:8000/api/ready"
 LOCK_FILE="/tmp/vvault-deploy.lock"
+ENV_FILE="${VVAULT_RUNTIME_ENV_FILE:-/opt/vvault-public/.env}"
+EXPECTED_SERVICE_USER="${VVAULT_SERVICE_USER:-vvault}"
+EXPECTED_SERVICE_GROUP="${VVAULT_SERVICE_GROUP:-vvault}"
 
 OLD_REF=""
 BACKUP=""
@@ -16,6 +19,31 @@ PUBLISHED=0
 RESTART_ATTEMPTED=0
 
 log() { printf '[vvault-deploy] %s\n' "$*"; }
+
+verify_runtime_contract() {
+  local service_properties env_metadata
+  service_properties="$(systemctl show "$SERVICE" -p LoadState -p User -p Group)"
+  [[ "$service_properties" == *"LoadState=loaded"* ]] || { log "service unit is not loaded"; return 1; }
+  [[ "$service_properties" == *"User=$EXPECTED_SERVICE_USER"* ]] || { log "service user contract mismatch"; return 1; }
+  [[ "$service_properties" == *"Group=$EXPECTED_SERVICE_GROUP"* ]] || { log "service group contract mismatch"; return 1; }
+  [[ -f "$ENV_FILE" ]] || { log "runtime environment file is missing"; return 1; }
+  env_metadata="$(stat -c '%U:%G:%a' "$ENV_FILE")"
+  [[ "$env_metadata" == *":$EXPECTED_SERVICE_GROUP:640" ]] || { log "runtime environment ownership or mode mismatch"; return 1; }
+  grep -q '^VVAULT_BODY_DATABASE_URL=.' "$ENV_FILE" || { log "runtime database configuration is missing"; return 1; }
+}
+
+verify_readiness() {
+  local ready_json
+  ready_json="$(curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 2 "$READY_URL")"
+  python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+assert payload.get("ready") is True
+assert payload.get("authority") == "vvault_body"
+assert payload.get("storage_owner") == "ovvaults.vault_files"
+assert payload.get("transcript_owner") == "ovvaults.transcripts"
+' <<<"$ready_json"
+}
 
 rollback() {
   local status=$?
@@ -32,7 +60,10 @@ rollback() {
   fi
 
   if (( RESTART_ATTEMPTED )); then
-    sudo systemctl restart "$SERVICE" || true
+    if ! sudo systemctl restart "$SERVICE" || ! verify_readiness; then
+      log "rollback readiness verification failed"
+      exit 70
+    fi
   fi
 
   exit "$status"
@@ -51,6 +82,7 @@ cd "$REPO"
   log "repository is dirty; refusing deployment"
   exit 1
 }
+verify_runtime_contract
 
 OLD_REF="$(git rev-parse HEAD)"
 log "fetching $BRANCH"
@@ -79,15 +111,7 @@ RESTART_ATTEMPTED=1
 sudo systemctl restart "$SERVICE"
 
 log "verifying canonical readiness"
-READY_JSON="$(curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 2 "$READY_URL")"
-python3 -c '
-import json, sys
-payload = json.load(sys.stdin)
-assert payload.get("ready") is True
-assert payload.get("authority") == "vvault_body"
-assert payload.get("storage_owner") == "ovvaults.vault_files"
-assert payload.get("transcript_owner") == "ovvaults.transcripts"
-' <<<"$READY_JSON"
+verify_readiness
 
 trap - ERR INT TERM
 log "deployment successful: $OLD_REF -> $NEW_REF"

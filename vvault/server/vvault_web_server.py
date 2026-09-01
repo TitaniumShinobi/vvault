@@ -11,20 +11,21 @@ Date: 2025-10-28
 Version: 1.0.0
 """
 
-# Load environment variables from repo root .env
+import os
+import sys
+import json
+
+# The deployed service currently loads its protected, untracked runtime .env
+# from the checkout.  Deployment owns its group/mode contract; values are never
+# committed or emitted by the application.
 from pathlib import Path
 try:
     from dotenv import load_dotenv
     env_path = Path(__file__).resolve().parent.parent.parent / ".env"
     if env_path.exists():
         load_dotenv(env_path)
-        print(f"Loaded .env from {env_path}")
 except ImportError:
-    pass  # dotenv not installed, rely on system env vars
-
-import os
-import sys
-import json
+    pass
 import re
 import logging
 import threading
