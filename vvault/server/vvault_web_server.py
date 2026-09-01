@@ -51,7 +51,7 @@ import bcrypt
 from datetime import datetime, timedelta, timezone
 import requests  # For Turnstile verification
 from oauthlib.oauth2 import WebApplicationClient
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 _server_dir = os.path.dirname(os.path.abspath(__file__))
 if _server_dir not in sys.path:
@@ -565,6 +565,8 @@ def _log_privileged_event(
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
 GOOGLE_DISCOVERY_URL = "https://accounts.google.com/.well-known/openid-configuration"
+GITHUB_CLIENT_ID = os.environ.get("GITHUB_CLIENT_ID")
+GITHUB_CLIENT_SECRET = os.environ.get("GITHUB_CLIENT_SECRET")
 VVAULT_FRONTEND_URL = _resolve_frontend_origin() or "http://localhost:7784"
 VVAULT_BACKEND_URL = _resolve_backend_origin() or "http://localhost:8000"
 VVAULT_ADMIN_EMAILS = {
@@ -3079,6 +3081,7 @@ def db_get_session(token: str) -> Optional[Dict]:
             return None
         return {
             'id': str(session_data.get('user_id')),
+            'session_id': str(session_data.get('session_id')),
             'email': session_data['email'],
             'name': session_data.get('name') or session_data['email'].split('@')[0],
             'role': session_data.get('role') or 'user',
@@ -8487,6 +8490,8 @@ def _life_registry_match_vvault_message_generic() -> str:
 @app.route('/api/auth/login', methods=['POST'])
 def login():
     """User login endpoint (database-backed)"""
+    return jsonify({"success": False, "error": "Password sign-in has been retired"}), 410
+
     if _rate_limit_key("auth"):
         return jsonify({"success": False, "error": "rate_limit_exceeded"}), 429
     try:
@@ -8633,6 +8638,8 @@ def glyph_preview():
 @app.route('/api/auth/register', methods=['POST'])
 def register():
     """User registration endpoint with bcrypt password hashing and VVAULT-native storage."""
+    return jsonify({"success": False, "error": "Password registration has been retired"}), 410
+
     if _rate_limit_key("auth"):
         return jsonify({"success": False, "error": "rate_limit_exceeded"}), 429
     ip = request.headers.get('X-Forwarded-For', request.remote_addr)
@@ -9553,6 +9560,271 @@ def get_construct_ledger(construct_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+# Canonical identity-directory routes.  Provider claims are verified here and
+# persisted only through VVaultAuthRepository; email never selects an account.
+def _identity_hmac_key() -> str:
+    key = str(os.environ.get("VVAULT_ENROLLMENT_HMAC_KEY") or "").strip()
+    if len(key) < 32:
+        raise RuntimeError("identity transaction key is not configured")
+    return key
+
+
+def _identity_transaction_key() -> str:
+    key = str(os.environ.get("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("identity transaction encryption is not configured")
+    return key
+
+
+def _identity_provider_config(provider: str) -> dict[str, str]:
+    if provider == "github":
+        if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+            raise RuntimeError("GitHub identity provider is not configured")
+        return {
+            "authorization_endpoint": "https://github.com/login/oauth/authorize",
+            "token_endpoint": "https://github.com/login/oauth/access_token",
+            "userinfo_endpoint": "https://api.github.com/user",
+            "emails_endpoint": "https://api.github.com/user/emails",
+        }
+    if provider != "google" or not _google_oauth_ready():
+        raise RuntimeError("identity provider is not configured")
+    payload = requests.get(GOOGLE_DISCOVERY_URL, timeout=(3.05, 5)).json()
+    allowed_hosts = {"accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com"}
+    result = {}
+    for key in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
+        value = str(payload.get(key) or "")
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or parsed.hostname not in allowed_hosts:
+            raise ValueError("Google discovery endpoint is not allowed")
+        result[key] = value
+    return result
+
+
+def _identity_callback_url(provider: str) -> str:
+    # Preserve the existing Google callback registration while GitHub is added.
+    suffix = "google/callback" if provider == "google" else f"oauth/{provider}/callback"
+    return f"{_get_backend_url()}/api/auth/{suffix}"
+
+
+def _identity_frontend_url() -> str:
+    origin = str(request.headers.get("Origin") or "").rstrip("/")
+    return origin if _allowed_redirect_base(origin) else _get_frontend_url()
+
+
+def _begin_identity_oauth(provider: str, purpose: str = "signin", current: dict | None = None):
+    from flask import redirect
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    if _rate_limit_key("auth"):
+        return jsonify({"success": False, "error": "rate_limit_exceeded"}), 429
+    try:
+        provider = identity_crypto.normalize_provider(provider)
+        if provider == "email":
+            raise ValueError("email does not use OAuth")
+        config = _identity_provider_config(provider)
+        current = current or {}
+        if purpose != "signin" and not current.get("id"):
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+        state = identity_crypto.opaque_token()
+        verifier = identity_crypto.opaque_token(48)
+        nonce = identity_crypto.opaque_token() if provider == "google" else None
+        callback_url = _identity_callback_url(provider)
+        AUTH_REPOSITORY.create_oauth_transaction(
+            state_digest=identity_crypto.keyed_digest(state, _identity_hmac_key()),
+            provider=provider, purpose=purpose,
+            nonce_digest=identity_crypto.keyed_digest(nonce, _identity_hmac_key()) if nonce else None,
+            nonce_ciphertext=identity_crypto.seal_transaction_secret(nonce, _identity_transaction_key()) if nonce else None,
+            pkce_verifier_digest=identity_crypto.keyed_digest(verifier, _identity_hmac_key()),
+            pkce_verifier_ciphertext=identity_crypto.seal_transaction_secret(verifier, _identity_transaction_key()),
+            redirect_uri=callback_url, frontend_origin=_identity_frontend_url(),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            initiating_user_id=str(current.get("id") or "") or None,
+            initiating_session_id=str(current.get("session_id") or "") or None,
+        )
+        params = {
+            "client_id": GOOGLE_CLIENT_ID if provider == "google" else GITHUB_CLIENT_ID,
+            "redirect_uri": callback_url, "state": state,
+            "code_challenge": identity_crypto.pkce_challenge(verifier), "code_challenge_method": "S256",
+        }
+        if provider == "google":
+            params.update({"scope": "openid email profile", "nonce": nonce, "prompt": "select_account"})
+        else:
+            params.update({"scope": "read:user user:email", "allow_signup": "false"})
+        return redirect(f"{config['authorization_endpoint']}?{urlencode(params)}")
+    except Exception as exc:
+        logger.warning("identity OAuth begin rejected: %s", type(exc).__name__)
+        return jsonify({"success": False, "error": "Identity sign-in is unavailable"}), 503
+
+
+def _verified_provider_claims(provider: str, code: str, transaction: dict) -> tuple[str, str, str, str | None]:
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    config = _identity_provider_config(provider)
+    verifier = identity_crypto.open_transaction_secret(transaction["pkce_verifier_ciphertext"], _identity_transaction_key())
+    if not identity_crypto.safe_compare(verifier, transaction["pkce_verifier_digest"], _identity_hmac_key()):
+        raise ValueError("OAuth verifier integrity failure")
+    client_id = GOOGLE_CLIENT_ID if provider == "google" else GITHUB_CLIENT_ID
+    client_secret = GOOGLE_CLIENT_SECRET if provider == "google" else GITHUB_CLIENT_SECRET
+    token_response = requests.post(config["token_endpoint"], data={
+        "client_id": client_id, "client_secret": client_secret, "code": code,
+        "redirect_uri": transaction["redirect_uri"], "grant_type": "authorization_code", "code_verifier": verifier,
+    }, headers={"Accept": "application/json"}, timeout=(3.05, 5))
+    token_response.raise_for_status()
+    tokens = token_response.json()
+    if provider == "google":
+        nonce = identity_crypto.open_transaction_secret(transaction["nonce_ciphertext"], _identity_transaction_key())
+        if not identity_crypto.safe_compare(nonce, transaction["nonce_digest"], _identity_hmac_key()):
+            raise ValueError("OAuth nonce integrity failure")
+        signing_key = jwt.PyJWKClient(config["jwks_uri"], timeout=5).get_signing_key_from_jwt(str(tokens.get("id_token") or "")).key
+        claims = jwt.decode(str(tokens.get("id_token") or ""), signing_key, algorithms=["RS256"], audience=GOOGLE_CLIENT_ID,
+            issuer=["https://accounts.google.com", "accounts.google.com"], options={"require": ["exp", "iat", "aud", "iss", "sub", "nonce"]})
+        if not hmac.compare_digest(str(claims.get("nonce") or ""), nonce) or claims.get("email_verified") is not True:
+            raise ValueError("Google identity proof is invalid")
+        return str(claims["sub"]), str(claims["email"]), str(claims.get("name") or ""), "https://accounts.google.com"
+    access_token = str(tokens.get("access_token") or "")
+    if not access_token:
+        raise ValueError("GitHub token response is invalid")
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"}
+    profile = requests.get(config["userinfo_endpoint"], headers=headers, timeout=(3.05, 5)); profile.raise_for_status()
+    emails = requests.get(config["emails_endpoint"], headers=headers, timeout=(3.05, 5)); emails.raise_for_status()
+    verified = next((row.get("email") for row in emails.json() if row.get("verified") and row.get("primary")), None)
+    if not verified:
+        raise ValueError("GitHub has no verified primary email")
+    profile_data = profile.json()
+    return str(profile_data["id"]), str(verified), str(profile_data.get("name") or profile_data.get("login") or ""), "https://github.com"
+
+
+@app.route('/api/auth/oauth/<provider>', methods=['GET', 'POST'])
+def begin_canonical_oauth(provider: str):
+    return _begin_identity_oauth(provider)
+
+
+@app.route('/api/auth/reauth/<provider>', methods=['POST'])
+@require_auth
+def begin_canonical_reauth(provider: str):
+    return _begin_identity_oauth(provider, purpose="reauth", current=getattr(request, "current_user", {}))
+
+
+@app.route('/api/auth/identity-links/<provider>', methods=['POST'])
+@require_auth
+def begin_canonical_identity_link(provider: str):
+    return _begin_identity_oauth(provider, purpose="link", current=getattr(request, "current_user", {}))
+
+
+@app.route('/api/auth/identities', methods=['GET'])
+@require_auth
+def list_canonical_identities():
+    current = getattr(request, "current_user", {})
+    identities = AUTH_REPOSITORY.list_active_identities(user_id=str(current.get("id") or ""))
+    # Provider subjects are authentication identifiers; never expose them to
+    # browser callers. Account settings receives only display-safe metadata.
+    return jsonify({"success": True, "identities": [
+        {"id": str(row["id"]), "provider": row["provider"], "verified_at": row["verified_at"]}
+        for row in identities
+    ]})
+
+
+@app.route('/api/auth/identities/<identity_id>', methods=['DELETE'])
+@require_auth
+def unlink_canonical_identity(identity_id: str):
+    current = getattr(request, "current_user", {})
+    removed = AUTH_REPOSITORY.unlink_identity(user_id=str(current.get("id") or ""), session_id=str(current.get("session_id") or ""), identity_id=identity_id)
+    if not removed:
+        return jsonify({"success": False, "error": "Identity removal was denied"}), 403
+    return jsonify({"success": True})
+
+
+@app.route('/api/auth/google/callback')
+@app.route('/api/auth/oauth/<provider>/callback')
+def complete_canonical_oauth(provider: str = "google"):
+    from flask import redirect
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    code, state = str(request.args.get("code") or ""), str(request.args.get("state") or "")
+    if not code or not state or _rate_limit_key("auth"):
+        return jsonify({"success": False, "error": "OAuth authorization was rejected"}), 400
+    try:
+        transaction = AUTH_REPOSITORY.consume_oauth_transaction(identity_crypto.keyed_digest(state, _identity_hmac_key()))
+        if not transaction or transaction.get("provider") != provider:
+            raise ValueError("transaction invalid")
+        if transaction.get("redirect_uri") != _identity_callback_url(provider):
+            raise ValueError("callback mismatch")
+        subject, email, name, issuer = _verified_provider_claims(provider, code, transaction)
+        frontend = str(transaction.get("frontend_origin") or _get_frontend_url())
+        if not _allowed_redirect_base(frontend):
+            frontend = _get_frontend_url()
+        if transaction["purpose"] == "signin":
+            AUTH_REPOSITORY.admit_verified_identity(provider=provider, provider_subject=subject, verified_email=email, name=name, issuer=issuer)
+            return redirect(f"{frontend}/?identity_pending=1")
+        if transaction["purpose"] == "reauth":
+            if not AUTH_REPOSITORY.record_session_reauthentication(session_id=str(transaction["initiating_session_id"]), user_id=str(transaction["initiating_user_id"]), provider=provider):
+                raise ValueError("reauth denied")
+            return redirect(f"{frontend}/?identity_reauthenticated=1")
+        if not AUTH_REPOSITORY.link_verified_identity(user_id=str(transaction["initiating_user_id"]), session_id=str(transaction["initiating_session_id"]), provider=provider, provider_subject=subject, verified_email=email, issuer=issuer):
+            raise ValueError("link denied")
+        return redirect(f"{frontend}/?identity_linked=1")
+    except Exception as exc:
+        logger.warning("identity OAuth callback rejected: %s", type(exc).__name__)
+        return jsonify({"success": False, "error": "OAuth authorization was rejected"}), 400
+
+
+def _deliver_magic_link(_email: str, _url: str) -> bool:
+    """Delivery boundary. A deployment supplies an audited mail adapter; never log URL."""
+    return False
+
+
+@app.route('/api/auth/email-magic-links', methods=['POST'])
+def request_email_magic_link():
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    # Always return the same accepted response, including malformed input and
+    # unavailable delivery, so email existence is never disclosed.
+    try:
+        if not _rate_limit_key("auth"):
+            email = identity_crypto.normalize_email(str((request.get_json(silent=True) or {}).get("email") or ""))
+            token = identity_crypto.opaque_token()
+            frontend = _get_frontend_url()
+            AUTH_REPOSITORY.issue_magic_link_challenge(token_digest=identity_crypto.keyed_digest(token, _identity_hmac_key()), normalized_email=email,
+                purpose="signin", redirect_uri=frontend, expires_at=datetime.now(timezone.utc) + timedelta(minutes=15))
+            _deliver_magic_link(email, f"{frontend}/#magic_link={token}")
+    except Exception as exc:
+        logger.warning("magic-link request not delivered: %s", type(exc).__name__)
+    response = jsonify({"success": True, "message": "If the address can receive sign-in mail, a secure link is on its way."})
+    response.status_code = 202
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route('/api/auth/email-magic-links/consume', methods=['POST'])
+def consume_email_magic_link():
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    response = jsonify({"success": False, "error": "Magic link was rejected"})
+    response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
+    try:
+        token = str((request.get_json(silent=True) or {}).get("token") or "")
+        challenge = AUTH_REPOSITORY.consume_magic_link_challenge(identity_crypto.keyed_digest(token, _identity_hmac_key()))
+        if not challenge or challenge.get("purpose") != "signin":
+            return response, 400
+        AUTH_REPOSITORY.admit_verified_identity(provider="email", provider_subject=str(challenge["normalized_email"]), verified_email=str(challenge["normalized_email"]), name=None)
+        response = jsonify({"success": True, "enrollment_status": "PENDING_ENROLLMENT"})
+        response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+    except Exception as exc:
+        logger.warning("magic-link consume rejected: %s", type(exc).__name__)
+        return response, 400
+
+
 # Google OAuth Health Check
 @app.route('/api/auth/google/health')
 def google_oauth_health():
@@ -9584,10 +9856,11 @@ def google_oauth_health():
 
 
 # Google OAuth Routes
-@app.route('/api/auth/google')
-@app.route('/api/auth/oauth/google')
-def google_oauth_login():
+@app.route('/api/auth/legacy-google-disabled')
+def legacy_google_oauth_login_disabled():
     """Initiate Google OAuth login"""
+    return jsonify({"success": False, "error": "Legacy OAuth entry has been retired"}), 410
+
     if _rate_limit_key("auth"):
         return jsonify({"success": False, "error": "rate_limit_exceeded"}), 429
     try:
@@ -9639,10 +9912,11 @@ def google_oauth_login():
         logger.error(f"Google OAuth init error: {e}")
         return jsonify({"success": False, "error": "OAuth initialization failed"}), 500
 
-@app.route('/api/auth/google/callback')
-@app.route('/api/auth/oauth/google/callback')
-def google_oauth_callback():
+@app.route('/api/auth/legacy-google-callback-disabled')
+def legacy_google_oauth_callback_disabled():
     """Handle Google OAuth callback"""
+    return jsonify({"success": False, "error": "Legacy OAuth callback has been retired"}), 410
+
     if _rate_limit_key("auth"):
         return jsonify({"success": False, "error": "rate_limit_exceeded"}), 429
     try:
