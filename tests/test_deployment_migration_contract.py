@@ -25,6 +25,13 @@ def test_production_pushes_restart_backend_only_until_a_full_deploy_is_explicit(
     assert "default: deploy_backend" in WORKFLOW
 
 
+def test_oauth_transaction_key_is_provisioned_only_from_github_secrets():
+    assert "configure_oauth_transaction_key" in WORKFLOW
+    assert "VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY: ${{ secrets.VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY }}" in WORKFLOW
+    assert "oauth-transaction-protection-ready" in WORKFLOW
+    assert "VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY=" not in WORKFLOW
+
+
 def test_migration_runner_requires_verified_backup_receipts_and_uses_checksum_ledger():
     for required in (
         "VVAULT_DATABASE_BACKUP_RECEIPT_PATH",

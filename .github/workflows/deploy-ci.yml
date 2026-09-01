@@ -14,6 +14,7 @@ on:
         options:
           - deploy_backend
           - deploy_full
+          - configure_oauth_transaction_key
           - restore_frontend
       frontend_snapshot:
         description: "Required only for restore_frontend; exact /opt/deploy/backups/vvault-YYYYMMDD-HHMMSS snapshot"
@@ -60,6 +61,7 @@ jobs:
     timeout-minutes: 15
     env:
       VVAULT_ENROLLMENT_HMAC_KEY: ${{ secrets.VVAULT_ENROLLMENT_HMAC_KEY }}
+      VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY: ${{ secrets.VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY }}
 
     steps:
       - name: Deploy full release to Droplet
@@ -68,7 +70,7 @@ jobs:
           host: 165.245.136.194
           username: deploy
           key: ${{ secrets.VVAULT_DEPLOY_KEY }}
-          envs: VVAULT_ENROLLMENT_HMAC_KEY
+          envs: VVAULT_ENROLLMENT_HMAC_KEY,VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY
           script: |
             python3 - <<'PY'
             import grp
@@ -77,14 +79,17 @@ jobs:
             import tempfile
             from pathlib import Path
 
-            secret = os.environ.get("VVAULT_ENROLLMENT_HMAC_KEY", "")
-            if len(secret) < 32:
-                raise SystemExit("VVAULT enrollment key is unavailable")
+            secrets = {
+                "VVAULT_ENROLLMENT_HMAC_KEY": os.environ.get("VVAULT_ENROLLMENT_HMAC_KEY", ""),
+                "VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY": os.environ.get("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY", ""),
+            }
+            if any(len(value) < 32 for value in secrets.values()):
+                raise SystemExit("required protected runtime key is unavailable")
             env_path = Path("/opt/vvault-public/.env")
             group_id = grp.getgrnam("vvault").gr_gid
             current = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-            lines = [line for line in current.splitlines() if not line.startswith("VVAULT_ENROLLMENT_HMAC_KEY=")]
-            lines.append(f"VVAULT_ENROLLMENT_HMAC_KEY={secret}")
+            lines = [line for line in current.splitlines() if not any(line.startswith(f"{name}=") for name in secrets)]
+            lines.extend(f"{name}={value}" for name, value in secrets.items())
             descriptor, temporary = tempfile.mkstemp(prefix=".env.", dir=env_path.parent)
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -107,6 +112,57 @@ jobs:
             git -C "$repo" checkout -B production origin/production
             git -C "$repo" reset --hard origin/production
             exec "$repo/scripts/deployment/droplet-deploy-vvault.sh"
+
+  configure-oauth-transaction-key:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'configure_oauth_transaction_key'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY: ${{ secrets.VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY }}
+
+    steps:
+      - name: Provision protected OAuth transaction key
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          envs: VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY
+          script: |
+            python3 - <<'PY'
+            import grp
+            import os
+            import stat
+            import tempfile
+            from pathlib import Path
+
+            name = "VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY"
+            secret = os.environ.get(name, "")
+            if len(secret) < 32:
+                raise SystemExit("required protected runtime key is unavailable")
+            env_path = Path("/opt/vvault-public/.env")
+            group_id = grp.getgrnam("vvault").gr_gid
+            current = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+            lines = [line for line in current.splitlines() if not line.startswith(f"{name}=")]
+            lines.append(f"{name}={secret}")
+            descriptor, temporary = tempfile.mkstemp(prefix=".env.", dir=env_path.parent)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write("\n".join(lines) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chown(temporary, -1, group_id)
+                os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
+                os.replace(temporary, env_path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            PY
+            sudo systemctl restart vvault-backend.service
+            curl --fail --silent --show-error http://127.0.0.1:8000/api/ready |
+              python3 -c 'import json,sys; assert json.load(sys.stdin).get("ready") is True'
+            curl --fail --silent --show-error http://127.0.0.1:8000/api/auth/google/health |
+              python3 -c 'import json,sys; assert json.load(sys.stdin).get("oauth_transaction_protection_ready") is True; print("oauth-transaction-protection-ready")'
 
   restore-frontend:
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'restore_frontend'
