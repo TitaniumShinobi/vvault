@@ -22,6 +22,9 @@ const Settings = ({ systemInfo, user }) => {
   const [saved, setSaved] = useState(false);
   const [schemaExported, setSchemaExported] = useState(false);
   const [capsuleExported, setCapsuleExported] = useState(false);
+  const [deviceApprovalCode, setDeviceApprovalCode] = useState('');
+  const [deviceApprovalStatus, setDeviceApprovalStatus] = useState('');
+  const [approvingDevice, setApprovingDevice] = useState(false);
   
   useEffect(() => {
     loadConfig();
@@ -126,6 +129,28 @@ const Settings = ({ systemInfo, user }) => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const approveTrustedDevice = async (event) => {
+    event.preventDefault();
+    if (!deviceApprovalCode.trim()) return;
+    setApprovingDevice(true);
+    setDeviceApprovalStatus('');
+    try {
+      const response = await authFetch('/api/auth/devices/transfer/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transfer_code: deviceApprovalCode.trim() })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || 'This approval code could not be used.');
+      setDeviceApprovalCode('');
+      setDeviceApprovalStatus('Device approved. It can now continue securely.');
+    } catch (error) {
+      setDeviceApprovalStatus(error.message || 'This approval code could not be used.');
+    } finally {
+      setApprovingDevice(false);
+    }
   };
   
   return (
@@ -234,6 +259,40 @@ const Settings = ({ systemInfo, user }) => {
                   <p className="setting-description">
                     Choose the blockchain network for storage
                   </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card mt-4">
+            <div className="card-header">
+              <h3 className="card-title">📱 Approve a trusted device</h3>
+            </div>
+            <div className="settings-section">
+              <div className="setting-group">
+                <div className="setting-item">
+                  <p className="setting-description">
+                    Enter the expiring approval code displayed on a new device. This verifies only that device; it does not update legal-document receipts or expose Vault data.
+                  </p>
+                  <form onSubmit={approveTrustedDevice}>
+                    <label className="setting-label" htmlFor="trusted-device-approval-code">
+                      <span className="setting-title">New device approval code</span>
+                    </label>
+                    <input
+                      id="trusted-device-approval-code"
+                      className="form-input"
+                      value={deviceApprovalCode}
+                      onChange={(event) => setDeviceApprovalCode(event.target.value)}
+                      autoComplete="one-time-code"
+                      placeholder="Enter the code from the new device"
+                      disabled={approvingDevice}
+                      required
+                    />
+                    <button className="btn btn-primary" type="submit" disabled={approvingDevice || !deviceApprovalCode.trim()}>
+                      {approvingDevice ? 'Approving…' : 'Approve device'}
+                    </button>
+                  </form>
+                  {deviceApprovalStatus && <p className="setting-description" role="status">{deviceApprovalStatus}</p>}
                 </div>
               </div>
             </div>
