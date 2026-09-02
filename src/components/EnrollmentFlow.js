@@ -11,7 +11,7 @@ async function api(path, options = {}) {
   return payload;
 }
 
-export default function EnrollmentFlow() {
+export default function EnrollmentFlow({ returningOwner = false }) {
   const [step, setStep] = useState('consent');
   const [codes, setCodes] = useState([]);
   const [error, setError] = useState('');
@@ -24,8 +24,8 @@ export default function EnrollmentFlow() {
     await api('/api/auth/enrollment/webauthn/register', { method: 'POST', body: JSON.stringify({ id: credential.id, rawId: b64url(credential.rawId), type: credential.type, response: { clientDataJSON: b64url(response.clientDataJSON), attestationObject: b64url(response.attestationObject), transports: response.getTransports?.() || [] } }) });
     setStep('recovery');
   });
-  return <main className="login-container"><section className="login-card"><h1 className="login-title">Secure enrollment</h1>
-    {step === 'consent' && <><p>Review and accept VVAULT’s Terms of Service and Privacy Notice before your personal vault is created.</p><button disabled={working} onClick={() => run(async () => { await api('/api/auth/enrollment/consents', { method: 'POST', body: '{}' }); setStep('passkey'); })}>Accept Terms and Privacy</button></>}
+  return <main className="login-container"><section className="login-card"><h1 className="login-title">{returningOwner ? 'Welcome back' : 'Secure enrollment'}</h1>
+    {step === 'consent' && <><p>{returningOwner ? 'We have updated our Terms and Privacy Notice. Accept the current documents to renew your receipt and return to your existing VVAULT.' : 'Review and accept VVAULT’s Terms of Service and Privacy Notice before your personal vault is created.'}</p><button disabled={working} onClick={() => run(async () => { const result = await api('/api/auth/enrollment/consents', { method: 'POST', body: '{}' }); if (result.legacy_continuity) { window.location.assign('/'); return; } setStep('passkey'); })}>Accept Terms and Privacy</button></>}
     {step === 'passkey' && <button disabled={working} onClick={passkey}>Register a passkey</button>}
     {step === 'recovery' && <button disabled={working} onClick={() => run(async () => { const result = await api('/api/auth/enrollment/recovery-codes', { method: 'POST', body: '{}' }); setCodes(result.recovery_codes || []); setStep('activate'); })}>Generate recovery codes</button>}
     {codes.length > 0 && <><p>Save these codes offline. They are shown once.</p><pre>{codes.join('\n')}</pre></>}

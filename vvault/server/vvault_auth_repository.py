@@ -296,6 +296,7 @@ class VVaultAuthRepository:
     def admit_verified_identity(
         self, *, provider: str, provider_subject: str, verified_email: str,
         name: str | None, issuer: str | None = None,
+        allow_legacy_compatibility: bool = False,
     ) -> tuple[dict[str, Any], bool]:
         """Find a durable identity or atomically create one pending account.
 
@@ -322,6 +323,47 @@ class VVaultAuthRepository:
                 if existing:
                     conn.commit()
                     return existing, False
+                if allow_legacy_compatibility:
+                    # This one-time bridge binds a verified Google subject to
+                    # exactly one existing LEGACY owner. Email never becomes
+                    # an identity key or a general account lookup.
+                    cur.execute(
+                        """SELECT id, email, name, role, account_state
+                             FROM users
+                            WHERE account_state='LEGACY' AND lower(email)=%s
+                            FOR UPDATE""",
+                        (email,),
+                    )
+                    candidates = [_row_to_dict(row) for row in cur.fetchall()]
+                    if len(candidates) == 1:
+                        user = candidates[0]
+                        cur.execute(
+                            """INSERT INTO external_identities
+                               (user_id, provider, provider_subject, issuer, verified_at)
+                               VALUES (%s, %s, %s, %s, now()) RETURNING id""",
+                            (user["id"], provider, subject, issuer),
+                        )
+                        identity = _row_to_dict(cur.fetchone())
+                        cur.execute(
+                            """INSERT INTO managed_emails
+                               (user_id, normalized_email, identity_id, verified_at)
+                               VALUES (%s, %s, %s, now())
+                               ON CONFLICT (user_id, normalized_email) DO NOTHING""",
+                            (user["id"], email, identity["id"]),
+                        )
+                        cur.execute(
+                            """UPDATE users SET auth_provider=%s, updated_at=now()
+                                 WHERE id=%s
+                             RETURNING id, email, name, role, account_state""",
+                            (provider, user["id"]),
+                        )
+                        user = _row_to_dict(cur.fetchone())
+                        user["_legacy_continuity"] = True
+                        conn.commit()
+                        return user, False
+                    if len(candidates) > 1:
+                        conn.rollback()
+                        raise ValueError("legacy owner match is ambiguous")
                 cur.execute(
                     """INSERT INTO users (email, password_hash, name, role, auth_provider, account_state, updated_at)
                        VALUES (%s, %s, %s, 'user', %s, 'PENDING_ENROLLMENT', now())
@@ -624,6 +666,23 @@ class VVaultAuthRepository:
             conn.commit()
         return session
 
+    def create_legacy_consent_session(
+        self, *, user_id: str, token_hash: str, expires_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Issue a receipt-only session for an existing LEGACY owner."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO sessions (user_id, token_hash, expires_at, enrollment_session_kind)
+                       SELECT id, %s, %s, 'LEGACY' FROM users
+                        WHERE id=%s AND account_state='LEGACY'
+                       RETURNING id, user_id, expires_at, enrollment_session_kind""",
+                    (token_hash, expires_at, user_id),
+                )
+                session = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return session
+
     def get_enrollment_session_by_hash(self, token_hash: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -669,6 +728,45 @@ class VVaultAuthRepository:
                     )
             conn.commit()
         return True
+
+    def complete_legacy_consent(
+        self, *, user_id: str, pending_session_id: str, normal_token_hash: str,
+        expires_at: datetime, documents: Sequence[Mapping[str, str]],
+        ip_hash: str | None = None, user_agent_hash: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Renew receipts and rotate back to the same legacy owner session."""
+        receipts = {(str(row.get("key") or ""), str(row.get("version") or ""), str(row.get("sha256") or "")) for row in documents}
+        if not normal_token_hash or not receipts or any(not all(receipt) for receipt in receipts):
+            raise ValueError("complete continuity-consent arguments are required")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT 1 FROM sessions JOIN users ON users.id=sessions.user_id
+                        WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                          AND sessions.expires_at > now() AND sessions.enrollment_session_kind='LEGACY'
+                          AND users.account_state='LEGACY' FOR UPDATE OF sessions, users""",
+                    (pending_session_id, user_id),
+                )
+                if not cur.fetchone():
+                    conn.rollback(); return None
+                for key, version, sha256 in receipts:
+                    cur.execute(
+                        """INSERT INTO enrollment_consents
+                           (user_id, document_key, document_version, document_sha256, ip_hash, user_agent_hash)
+                           VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                        (user_id, key, version, sha256, ip_hash, user_agent_hash),
+                    )
+                cur.execute("UPDATE sessions SET revoked_at=now() WHERE id=%s", (pending_session_id,))
+                cur.execute(
+                    """INSERT INTO sessions (user_id, token_hash, expires_at, enrollment_session_kind,
+                                              rotated_from_session_id)
+                       VALUES (%s,%s,%s,'LEGACY',%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind""",
+                    (user_id, normal_token_hash, expires_at, pending_session_id),
+                )
+                session = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return session
 
     def create_webauthn_registration_challenge(
         self, *, user_id: str, session_id: str, challenge_digest: str,

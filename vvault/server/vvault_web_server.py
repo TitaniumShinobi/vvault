@@ -9611,11 +9611,23 @@ def _start_enrollment_session(user: dict, frontend: str):
     user_id = str(user.get("id") or "")
     device_secret, token = identity_crypto.opaque_token(), identity_crypto.opaque_token()
     state = str(user.get("account_state") or "")
-    args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=_session_token_hash(token), expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
-    session = AUTH_REPOSITORY.create_pending_enrollment_session(**args) if state == "PENDING_ENROLLMENT" else AUTH_REPOSITORY.issue_pending_device_session(**args)
+    token_hash = _session_token_hash(token)
+    if state == "LEGACY" and user.get("_legacy_continuity"):
+        session = AUTH_REPOSITORY.create_legacy_consent_session(
+            user_id=user_id, token_hash=token_hash,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=20),
+        )
+    else:
+        args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=token_hash, expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
+        session = AUTH_REPOSITORY.create_pending_enrollment_session(**args) if state == "PENDING_ENROLLMENT" else AUTH_REPOSITORY.issue_pending_device_session(**args)
     if not session:
         raise RuntimeError("cannot issue enrollment session")
-    target = f"{frontend.rstrip('/')}/?identity_pending=1" if state == "PENDING_ENROLLMENT" else f"{frontend.rstrip('/')}/?device_approval_required=1"
+    if state == "PENDING_ENROLLMENT" or (state == "LEGACY" and user.get("_legacy_continuity")):
+        target = f"{frontend.rstrip('/')}/?identity_pending=1"
+        if user.get("_legacy_continuity"):
+            target += "&terms_update=1"
+    else:
+        target = f"{frontend.rstrip('/')}/?device_approval_required=1"
     response = redirect(target)
     response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
     response.set_cookie("vvault_enrollment_session", token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=20 * 60, path="/")
@@ -9722,16 +9734,33 @@ def redeem_chatty_pairing_intent():
 @app.route('/api/auth/enrollment/consents', methods=['POST'])
 def accept_canonical_enrollment_consents():
     pending = _enrollment_session_from_request()
-    if not pending or pending.get("enrollment_session_kind") != "PENDING_ENROLLMENT":
+    if not pending:
         return jsonify({"success": False, "error": "Pending enrollment session required"}), 401
     try:
         from vvault.server import vvault_auth_crypto as identity_crypto
     except ImportError:
         import vvault_auth_crypto as identity_crypto
-    accepted = AUTH_REPOSITORY.record_enrollment_consents(user_id=str(pending["user_id"]), session_id=str(pending["session_id"]), documents=_enrollment_documents(), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()))
+    documents = _enrollment_documents()
+    request_ip_hash = identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key())
+    request_user_agent_hash = identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key())
+    if (pending.get("enrollment_session_kind") == "LEGACY"
+            and pending.get("account_state") == "LEGACY"):
+        normal_token = identity_crypto.opaque_token()
+        completed = AUTH_REPOSITORY.complete_legacy_consent(
+            user_id=str(pending["user_id"]), pending_session_id=str(pending["session_id"]),
+            normal_token_hash=_session_token_hash(normal_token),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30), documents=documents,
+            ip_hash=request_ip_hash, user_agent_hash=request_user_agent_hash,
+        )
+        if not completed:
+            return jsonify({"success": False, "error": "Terms update was denied"}), 403
+        return _enrollment_response({"success": True, "legacy_continuity": True, "documents": documents}, normal_token=normal_token)
+    if pending.get("enrollment_session_kind") != "PENDING_ENROLLMENT":
+        return jsonify({"success": False, "error": "Pending enrollment session required"}), 401
+    accepted = AUTH_REPOSITORY.record_enrollment_consents(user_id=str(pending["user_id"]), session_id=str(pending["session_id"]), documents=documents, ip_hash=request_ip_hash, user_agent_hash=request_user_agent_hash)
     if not accepted:
         return jsonify({"success": False, "error": "Enrollment consent was denied"}), 403
-    return _enrollment_response({"success": True, "documents": _enrollment_documents()})
+    return _enrollment_response({"success": True, "documents": documents})
 
 
 @app.route('/api/auth/enrollment/webauthn/challenge', methods=['POST'])
@@ -10081,7 +10110,11 @@ def complete_canonical_oauth(provider: str = "google"):
         if not _allowed_redirect_base(frontend):
             frontend = _get_frontend_url()
         if transaction["purpose"] == "signin":
-            user, _created = AUTH_REPOSITORY.admit_verified_identity(provider=provider, provider_subject=subject, verified_email=email, name=name, issuer=issuer)
+            user, _created = AUTH_REPOSITORY.admit_verified_identity(
+                provider=provider, provider_subject=subject, verified_email=email,
+                name=name, issuer=issuer,
+                allow_legacy_compatibility=(provider == "google"),
+            )
             return _start_enrollment_session(user, frontend)
         if transaction["purpose"] == "reauth":
             if not AUTH_REPOSITORY.record_session_reauthentication(session_id=str(transaction["initiating_session_id"]), user_id=str(transaction["initiating_user_id"]), provider=provider):

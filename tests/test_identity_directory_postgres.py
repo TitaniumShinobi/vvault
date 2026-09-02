@@ -131,6 +131,37 @@ def test_same_subject_race_creates_one_account(repository):
     assert outcomes[0][0]["id"] == outcomes[1][0]["id"]
 
 
+def test_legacy_owner_links_verified_google_subject_without_replacing_owner(repository):
+    """A returning pre-identity owner keeps its UUID and receives a receipt-only session."""
+    legacy_id = "11111111-1111-4111-8111-111111111111"
+    with repository._connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO users(id,email,password_hash,name,role,account_state)
+                   VALUES(%s,%s,'!','Existing Owner','user','LEGACY')""",
+                (legacy_id, "existing@example.test"),
+            )
+        conn.commit()
+    owner, created = repository.admit_verified_identity(
+        provider="google", provider_subject="existing-google-subject",
+        verified_email="existing@example.test", name="Existing Owner",
+        issuer="https://accounts.google.com", allow_legacy_compatibility=True,
+    )
+    assert not created and str(owner["id"]) == legacy_id
+    assert owner["account_state"] == "LEGACY" and owner["_legacy_continuity"] is True
+    pending = repository.create_legacy_consent_session(
+        user_id=legacy_id, token_hash="legacy-receipt-token",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    assert pending and pending["enrollment_session_kind"] == "LEGACY"
+    completed = repository.complete_legacy_consent(
+        user_id=legacy_id, pending_session_id=str(pending["id"]), normal_token_hash="legacy-normal-token",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        documents=[{"key": "terms", "version": "current", "sha256": "terms"}],
+    )
+    assert completed and completed["enrollment_session_kind"] == "LEGACY"
+
+
 def test_oauth_and_magic_tokens_are_atomically_single_use(repository):
     expiry = datetime.now(timezone.utc) + timedelta(minutes=5)
     repository.create_oauth_transaction(

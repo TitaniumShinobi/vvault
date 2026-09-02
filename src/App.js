@@ -167,8 +167,9 @@ function App() {
   
   // Show cinematic login screen if user is not authenticated
   if (!user) {
-    return new URLSearchParams(window.location.search).get('identity_pending') === '1'
-      ? <EnrollmentFlow />
+    const authState = new URLSearchParams(window.location.search);
+    return authState.get('identity_pending') === '1'
+      ? <EnrollmentFlow returningOwner={authState.get('terms_update') === '1'} />
       : <CinematicLogin onLogin={handleLogin} />;
   }
   
