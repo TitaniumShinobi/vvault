@@ -835,7 +835,7 @@ class VVaultAuthRepository:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT 1 FROM users WHERE id=%s AND account_state IN ('ACTIVE', 'LEGACY')",
+                    "SELECT 1 FROM users WHERE id=%s AND account_state IN ('ACTIVE', 'LEGACY', 'PENDING_ENROLLMENT')",
                     (user_id,),
                 )
                 if not cur.fetchone():

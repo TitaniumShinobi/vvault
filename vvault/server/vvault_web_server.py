@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from uuid import uuid4
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 import hashlib
 import hmac
@@ -8453,6 +8453,79 @@ def get_security_summary():
     })
 
 # Legal document routes
+_LEGAL_DOCUMENT_SOURCES = {
+    "vvault:terms": ("VVAULT_TERMS_OF_SERVICE.md", "VVAULT Terms of Service"),
+    "vvault:privacy": ("VVAULT_PRIVACY_NOTICE.md", "VVAULT Privacy Notice"),
+    "vvault:eeccd": ("VVAULT_EUROPEAN_ELECTRONIC_COMMNICATION_CODE_DISCLOSURE.md", "VVAULT EECCD Disclosure"),
+}
+
+
+def _legal_pdf_bytes(*, title: str, content: str) -> bytes:
+    """Render a small, dependency-free, text-faithful PDF for a legal record.
+
+    The immutable URL is versioned from the source Markdown digest.  This
+    renderer deliberately does not alter the legal source or claim a separate
+    authoring authority; it supplies a portable read-only PDF presentation.
+    """
+    def pdf_text(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)").encode("latin-1", "replace").decode("latin-1")
+
+    lines = [title, ""]
+    for raw in content.splitlines():
+        raw = raw.strip()
+        if not raw:
+            lines.append("")
+            continue
+        while len(raw) > 92:
+            cut = raw.rfind(" ", 0, 92)
+            cut = cut if cut > 0 else 92
+            lines.append(raw[:cut])
+            raw = raw[cut:].lstrip()
+        lines.append(raw)
+    pages = [lines[index:index + 48] for index in range(0, len(lines), 48)] or [[title]]
+    objects: list[bytes] = []
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    page_ids = [3 + index * 2 for index in range(len(pages))]
+    objects.append(("<< /Type /Pages /Kids [" + " ".join(f"{page_id} 0 R" for page_id in page_ids) + f"] /Count {len(pages)} >>").encode())
+    for index, page in enumerate(pages):
+        page_id, content_id = page_ids[index], page_ids[index] + 1
+        stream = ["BT", "/F1 10 Tf", "50 760 Td", "13 TL"]
+        for line in page:
+            stream.append(f"({pdf_text(line)}) Tj")
+            stream.append("T*")
+        stream.append("ET")
+        encoded = "\n".join(stream).encode("latin-1", "replace")
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {3 + len(pages) * 2} 0 R >> >> /Contents {content_id} 0 R >>".encode())
+        objects.append(f"<< /Length {len(encoded)} >>\nstream\n".encode() + encoded + b"\nendstream")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for index, value in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output.extend(f"{index} 0 obj\n".encode()); output.extend(value); output.extend(b"\nendobj\n")
+    xref = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]: output.extend(f"{offset:010d} 00000 n \n".encode())
+    output.extend(f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    return bytes(output)
+
+
+@app.route('/api/legal/<document_key>/<document_version>.pdf')
+def versioned_legal_pdf(document_key: str, document_version: str):
+    source = _LEGAL_DOCUMENT_SOURCES.get(document_key)
+    if not source:
+        return jsonify({"success": False, "error": "Legal document was not found"}), 404
+    content = (_repo_root / "docs" / "legal" / source[0]).read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    if not hmac.compare_digest(document_version, digest):
+        return jsonify({"success": False, "error": "Legal document version was not found"}), 404
+    response = Response(_legal_pdf_bytes(title=source[1], content=content.decode("utf-8", "replace")), mimetype="application/pdf")
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    response.headers["ETag"] = f'"{digest}"'
+    response.headers["Content-Disposition"] = "inline"
+    return response
+
+
 @app.route('/terms-of-service.html')
 def terms_of_service():
     """Serve the Terms of Service HTML page."""
@@ -9717,6 +9790,10 @@ def canonical_enrollment_status():
         "session_kind": pending.get("enrollment_session_kind"),
         "account_state": pending.get("account_state"),
         "device_status": pending.get("device_status"),
+        "documents": _enrollment_documents(),
+        "legal_receipts_current": AUTH_REPOSITORY.has_current_legal_receipts(
+            user_id=str(pending.get("user_id") or ""), required_documents=_enrollment_documents(),
+        ),
     })
 
 
@@ -9868,7 +9945,7 @@ def accept_canonical_enrollment_consents():
             return _set_device_cookie(response, device_secret)
         if completed.get("enrollment_session_kind") == "PENDING_ENROLLMENT":
             response = _enrollment_response(
-                {"success": True, "legacy_continuity": True, "enrollment_required": True, "documents": documents},
+                {"success": True, "legal_recertified": True, "requires_enrollment": True, "documents": documents},
                 pending_token=normal_token,
             )
             return _set_device_cookie(response, device_secret)

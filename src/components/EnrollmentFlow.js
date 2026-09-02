@@ -13,14 +13,18 @@ async function api(path, options = {}) {
 }
 
 const legalDocuments = [
-  { name: 'Terms of Service', href: '/terms-of-service.html' },
-  { name: 'Privacy Notice', href: '/privacy-notice.html' },
-  { name: 'EECCD Disclosure', href: '/european-electronic-communications-code-disclosure.html' },
+  { name: 'Terms of Service', key: 'vvault:terms' },
+  { name: 'Privacy Notice', key: 'vvault:privacy' },
+  { name: 'EECCD Disclosure', key: 'vvault:eeccd' },
 ];
 
-function LegalDocuments() {
+function LegalDocuments({ documents = [] }) {
   return <ul className="lifecycle-document-list" aria-label="Current legal documents">
-    {legalDocuments.map((document) => <li key={document.href}><a href={document.href} target="_blank" rel="noopener noreferrer">{document.name}</a></li>)}
+    {legalDocuments.map((document) => {
+      const current = documents.find((item) => item.key === document.key);
+      const href = current ? `/api/legal/${encodeURIComponent(current.key)}/${encodeURIComponent(current.version)}.pdf` : '#';
+      return <li key={document.key}><a href={href} target="_blank" rel="noopener noreferrer" aria-disabled={!current}>{document.name} (PDF)</a></li>;
+    })}
   </ul>;
 }
 
@@ -49,7 +53,7 @@ export default function EnrollmentFlow({ requestedMode = 'enrollment' }) {
       const current = await api('/api/auth/enrollment/status');
       if (!current.pending) throw new Error('This secure checkpoint has expired. Sign in again to continue.');
       setStatus(current);
-      setStep(current.session_kind === 'PENDING_DEVICE' ? 'device' : 'consent');
+      setStep(current.session_kind === 'PENDING_DEVICE' ? 'device' : current.legal_receipts_current ? 'passkey' : 'consent');
     } catch (failure) {
       setError(failure.message || 'This secure checkpoint is unavailable.');
       setStep('expired');
@@ -90,8 +94,19 @@ export default function EnrollmentFlow({ requestedMode = 'enrollment' }) {
     <p className="lifecycle-eyebrow">VVAULT security checkpoint</p><h1>{title}</h1><p>{subtitle}</p>
     {step === 'loading' && <p>Checking this secure session…</p>}
     {step === 'expired' && <><p>This link or device-verification session is no longer active.</p><a className="lifecycle-link" href="/">Return to sign in</a></>}
-    {step === 'consent' && <><LegalDocuments /><button disabled={working} onClick={() => run(async () => {
+    {step === 'consent' && <><LegalDocuments documents={status?.documents || []} /><button disabled={working} onClick={() => run(async () => {
       const result = await api('/api/auth/enrollment/consents', { method: 'POST', body: '{}' });
+      // A legal update and an unfamiliar device are separate events.  The
+      // server may therefore return a pending-device cookie after recording
+      // receipts; keep that short-lived state intact and render its own gate.
+      if (result.device_approval_required) {
+        window.location.assign('/?device_approval_required=1');
+        return;
+      }
+      if (result.requires_enrollment) {
+        setStep('passkey');
+        return;
+      }
       if (mode === 'recertification' || result.legacy_continuity) return complete();
       setStep('passkey');
     })}>Accept all current documents</button><p className="lifecycle-note">Acceptance updates legal receipts only. It does not change your owner identity or Vault.</p></>}
