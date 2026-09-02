@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "target": "vvault",
+  "runtime": "target-owned",
+  "forbiddenRuntimeDependencies": ["auth", "AUTH_API_BASE_URL", "AUTH_PORT", "1111"],
+  "requiredEnvironmentGroups": [
+    ["GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_CLIENT_ID"],
+    ["GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"],
+    ["VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY"],
+    ["VVAULT_ENROLLMENT_HMAC_KEY"]
+  ],
+  "requiredRouteGroups": [
+    ["/api/auth/google", "/api/auth/oauth/<provider>"],
+    ["/api/auth/google/callback", "/api/auth/oauth/<provider>/callback"],
+    ["/api/auth/verify"],
+    ["/api/auth/logout"]
+  ],
+  "requiredTargetFiles": [
+    "vvault/server/vvault_web_server.py",
+    "vvault/server/vvault_auth_repository.py",
+    "vvault/migrations/0033_identity_directory.up.sql",
+    "vvault/migrations/0034_enrollment_session_hardening.up.sql",
+    "src/components/EnrollmentFlow.js"
+  ],
+  "identityRules": {
+    "identityKey": ["provider", "provider_subject"],
+    "emailIsIdentityKey": false,
+    "passwordRoutes": "disabled",
+    "unknownProviderIdentity": "PENDING_ENROLLMENT",
+    "activeSessionRequires": ["trusted-device", "current-legal-receipts"],
+    "legacyContinuity": "unambiguous-verified-provider-link-only"
+  }
+}

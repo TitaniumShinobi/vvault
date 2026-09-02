@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "generatedBy": "@quantum/auth source-kit",
+  "runtime": "target-owned",
+  "files": {
+    "auth.config.json": "e4ec35e0e945a5e66bb6bf650745d3d739c0a099be8aa0e70003f44b11163b6c",
+    "adapter-contract.json": "8d424242d7c1f20c8882afde8504e5ed63731283aaa32c03d1515226e4a2c9c0",
+    "README.md": "e8bb9accaee235c2f11c87b93ff7d7777a32347250c83713669fc2265ccff846"
+  }
+}
