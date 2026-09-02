@@ -15,6 +15,7 @@ on:
           - deploy_backend
           - deploy_full
           - configure_oauth_transaction_key
+          - configure_email_delivery
           - restore_frontend
       frontend_snapshot:
         description: "Required only for restore_frontend; exact /opt/deploy/backups/vvault-YYYYMMDD-HHMMSS snapshot"
@@ -174,6 +175,35 @@ jobs:
               python3 -c 'import json,sys; assert json.load(sys.stdin).get("ready") is True'
             curl --fail --silent --show-error http://127.0.0.1:8000/api/auth/google/health |
               python3 -c 'import json,sys; assert json.load(sys.stdin).get("oauth_transaction_protection_ready") is True; print("oauth-transaction-protection-ready")'
+
+  configure-email-delivery:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'configure_email_delivery'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VVAULT_RESEND_API_KEY: ${{ secrets.VVAULT_RESEND_API_KEY }}
+      VVAULT_RESEND_FROM: ${{ secrets.VVAULT_RESEND_FROM }}
+    steps:
+      - uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          envs: VVAULT_RESEND_API_KEY,VVAULT_RESEND_FROM
+          script: |
+            python3 - <<'PY'
+            import grp, os, stat, tempfile
+            from pathlib import Path
+            values = {"RESEND_API_KEY": os.environ.get("VVAULT_RESEND_API_KEY", ""), "FROM_EMAIL": os.environ.get("VVAULT_RESEND_FROM", "")}
+            if not all(values.values()): raise SystemExit("required email configuration is unavailable")
+            path = Path("/opt/vvault-public/.env"); current = path.read_text() if path.exists() else ""
+            lines = [line for line in current.splitlines() if not any(line.startswith(f"{key}=") for key in values)] + [f"{key}={value}" for key, value in values.items()]
+            fd, temporary = tempfile.mkstemp(prefix=".env.", dir=path.parent)
+            with os.fdopen(fd, "w") as handle: handle.write("\n".join(lines) + "\n"); handle.flush(); os.fsync(handle.fileno())
+            os.chown(temporary, -1, grp.getgrnam("vvault").gr_gid); os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP); os.replace(temporary, path)
+            PY
+            sudo systemctl restart vvault-backend.service
+            curl --fail --silent http://127.0.0.1:8000/api/auth/email-magic-links/health | python3 -c 'import json,sys; assert json.load(sys.stdin).get("available") is True'
 
   restore-frontend:
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'restore_frontend'
