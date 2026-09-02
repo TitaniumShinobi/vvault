@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 import argparse
 import http.client
-import json
 import mimetypes
 import socket
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 
 class VVaultFrontendProxy(BaseHTTPRequestHandler):
     backend_host = "localhost"
     backend_port = 8000
-    auth_host = "localhost"
-    auth_port = 1111
     public_origin = "http://localhost:7784"
     dist_dir = Path("dist")
     repo_dir = Path(".")
@@ -37,43 +34,15 @@ class VVaultFrontendProxy(BaseHTTPRequestHandler):
         self._handle()
 
     def _handle(self):
-        if self._is_auth_proxy_path():
-            self._proxy_auth()
-            return
         if self.path.startswith("/api/"):
             self._proxy_api()
             return
         self._serve_static()
 
-    def _is_auth_proxy_path(self):
-        path = urlsplit(self.path).path
-        return (
-            path in {
-                "/api/auth/config",
-                "/api/auth/refresh",
-                "/api/auth/set-session",
-                "/api/me",
-            }
-            or path.startswith("/api/auth/providers/")
-        )
-
     def _proxy_api(self):
-        self._proxy_to(self.backend_host, self.backend_port, self.path, require_upstream=True)
+        self._proxy_to(self.backend_host, self.backend_port, self.path)
 
-    def _proxy_auth(self):
-        self._proxy_to(self.auth_host, self.auth_port, self._auth_path_with_origin(), require_upstream=False)
-
-    def _auth_path_with_origin(self):
-        split = urlsplit(self.path)
-        if split.path != "/api/auth/google":
-            return self.path
-
-        query = parse_qsl(split.query, keep_blank_values=True)
-        if not any(key == "origin" for key, _ in query):
-            query.append(("origin", self.public_origin))
-        return urlunsplit((split.scheme, split.netloc, split.path, urlencode(query), split.fragment))
-
-    def _proxy_to(self, host, port, path, require_upstream):
+    def _proxy_to(self, host, port, path):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0") or "0"))
         headers = {
             key: value
@@ -98,39 +67,24 @@ class VVaultFrontendProxy(BaseHTTPRequestHandler):
             self.send_response(response.status, response.reason)
             for key, value in response.getheaders():
                 if key.lower() not in {"connection", "transfer-encoding"}:
-                    if key.lower() == "location":
-                        value = self._rewrite_location(value)
                     self.send_header(key, value)
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(payload)
         except OSError as exc:
-            if require_upstream:
-                raise
-            self._send_auth_unavailable(exc)
+            self._send_backend_unavailable(exc)
         finally:
             conn.close()
 
-    def _rewrite_location(self, value):
-        try:
-            split = urlsplit(value)
-        except Exception:
-            return value
-
-        auth_netloc = f"{self.auth_host}:{self.auth_port}"
-        if split.netloc in {auth_netloc, f"localhost:{self.auth_port}"}:
-            public = urlsplit(self.public_origin)
-            return urlunsplit((public.scheme, public.netloc, split.path, split.query, split.fragment))
-        return value
-
-    def _send_auth_unavailable(self, exc):
+    def _send_backend_unavailable(self, exc):
+        import json
         payload = json.dumps({
             "success": False,
-            "error": "auth_service_unavailable",
-            "message": f"Local auth service is not listening at http://{self.auth_host}:{self.auth_port}",
+            "error": "vvault_backend_unavailable",
+            "message": f"VVAULT backend is not listening at http://{self.backend_host}:{self.backend_port}",
             "detail": exc.__class__.__name__,
         }).encode("utf-8")
-        self.send_response(503, "AUTH SERVICE UNAVAILABLE")
+        self.send_response(503, "VVAULT BACKEND UNAVAILABLE")
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -204,16 +158,12 @@ def main():
     parser.add_argument("--port", type=int, default=7784)
     parser.add_argument("--backend-host", default="localhost")
     parser.add_argument("--backend-port", type=int, default=8000)
-    parser.add_argument("--auth-host", default="localhost")
-    parser.add_argument("--auth-port", type=int, default=1111)
     parser.add_argument("--public-origin", default="")
     parser.add_argument("--dist", default="dist")
     args = parser.parse_args()
 
     VVaultFrontendProxy.backend_host = args.backend_host
     VVaultFrontendProxy.backend_port = args.backend_port
-    VVaultFrontendProxy.auth_host = args.auth_host
-    VVaultFrontendProxy.auth_port = args.auth_port
     VVaultFrontendProxy.public_origin = args.public_origin or f"http://localhost:{args.port}"
     VVaultFrontendProxy.dist_dir = Path(args.dist)
     VVaultFrontendProxy.repo_dir = Path(args.dist).resolve().parent

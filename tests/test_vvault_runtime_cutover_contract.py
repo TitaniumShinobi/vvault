@@ -119,6 +119,15 @@ class TestVvaultRuntimeCutoverStatic(unittest.TestCase):
         self.assertIn("VVAULT_OBJECT_STORAGE_URL", self.launcher)
         self.assertIn("wait_for_url", self.launcher)
         self.assertIn("scripts/vvault_frontend_proxy.py", self.launcher)
+        self.assertNotIn("AUTH_DIR=", self.launcher)
+        self.assertNotIn("AUTH_PORT=", self.launcher)
+        self.assertNotIn("1111", self.launcher)
+
+    def test_frontend_proxy_sends_every_api_request_to_native_backend(self):
+        proxy = (REPO_ROOT / "scripts" / "vvault_frontend_proxy.py").read_text(encoding="utf-8")
+        self.assertNotIn("auth_port", proxy)
+        self.assertNotIn("_proxy_auth", proxy)
+        self.assertIn("self._proxy_to(self.backend_host, self.backend_port, self.path)", proxy)
 
     def test_frontend_script_survives_detached_launcher_stdin(self):
         self.assertIn("nohup \"${PYTHON_BIN}\" scripts/vvault_frontend_proxy.py", self.launcher)

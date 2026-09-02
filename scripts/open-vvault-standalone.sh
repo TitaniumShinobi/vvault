@@ -7,19 +7,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FRONTEND_PORT="${VVAULT_FRONTEND_PORT:-7784}"
 BACKEND_PORT="${VVAULT_BACKEND_PORT:-8000}"
-AUTH_PORT="${AUTH_PORT:-1111}"
 HOST="${VVAULT_HOST:-localhost}"
 FRONTEND_BIND_HOST="${VVAULT_FRONTEND_BIND_HOST:-::}"
 FRONTEND_URL="http://${HOST}:${FRONTEND_PORT}/"
 BACKEND_HEALTH_URL="http://${HOST}:${BACKEND_PORT}/api/health"
-AUTH_HEALTH_URL="http://${HOST}:${AUTH_PORT}/health"
 LOG_DIR="${VVAULT_LOG_DIR:-/tmp}"
 BACKEND_LOG="${LOG_DIR}/vvault-backend.log"
 FRONTEND_LOG="${LOG_DIR}/vvault-frontend.log"
-AUTH_LOG="${LOG_DIR}/vvault-auth.log"
 BACKEND_PID_FILE="${LOG_DIR}/vvault-backend.pid"
 FRONTEND_PID_FILE="${LOG_DIR}/vvault-frontend.pid"
-AUTH_PID_FILE="${LOG_DIR}/vvault-auth.pid"
 DATABASE_TUNNEL_LOG="${LOG_DIR}/vvault-database-tunnel.log"
 DATABASE_TUNNEL_PID_FILE="${LOG_DIR}/vvault-database-tunnel.pid"
 PYTHON_BIN="${VVAULT_PYTHON_BIN:-}"
@@ -199,34 +195,6 @@ then
   exit 1
 fi
 
-AUTH_DIR="${AUTH_DIR:-${ROOT_DIR}/../auth}"
-AUTH_STARTED=0
-if ! is_listening "${AUTH_PORT}"; then
-  if [ -f "${AUTH_DIR}/dist/index.js" ]; then
-    echo "Starting local auth service on ${AUTH_PORT}..."
-    (
-      cd "${AUTH_DIR}"
-      AUTH_PORT="${AUTH_PORT}" \
-        AUTH_APP_CONFIG_PATH="${AUTH_APP_CONFIG_PATH:-${AUTH_DIR}/config/vvault.json}" \
-        AUTH_ENV_FILES="${AUTH_ENV_FILES:-${ROOT_DIR}/.env}" \
-        AUTH_PUBLIC_ORIGIN="${AUTH_PUBLIC_ORIGIN:-http://${HOST}:${AUTH_PORT}}" \
-        AUTH_COOKIE_NAME="${AUTH_COOKIE_NAME:-auth_sid}" \
-        VVAULT_GOOGLE_CALLBACK_URL="${VVAULT_GOOGLE_CALLBACK_URL:-${FRONTEND_URL%/}/api/auth/google/callback}" \
-        nohup node dist/index.js </dev/null >"${AUTH_LOG}" 2>&1 &
-      echo "$!" >"${AUTH_PID_FILE}"
-    )
-    AUTH_STARTED=1
-  else
-    echo "Local auth service not found at ${AUTH_DIR}; Google sign-in cannot start until auth is running." >&2
-  fi
-else
-  echo "Local auth service already listening on ${AUTH_PORT}."
-fi
-
-if [ "${AUTH_STARTED}" = "1" ] || is_listening "${AUTH_PORT}"; then
-  wait_for_url "${AUTH_HEALTH_URL}" "auth"
-fi
-
 if ! is_listening "${BACKEND_PORT}"; then
   echo "Starting VVAULT backend on ${BACKEND_PORT}..."
   PORT="${BACKEND_PORT}" VVAULT_FRONTEND_URL="${FRONTEND_URL%/}" \
@@ -257,8 +225,6 @@ if ! is_listening "${FRONTEND_PORT}"; then
       --port "${FRONTEND_PORT}" \
       --backend-host "${HOST}" \
       --backend-port "${BACKEND_PORT}" \
-      --auth-host "${HOST}" \
-      --auth-port "${AUTH_PORT}" \
       --public-origin "${FRONTEND_URL%/}" \
       --dist "${ROOT_DIR}/dist" \
       </dev/null \
@@ -276,8 +242,6 @@ if ! is_listening "${FRONTEND_PORT}"; then
       --port "${FRONTEND_PORT}" \
       --backend-host "${HOST}" \
       --backend-port "${BACKEND_PORT}" \
-      --auth-host "${HOST}" \
-      --auth-port "${AUTH_PORT}" \
       --public-origin "${FRONTEND_URL%/}" \
       --dist "${ROOT_DIR}/dist"
   fi
