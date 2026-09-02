@@ -9617,6 +9617,21 @@ def _start_enrollment_session(user: dict, frontend: str):
             user_id=user_id, token_hash=token_hash,
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=20),
         )
+    elif state == "LEGACY":
+        session = AUTH_REPOSITORY.issue_legacy_session(
+            user_id=user_id, token_hash=token_hash,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            required_documents=_enrollment_documents(),
+        )
+        if not session:
+            # A legacy owner without current receipts must re-enter the
+            # explicit recertification path; never bypass it with a session.
+            user["_legacy_continuity"] = True
+            return _start_enrollment_session(user, frontend)
+        response = redirect(f"{frontend.rstrip('/')}/")
+        response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
+        response.set_cookie("vvault_session", token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=30 * 24 * 60 * 60, path="/")
+        return response
     else:
         args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=token_hash, expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
         session = AUTH_REPOSITORY.create_pending_enrollment_session(**args) if state == "PENDING_ENROLLMENT" else AUTH_REPOSITORY.issue_pending_device_session(**args)

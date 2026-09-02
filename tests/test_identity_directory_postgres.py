@@ -165,6 +165,12 @@ def test_legacy_owner_links_verified_google_subject_without_replacing_owner(repo
         documents=[{"key": "terms", "version": "current", "sha256": "terms"}],
     )
     assert completed and completed["enrollment_session_kind"] == "LEGACY"
+    returning = repository.issue_legacy_session(
+        user_id=legacy_id, token_hash="legacy-returning-token",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        required_documents=[{"key": "terms", "version": "current", "sha256": "terms"}],
+    )
+    assert returning and returning["enrollment_session_kind"] == "LEGACY"
 
 
 def test_pending_google_subject_returns_to_its_one_legacy_owner_without_moving_vault_data(repository):

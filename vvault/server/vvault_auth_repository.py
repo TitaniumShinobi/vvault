@@ -764,6 +764,40 @@ class VVaultAuthRepository:
             conn.commit()
         return session
 
+    def issue_legacy_session(
+        self, *, user_id: str, token_hash: str, expires_at: datetime,
+        required_documents: Sequence[Mapping[str, str]],
+    ) -> dict[str, Any] | None:
+        """Issue a normal browser session for a recertified legacy owner.
+
+        This is intentionally limited to an owner that has already renewed all
+        current legal receipts.  A legacy record without those receipts must
+        enter the one-time recertification path instead.
+        """
+        required = {(str(row.get("key") or ""), str(row.get("version") or ""), str(row.get("sha256") or "")) for row in required_documents}
+        if not token_hash or not required or any(not all(row) for row in required):
+            raise ValueError("current legacy consent receipts are required")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT document_key, document_version, document_sha256
+                         FROM enrollment_consents WHERE user_id=%s""",
+                    (user_id,),
+                )
+                actual = {(str(row["document_key"]), str(row["document_version"]), str(row["document_sha256"])) for row in cur.fetchall()}
+                if not required.issubset(actual):
+                    conn.rollback(); return None
+                cur.execute(
+                    """INSERT INTO sessions (user_id, token_hash, expires_at, enrollment_session_kind)
+                       SELECT id, %s, %s, 'LEGACY' FROM users
+                        WHERE id=%s AND account_state='LEGACY'
+                       RETURNING id, user_id, expires_at, enrollment_session_kind""",
+                    (token_hash, expires_at, user_id),
+                )
+                session = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return session
+
     def get_enrollment_session_by_hash(self, token_hash: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             with conn.cursor() as cur:
