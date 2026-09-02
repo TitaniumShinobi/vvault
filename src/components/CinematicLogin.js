@@ -7,6 +7,13 @@ const CinematicLogin = () => {
   const [email, setEmail] = useState('');
   const [status, setStatus] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [magicLinkAvailable, setMagicLinkAvailable] = useState(null);
+
+  useEffect(() => {
+    fetch('/api/auth/email-magic-links/health', { credentials: 'same-origin' })
+      .then((response) => response.json().then((payload) => setMagicLinkAvailable(response.ok && payload.available === true)))
+      .catch(() => setMagicLinkAvailable(false));
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
@@ -75,12 +82,13 @@ const CinematicLogin = () => {
                 <label htmlFor="email" className="form-label">Email magic link</label>
                 <input type="email" id="email" name="email" autoComplete="email" value={email}
                   onChange={(event) => setEmail(event.target.value)} className="form-input"
-                  placeholder="you@example.com" required disabled={isLoading} />
+                  placeholder="you@example.com" required disabled={isLoading || magicLinkAvailable === false} />
               </div>
-              <button type="submit" className="btn-primary" disabled={isLoading}>
-                {isLoading ? 'Sending…' : 'Email me a secure link'}
+              <button type="submit" className="btn-primary" disabled={isLoading || magicLinkAvailable === false}>
+                {isLoading ? 'Sending…' : magicLinkAvailable === false ? 'Email links unavailable' : 'Email me a secure link'}
               </button>
             </form>
+            {magicLinkAvailable === false && <p className="welcome-description" role="status">Email magic links are not configured. Continue with Google or GitHub.</p>}
             {status && <p className="welcome-description" role="status">{status}</p>}
             <p className="welcome-description">A new email or provider creates a separate pending account unless you link it from an active account.</p>
           </div>

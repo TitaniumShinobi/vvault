@@ -196,6 +196,29 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
                 server._identity_callback_url("github"),
                 "http://localhost:7784/api/auth/oauth/github/callback",
             )
+
+    def test_magic_link_reports_unavailable_without_a_delivery_adapter(self):
+        with patch.object(server, "_magic_link_delivery_available", return_value=False):
+            response = self.client.get("/api/auth/email-magic-links/health")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {"available": False})
+
+    def test_magic_link_uses_configured_smtp(self):
+        smtp = Mock()
+        smtp.__enter__ = Mock(return_value=smtp)
+        smtp.__exit__ = Mock(return_value=False)
+        config = {
+            "SMTP_HOST": "smtp.example.test",
+            "SMTP_PORT": "587",
+            "SMTP_USER": "mailer@example.test",
+            "SMTP_PASSWORD": "test-only-password",
+            "SMTP_FROM": "VVAULT <mailer@example.test>",
+        }
+        with patch.dict(os.environ, config, clear=False), patch.object(server.smtplib, "SMTP", return_value=smtp):
+            self.assertTrue(server._deliver_magic_link("delivery@example.test", "https://vvault.example/#magic_link=opaque"))
+        smtp.starttls.assert_called_once()
+        smtp.login.assert_called_once_with("mailer@example.test", "test-only-password")
+        smtp.send_message.assert_called_once()
     def test_health_reports_vvault_native_dependencies(self):
         with patch.object(server, "_get_vvault_runtime_status", return_value=_vvault_runtime_status(ready=True)):
             response = self.client.get("/api/health")

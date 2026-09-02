@@ -43,6 +43,9 @@ import threading
 import zipfile
 import io
 import mimetypes
+import smtplib
+import ssl
+from email.message import EmailMessage
 import time
 import secrets
 import base64
@@ -10460,9 +10463,59 @@ def complete_canonical_oauth(provider: str = "google"):
         return jsonify({"success": False, "error": "OAuth authorization was rejected"}), 400
 
 
-def _deliver_magic_link(_email: str, _url: str) -> bool:
-    """Delivery boundary. A deployment supplies an audited mail adapter; never log URL."""
-    return False
+def _magic_link_smtp_config() -> dict[str, Any] | None:
+    """Read only VVAULT's target-owned mail configuration at delivery time."""
+    host = str(os.environ.get("SMTP_HOST") or os.environ.get("EMAIL_HOST") or "").strip()
+    username = str(os.environ.get("SMTP_USERNAME") or os.environ.get("SMTP_USER") or os.environ.get("EMAIL_USER") or "").strip()
+    password = str(os.environ.get("SMTP_PASSWORD") or os.environ.get("SMTP_PASS") or os.environ.get("EMAIL_PASS") or "")
+    sender = str(os.environ.get("SMTP_FROM") or os.environ.get("EMAIL_FROM") or username).strip()
+    try:
+        port = int(str(os.environ.get("SMTP_PORT") or os.environ.get("EMAIL_PORT") or "587"))
+    except ValueError:
+        return None
+    if not host or not username or not password or not sender or not 1 <= port <= 65535:
+        return None
+    use_ssl = str(os.environ.get("SMTP_USE_SSL") or "").strip().lower() in {"1", "true", "yes"}
+    starttls = not use_ssl and str(os.environ.get("SMTP_STARTTLS") or "true").strip().lower() not in {"0", "false", "no"}
+    return {"host": host, "port": port, "username": username, "password": password, "sender": sender, "use_ssl": use_ssl, "starttls": starttls}
+
+
+def _magic_link_delivery_available() -> bool:
+    return _magic_link_smtp_config() is not None
+
+
+def _deliver_magic_link(email: str, url: str) -> bool:
+    """Send a short-lived magic link without logging its bearer token or recipient."""
+    config = _magic_link_smtp_config()
+    if not config:
+        return False
+    message = EmailMessage()
+    message["From"] = config["sender"]
+    message["To"] = email
+    message["Subject"] = "Your VVAULT secure sign-in link"
+    message.set_content(f"Open this secure VVAULT sign-in link within 15 minutes:\n{url}\n\nIf you did not request it, you can ignore this email.")
+    message.add_alternative(
+        f"<p>Open this <a href=\"{url}\">secure VVAULT sign-in link</a> within 15 minutes.</p><p>If you did not request it, you can ignore this email.</p>",
+        subtype="html",
+    )
+    try:
+        smtp_cls = smtplib.SMTP_SSL if config["use_ssl"] else smtplib.SMTP
+        with smtp_cls(config["host"], config["port"], timeout=10) as client:
+            if config["starttls"]:
+                client.starttls(context=ssl.create_default_context())
+            client.login(config["username"], config["password"])
+            client.send_message(message)
+        return True
+    except (OSError, smtplib.SMTPException):
+        return False
+
+
+@app.route('/api/auth/email-magic-links/health', methods=['GET'])
+def magic_link_delivery_health():
+    available = _magic_link_delivery_available()
+    response = jsonify({"available": available})
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200 if available else 503
 
 
 @app.route('/api/auth/email-magic-links', methods=['POST'])
@@ -10473,14 +10526,19 @@ def request_email_magic_link():
         import vvault_auth_crypto as identity_crypto
     # Always return the same accepted response, including malformed input and
     # unavailable delivery, so email existence is never disclosed.
+    if not _magic_link_delivery_available():
+        return jsonify({"success": False, "error": "magic_link_delivery_unavailable"}), 503
     try:
         if not _rate_limit_key("auth"):
             email = identity_crypto.normalize_email(str((request.get_json(silent=True) or {}).get("email") or ""))
             token = identity_crypto.opaque_token()
             frontend = _get_frontend_url()
-            AUTH_REPOSITORY.issue_magic_link_challenge(token_digest=identity_crypto.keyed_digest(token, _identity_hmac_key()), normalized_email=email,
+            token_digest = identity_crypto.keyed_digest(token, _identity_hmac_key())
+            AUTH_REPOSITORY.issue_magic_link_challenge(token_digest=token_digest, normalized_email=email,
                 purpose="signin", redirect_uri=frontend, expires_at=datetime.now(timezone.utc) + timedelta(minutes=15))
-            _deliver_magic_link(email, f"{frontend}/#magic_link={token}")
+            if not _deliver_magic_link(email, f"{frontend}/#magic_link={token}"):
+                AUTH_REPOSITORY.revoke_magic_link_challenge(token_digest)
+                return jsonify({"success": False, "error": "magic_link_delivery_failed"}), 503
     except Exception as exc:
         logger.warning("magic-link request not delivered: %s", type(exc).__name__)
     response = jsonify({"success": True, "message": "If the address can receive sign-in mail, a secure link is on its way."})

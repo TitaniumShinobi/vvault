@@ -709,6 +709,19 @@ class VVaultAuthRepository:
             conn.commit()
         return result
 
+    def revoke_magic_link_challenge(self, token_digest: str) -> bool:
+        """Invalidate an undelivered challenge without reading its email or token."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE email_magic_link_challenges SET consumed_at=now()
+                         WHERE token_digest=%s AND consumed_at IS NULL RETURNING token_digest""",
+                    (token_digest,),
+                )
+                revoked = cur.fetchone() is not None
+            conn.commit()
+        return revoked
+
     # Enrollment/session API.  The web layer verifies provider and WebAuthn
     # proofs; this repository persists only their bounded, already-validated
     # results.  All new session state uses the 0034 enrollment_* namespace so

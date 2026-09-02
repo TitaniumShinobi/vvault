@@ -18,6 +18,10 @@ class TestFrontendEnrollmentContract(unittest.TestCase):
         self.assertIn("Email me a secure link", LOGIN)
         self.assertNotIn('type="password"', LOGIN.lower())
 
+    def test_identity_entry_disables_magic_link_when_delivery_is_unavailable(self):
+        self.assertIn("email-magic-links/health", LOGIN)
+        self.assertIn("Email links unavailable", LOGIN)
+
     def test_enrollment_orders_consent_passkey_recovery_then_activation(self):
         for endpoint in (
             "/api/auth/enrollment/consents",
