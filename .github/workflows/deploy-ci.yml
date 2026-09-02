@@ -2,9 +2,16 @@ name: Deploy VVAULT
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        required: true
+        default: deploy
+        type: choice
+        options: [deploy, configure_email_delivery]
 
 jobs:
   deploy:
+    if: inputs.operation != 'configure_email_delivery'
     runs-on: ubuntu-latest
 
     steps:
@@ -16,3 +23,30 @@ jobs:
           key: ${{ secrets.VVAULT_DEPLOY_KEY }}
           script: |
             /opt/deploy/trigger/deploy-trigger.sh vvault
+
+  configure-email-delivery:
+    if: inputs.operation == 'configure_email_delivery'
+    runs-on: ubuntu-latest
+    env:
+      VVAULT_RESEND_API_KEY: ${{ secrets.VVAULT_RESEND_API_KEY }}
+      VVAULT_RESEND_FROM: ${{ secrets.VVAULT_RESEND_FROM }}
+    steps:
+      - uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          envs: VVAULT_RESEND_API_KEY,VVAULT_RESEND_FROM
+          script: |
+            python3 - <<'PY'
+            import grp, os, stat, tempfile
+            from pathlib import Path
+            values={"RESEND_API_KEY":os.environ.get("VVAULT_RESEND_API_KEY", ""),"FROM_EMAIL":os.environ.get("VVAULT_RESEND_FROM", "")}
+            if not all(values.values()): raise SystemExit("email configuration unavailable")
+            path=Path("/opt/vvault-public/.env"); old=path.read_text() if path.exists() else ""
+            lines=[x for x in old.splitlines() if not any(x.startswith(k+"=") for k in values)]+[f"{k}={v}" for k,v in values.items()]
+            fd,tmp=tempfile.mkstemp(prefix=".env.",dir=path.parent)
+            with os.fdopen(fd,"w") as f: f.write("\n".join(lines)+"\n"); f.flush(); os.fsync(f.fileno())
+            os.chown(tmp,-1,grp.getgrnam("vvault").gr_gid); os.chmod(tmp,stat.S_IRUSR|stat.S_IWUSR|stat.S_IRGRP); os.replace(tmp,path)
+            PY
+            sudo systemctl restart vvault-backend.service
