@@ -10480,12 +10480,45 @@ def _magic_link_smtp_config() -> dict[str, Any] | None:
     return {"host": host, "port": port, "username": username, "password": password, "sender": sender, "use_ssl": use_ssl, "starttls": starttls}
 
 
+def _magic_link_resend_config() -> dict[str, str] | None:
+    """Use the same target-owned Resend environment contract as Chatty."""
+    api_key = str(os.environ.get("RESEND_API_KEY") or "")
+    sender = str(os.environ.get("FROM_EMAIL") or os.environ.get("RESEND_FROM") or "").strip()
+    if not api_key or not sender:
+        return None
+    return {"api_key": api_key, "sender": sender}
+
+
 def _magic_link_delivery_available() -> bool:
-    return _magic_link_smtp_config() is not None
+    return _magic_link_resend_config() is not None or _magic_link_smtp_config() is not None
+
+
+def _deliver_magic_link_via_resend(email: str, url: str, config: dict[str, str]) -> bool:
+    """Deliver through Resend without logging recipient, URL, or bearer token."""
+    payload = {
+        "from": config["sender"],
+        "to": [email],
+        "subject": "Your VVAULT secure sign-in link",
+        "text": f"Open this secure VVAULT sign-in link within 15 minutes:\n{url}\n\nIf you did not request it, you can ignore this email.",
+        "html": f"<p>Open this <a href=\"{url}\">secure VVAULT sign-in link</a> within 15 minutes.</p><p>If you did not request it, you can ignore this email.</p>",
+    }
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=10,
+        )
+        return 200 <= response.status_code < 300
+    except requests.RequestException:
+        return False
 
 
 def _deliver_magic_link(email: str, url: str) -> bool:
     """Send a short-lived magic link without logging its bearer token or recipient."""
+    resend_config = _magic_link_resend_config()
+    if resend_config:
+        return _deliver_magic_link_via_resend(email, url, resend_config)
     config = _magic_link_smtp_config()
     if not config:
         return False

@@ -219,6 +219,18 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
         smtp.starttls.assert_called_once()
         smtp.login.assert_called_once_with("mailer@example.test", "test-only-password")
         smtp.send_message.assert_called_once()
+
+    def test_magic_link_uses_chatty_resend_environment_contract(self):
+        response = Mock(status_code=200)
+        config = {
+            "RESEND_API_KEY": "re_test_only",
+            "FROM_EMAIL": "VVAULT <mailer@example.test>",
+        }
+        with patch.dict(os.environ, config, clear=True), patch.object(server.requests, "post", return_value=response) as post:
+            self.assertTrue(server._deliver_magic_link("delivery@example.test", "https://vvault.example/#magic_link=opaque"))
+        self.assertEqual(post.call_args.args[0], "https://api.resend.com/emails")
+        self.assertEqual(post.call_args.kwargs["timeout"], 10)
+        self.assertEqual(post.call_args.kwargs["json"]["to"], ["delivery@example.test"])
     def test_health_reports_vvault_native_dependencies(self):
         with patch.object(server, "_get_vvault_runtime_status", return_value=_vvault_runtime_status(ready=True)):
             response = self.client.get("/api/health")
