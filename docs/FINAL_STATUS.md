@@ -38,23 +38,20 @@ The VVAULT desktop application with integrated login screen is now fully functio
 - **Email/Password Form**: Complete with validation and error handling
 - **Input Validation**: Email format and required field checking
 - **Button States**: Visual feedback during login process
-- **Test Credentials**: Pre-configured for development testing
+- **Authentication**: Uses the current VVAULT-native browser enrollment flow
 
 ## 🚀 **Usage Instructions**
 
 ### **Start VVAULT with Login Screen**
 ```bash
-cd /Users/devonwoodson/Documents/GitHub/VVAULT
+cd <path-to-vvault>
 source vvault_env/bin/activate
-python3 start_vvault_with_login.py
+python3 vvault/desktop/start_vvault_with_login.py
 ```
 
-### **Test Credentials**
-```
-admin@vvault.com / admin123
-user@vvault.com / user123
-test@vvault.com / test123
-```
+### **Authentication**
+Configure contractor-owned development OAuth values in the untracked `.env`
+file and use the browser login flow described in `docs/VVAULT_STARTUP_CONTRACT.md`.
 
 ### **Available Commands**
 - `python3 start_vvault_with_login.py` - Start with integrated login
