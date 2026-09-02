@@ -136,8 +136,8 @@ def test_same_subject_race_creates_one_account(repository):
     assert outcomes[0][0]["id"] == outcomes[1][0]["id"]
 
 
-def test_legacy_owner_links_verified_google_subject_without_replacing_owner(repository):
-    """A returning pre-identity owner keeps its UUID and receives a receipt-only session."""
+def test_legacy_owner_upgrades_in_place_after_current_legal_and_enrollment(repository):
+    """A returning pre-identity owner keeps its UUID and Vault through upgrade."""
     legacy_id = "11111111-1111-4111-8111-111111111111"
     with repository._connect() as conn:
         with conn.cursor() as cur:
@@ -146,6 +146,7 @@ def test_legacy_owner_links_verified_google_subject_without_replacing_owner(repo
                    VALUES(%s,%s,'!','Existing Owner','user','LEGACY')""",
                 (legacy_id, "existing@example.test"),
             )
+            cur.execute("INSERT INTO vault_files(user_id,name) VALUES(%s,'continuity-file')", (legacy_id,))
         conn.commit()
     owner, created = repository.admit_verified_identity(
         provider="google", provider_subject="existing-google-subject",
@@ -162,15 +163,42 @@ def test_legacy_owner_links_verified_google_subject_without_replacing_owner(repo
     completed = repository.complete_legacy_consent(
         user_id=legacy_id, pending_session_id=str(pending["id"]), normal_token_hash="legacy-normal-token",
         expires_at=datetime.now(timezone.utc) + timedelta(days=30),
-        documents=[{"key": "terms", "version": "current", "sha256": "terms"}],
+        documents=[
+            {"key": "terms", "version": "current", "sha256": "terms"},
+            {"key": "privacy", "version": "current", "sha256": "privacy"},
+            {"key": "eeccd", "version": "current", "sha256": "eeccd"},
+        ],
+        device_secret_digest="legacy-upgrade-device",
     )
-    assert completed and completed["enrollment_session_kind"] == "LEGACY"
-    returning = repository.issue_legacy_session(
-        user_id=legacy_id, token_hash="legacy-returning-token",
-        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
-        required_documents=[{"key": "terms", "version": "current", "sha256": "terms"}],
+    assert completed and completed["enrollment_session_kind"] == "PENDING_ENROLLMENT"
+    assert repository.create_webauthn_registration_challenge(
+        user_id=legacy_id, session_id=str(completed["id"]), challenge_digest="legacy-upgrade-challenge",
+        rp_id="vvault.example", allowed_origin="https://vvault.example", expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
     )
-    assert returning and returning["enrollment_session_kind"] == "LEGACY"
+    assert repository.store_webauthn_credential(
+        user_id=legacy_id, credential_id="legacy_upgrade_credential_012345", public_key=b"public-key",
+        sign_count=0, transports=["internal"], user_verified=True,
+    )
+    assert repository.replace_recovery_codes(
+        user_id=legacy_id, session_id=str(completed["id"]),
+        code_digests=[f"legacy-recovery-{index}" for index in range(8)],
+    )
+    active = repository.complete_enrollment(
+        user_id=legacy_id, pending_session_id=str(completed["id"]), device_id=str(completed["enrollment_device_id"]),
+        normal_token_hash="legacy-active-token", expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        required_documents=[
+            {"key": "terms", "version": "current", "sha256": "terms"},
+            {"key": "privacy", "version": "current", "sha256": "privacy"},
+            {"key": "eeccd", "version": "current", "sha256": "eeccd"},
+        ],
+    )
+    assert active and active["enrollment_session_kind"] == "NORMAL"
+    with repository._connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT account_state FROM users WHERE id=%s", (legacy_id,))
+            assert cur.fetchone()["account_state"] == "ACTIVE"
+            cur.execute("SELECT user_id FROM vault_files WHERE name='continuity-file'")
+            assert str(cur.fetchone()["user_id"]) == legacy_id
 
 
 def test_pending_google_subject_returns_to_its_one_legacy_owner_without_moving_vault_data(repository):

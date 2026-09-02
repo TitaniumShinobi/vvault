@@ -979,12 +979,36 @@ class VVaultAuthRepository:
                         if not device_secret_digest:
                             conn.rollback(); return None
                         cur.execute(
-                            """INSERT INTO enrollment_devices(user_id, device_secret_digest, status, ip_hash, user_agent_hash)
-                               VALUES(%s,%s,'PENDING',%s,%s) RETURNING id""",
-                            (user_id, device_secret_digest, ip_hash, user_agent_hash),
+                            """SELECT id FROM enrollment_devices WHERE user_id=%s
+                                 AND device_secret_digest=%s AND status='PENDING' FOR UPDATE""",
+                            (user_id, device_secret_digest),
                         )
-                        device_id = _row_to_dict(cur.fetchone())["id"]
+                        device = _row_to_dict(cur.fetchone())
+                        if not device:
+                            cur.execute(
+                                """INSERT INTO enrollment_devices(user_id, device_secret_digest, status, ip_hash, user_agent_hash)
+                                   VALUES(%s,%s,'PENDING',%s,%s) RETURNING id""",
+                                (user_id, device_secret_digest, ip_hash, user_agent_hash),
+                            )
+                            device = _row_to_dict(cur.fetchone())
+                        device_id = device["id"]
                         session_kind = 'PENDING_DEVICE'
+                elif owner["account_state"] == 'LEGACY':
+                    # Continuity upgrades the existing owner in place.  Legal
+                    # acceptance is only the first gate: the same owner must
+                    # now complete passkey, recovery-code, and device trust
+                    # before becoming ACTIVE.  No user, Vault, or owner-bound
+                    # record is copied or replaced.
+                    if not device_secret_digest:
+                        conn.rollback(); return None
+                    cur.execute(
+                        """INSERT INTO enrollment_devices(user_id, device_secret_digest, status, ip_hash, user_agent_hash)
+                           VALUES(%s,%s,'PENDING',%s,%s) RETURNING id""",
+                        (user_id, device_secret_digest, ip_hash, user_agent_hash),
+                    )
+                    device_id = _row_to_dict(cur.fetchone())["id"]
+                    cur.execute("UPDATE users SET account_state='PENDING_ENROLLMENT', updated_at=now() WHERE id=%s", (user_id,))
+                    session_kind = 'PENDING_ENROLLMENT'
                 cur.execute(
                     """INSERT INTO sessions (user_id, token_hash, expires_at, enrollment_session_kind,
                                               enrollment_device_id, rotated_from_session_id)

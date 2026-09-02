@@ -9866,6 +9866,12 @@ def accept_canonical_enrollment_consents():
                 pending_token=normal_token,
             )
             return _set_device_cookie(response, device_secret)
+        if completed.get("enrollment_session_kind") == "PENDING_ENROLLMENT":
+            response = _enrollment_response(
+                {"success": True, "legacy_continuity": True, "enrollment_required": True, "documents": documents},
+                pending_token=normal_token,
+            )
+            return _set_device_cookie(response, device_secret)
         response = _enrollment_response(
             {"success": True, "legacy_continuity": pending.get("account_state") == "LEGACY", "documents": documents},
             normal_token=normal_token,
