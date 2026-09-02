@@ -186,6 +186,16 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
         self.assertFalse(blocked_payload["auth"]["required_for_readiness"])
         self.assertIn("body_database", blocked_payload)
 
+    def test_oauth_callback_is_browser_visible_not_an_internal_backend_url(self):
+        with patch.object(server, "_get_frontend_url", return_value="http://localhost:7784"):
+            self.assertEqual(
+                server._identity_callback_url("google"),
+                "http://localhost:7784/api/auth/google/callback",
+            )
+            self.assertEqual(
+                server._identity_callback_url("github"),
+                "http://localhost:7784/api/auth/oauth/github/callback",
+            )
     def test_health_reports_vvault_native_dependencies(self):
         with patch.object(server, "_get_vvault_runtime_status", return_value=_vvault_runtime_status(ready=True)):
             response = self.client.get("/api/health")

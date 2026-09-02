@@ -10265,9 +10265,11 @@ def _identity_provider_config(provider: str) -> dict[str, str]:
 
 
 def _identity_callback_url(provider: str) -> str:
-    # Preserve the existing Google callback registration while GitHub is added.
+    # OAuth providers redirect the browser to the public VVAULT origin.  The
+    # frontend proxy then forwards this native route to the backend; never
+    # expose an internal backend port in a provider transaction.
     suffix = "google/callback" if provider == "google" else f"oauth/{provider}/callback"
-    return f"{_get_backend_url()}/api/auth/{suffix}"
+    return f"{_get_frontend_url()}/api/auth/{suffix}"
 
 
 def _identity_frontend_url() -> str:
@@ -10534,7 +10536,7 @@ def google_oauth_health():
         "client_id_set": bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_ID not in _OAUTH_PLACEHOLDER_VALUES),
         "client_secret_set": bool(GOOGLE_CLIENT_SECRET and GOOGLE_CLIENT_SECRET not in _OAUTH_PLACEHOLDER_VALUES),
         "provider": "google",
-        "callback_url": f"{_get_backend_url()}/api/auth/google/callback",
+        "callback_url": _identity_callback_url("google"),
         "frontend_url": _get_frontend_url(),
         "vvault_auth_ready": auth_ready,
         "oauth_transaction_protection_ready": transaction_key_ready,
