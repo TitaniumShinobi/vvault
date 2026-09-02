@@ -7,6 +7,7 @@ LOGIN = (REPO_ROOT / "src" / "components" / "CinematicLogin.js").read_text(encod
 ENROLLMENT = (REPO_ROOT / "src" / "components" / "EnrollmentFlow.js").read_text(encoding="utf-8")
 CREATE_CONSTRUCT = (REPO_ROOT / "src" / "components" / "CreateConstruct.js").read_text(encoding="utf-8")
 LEGACY_LOGIN = (REPO_ROOT / "src" / "components" / "LoginScreen.js").read_text(encoding="utf-8")
+SERVER = (REPO_ROOT / "vvault" / "server" / "vvault_web_server.py").read_text(encoding="utf-8")
 
 
 class TestFrontendEnrollmentContract(unittest.TestCase):
@@ -29,6 +30,12 @@ class TestFrontendEnrollmentContract(unittest.TestCase):
         self.assertIn("step === 'passkey'", ENROLLMENT)
         self.assertIn("step === 'recovery'", ENROLLMENT)
         self.assertIn("step === 'activate'", ENROLLMENT)
+
+    def test_enrollment_status_is_a_native_api_route(self):
+        self.assertIn("@app.route('/api/auth/enrollment/status', methods=['GET'])", SERVER)
+        route = SERVER.split("def canonical_enrollment_status", 1)[1].split("def _chatty_pairing_callback", 1)[0]
+        self.assertIn('"pending"', route)
+        self.assertNotIn('"email"', route)
 
     def test_protected_mutations_use_cookie_credentialed_fetch(self):
         self.assertIn("authFetch('/api/chatty/construct/create'", CREATE_CONSTRUCT)

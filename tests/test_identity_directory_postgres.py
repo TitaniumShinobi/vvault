@@ -62,6 +62,11 @@ def identity_postgres():
             token_hash text NOT NULL UNIQUE, created_at timestamptz NOT NULL DEFAULT now(),
             expires_at timestamptz NOT NULL, revoked_at timestamptz
           );
+          CREATE TABLE ovvaults.vault_files (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id uuid NOT NULL REFERENCES ovvaults.users(id),
+            name text NOT NULL DEFAULT 'fixture'
+          );
           -- Production owns an older, unrelated migration ledger. The release
           -- runner must leave it alone rather than assuming a `version` column.
           CREATE TABLE ovvaults.schema_migrations (
@@ -160,6 +165,48 @@ def test_legacy_owner_links_verified_google_subject_without_replacing_owner(repo
         documents=[{"key": "terms", "version": "current", "sha256": "terms"}],
     )
     assert completed and completed["enrollment_session_kind"] == "LEGACY"
+
+
+def test_pending_google_subject_returns_to_its_one_legacy_owner_without_moving_vault_data(repository):
+    """Recover only an empty mistaken pending row created before the legacy bridge."""
+    legacy_id = "22222222-2222-4222-8222-222222222222"
+    with repository._connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO users(id,email,password_hash,name,role,account_state)
+                   VALUES(%s,%s,'!','Canonical Owner','user','LEGACY')""",
+                (legacy_id, "canonical@example.test"),
+            )
+            cur.execute("INSERT INTO vault_files(user_id,name) VALUES(%s,'already-owned')", (legacy_id,))
+        conn.commit()
+    pending, created = repository.admit_verified_identity(
+        provider="google", provider_subject="mistaken-pending-subject",
+        verified_email="canonical@example.test", name="Canonical Owner",
+    )
+    assert created and pending["account_state"] == "PENDING_ENROLLMENT"
+    with repository._connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO sessions(user_id,token_hash,expires_at)
+                   VALUES(%s,'pending-session',now()+interval '1 hour')""",
+                (pending["id"],),
+            )
+        conn.commit()
+    owner, created_again = repository.admit_verified_identity(
+        provider="google", provider_subject="mistaken-pending-subject",
+        verified_email="canonical@example.test", name="Canonical Owner",
+        allow_legacy_compatibility=True,
+    )
+    assert not created_again and str(owner["id"]) == legacy_id
+    assert owner["_legacy_continuity"] is True
+    with repository._connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id FROM external_identities WHERE provider_subject='mistaken-pending-subject'")
+            assert str(cur.fetchone()["user_id"]) == legacy_id
+            cur.execute("SELECT user_id FROM vault_files WHERE name='already-owned'")
+            assert str(cur.fetchone()["user_id"]) == legacy_id
+            cur.execute("SELECT revoked_at IS NOT NULL AS revoked FROM sessions WHERE token_hash='pending-session'")
+            assert cur.fetchone()["revoked"] is True
 
 
 def test_oauth_and_magic_tokens_are_atomically_single_use(repository):

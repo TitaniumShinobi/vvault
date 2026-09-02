@@ -316,11 +316,92 @@ class VVaultAuthRepository:
                     """SELECT users.id, users.email, users.name, users.role, users.account_state
                          FROM external_identities identities JOIN users ON users.id=identities.user_id
                         WHERE identities.provider=%s AND identities.provider_subject=%s
-                          AND identities.revoked_at IS NULL""",
+                          AND identities.revoked_at IS NULL
+                        FOR UPDATE OF identities, users""",
                     (provider, subject),
                 )
                 existing = _row_to_dict(cur.fetchone())
                 if existing:
+                    # A pre-continuity callback could have created a blank
+                    # PENDING_ENROLLMENT owner for a verified Google subject
+                    # which actually belongs to one legacy owner.  Recover
+                    # only that tightly defined case.  This is deliberately
+                    # not an email-based account merge: the existing subject
+                    # is moved only after locking it, proving the pending row
+                    # owns no Vault records, and finding exactly one LEGACY
+                    # owner with the same verified contact.
+                    if allow_legacy_compatibility and existing["account_state"] == "PENDING_ENROLLMENT":
+                        if vvault_auth_crypto.normalize_email(existing["email"] or "") != email:
+                            conn.rollback()
+                            raise ValueError("pending identity email does not match verified provider email")
+                        cur.execute(
+                            """SELECT id, email, name, role, account_state
+                                 FROM users
+                                WHERE account_state='LEGACY' AND lower(email)=%s
+                                FOR UPDATE""",
+                            (email,),
+                        )
+                        candidates = [_row_to_dict(row) for row in cur.fetchall()]
+                        if len(candidates) != 1:
+                            conn.rollback()
+                            if len(candidates) > 1:
+                                raise ValueError("legacy owner match is ambiguous")
+                            raise ValueError("no eligible legacy owner for pending identity")
+                        legacy = candidates[0]
+                        cur.execute(
+                            """SELECT id, user_id FROM external_identities
+                                 WHERE provider=%s AND provider_subject=%s AND revoked_at IS NULL
+                                 FOR UPDATE""",
+                            (provider, subject),
+                        )
+                        identity = _row_to_dict(cur.fetchone())
+                        if not identity or str(identity["user_id"]) != str(existing["id"]):
+                            conn.rollback()
+                            raise ValueError("provider identity changed during continuity recovery")
+                        cur.execute(
+                            """SELECT count(*) AS count FROM vault_files
+                                 WHERE user_id=%s""",
+                            (existing["id"],),
+                        )
+                        pending_file_count = int((_row_to_dict(cur.fetchone()) or {"count": 0})["count"])
+                        if pending_file_count:
+                            conn.rollback()
+                            raise ValueError("pending identity owns Vault records and cannot be safely recovered")
+                        # managed_emails forbids owner reassignment by trigger.
+                        # Retire the pending contact record, then create the
+                        # equivalent verified contact for the preserved owner.
+                        cur.execute(
+                            """UPDATE managed_emails SET revoked_at=now()
+                                 WHERE user_id=%s AND normalized_email=%s AND revoked_at IS NULL""",
+                            (existing["id"], email),
+                        )
+                        cur.execute(
+                            """UPDATE external_identities SET user_id=%s
+                                 WHERE id=%s""",
+                            (legacy["id"], identity["id"]),
+                        )
+                        cur.execute(
+                            """INSERT INTO managed_emails
+                               (user_id, normalized_email, identity_id, verified_at)
+                               VALUES (%s, %s, %s, now())
+                               ON CONFLICT (user_id, normalized_email) DO NOTHING""",
+                            (legacy["id"], email, identity["id"]),
+                        )
+                        cur.execute(
+                            """UPDATE sessions SET revoked_at=now()
+                                 WHERE user_id=%s AND revoked_at IS NULL""",
+                            (existing["id"],),
+                        )
+                        cur.execute(
+                            """UPDATE users SET auth_provider=%s, updated_at=now()
+                                 WHERE id=%s
+                             RETURNING id, email, name, role, account_state""",
+                            (provider, legacy["id"]),
+                        )
+                        legacy = _row_to_dict(cur.fetchone())
+                        legacy["_legacy_continuity"] = True
+                        conn.commit()
+                        return legacy, False
                     conn.commit()
                     return existing, False
                 if allow_legacy_compatibility:

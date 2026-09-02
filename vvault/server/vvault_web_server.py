@@ -9634,6 +9634,21 @@ def _start_enrollment_session(user: dict, frontend: str):
     return response
 
 
+@app.route('/api/auth/enrollment/status', methods=['GET'])
+def canonical_enrollment_status():
+    """Expose only the current browser enrollment state, never identity data."""
+    pending = _enrollment_session_from_request()
+    if not pending:
+        return jsonify({"success": False, "pending": False}), 401
+    return _enrollment_response({
+        "success": True,
+        "pending": True,
+        "session_kind": pending.get("enrollment_session_kind"),
+        "account_state": pending.get("account_state"),
+        "device_status": pending.get("device_status"),
+    })
+
+
 def _chatty_pairing_callback() -> str | None:
     """Return the one configured Chatty callback; browser input never chooses it."""
     candidate = CHATTY_PAIRING_CALLBACK_URL.rstrip("/")
