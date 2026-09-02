@@ -7,11 +7,11 @@ on:
         required: true
         default: deploy
         type: choice
-        options: [deploy, configure_email_delivery]
+        options: [deploy, configure_email_delivery, postal_preflight]
 
 jobs:
   deploy:
-    if: inputs.operation != 'configure_email_delivery'
+    if: github.event_name == 'push' || inputs.operation == 'deploy'
     runs-on: ubuntu-latest
 
     steps:
@@ -50,3 +50,17 @@ jobs:
             os.chown(tmp,-1,grp.getgrnam("vvault").gr_gid); os.chmod(tmp,stat.S_IRUSR|stat.S_IWUSR|stat.S_IRGRP); os.replace(tmp,path)
             PY
             sudo systemctl restart vvault-backend.service
+
+  postal-preflight:
+    if: inputs.operation == 'postal_preflight'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          script: |
+            docker --version
+            df -h /opt
+            sudo ss -ltn '( sport = :25 or sport = :465 or sport = :587 )'
