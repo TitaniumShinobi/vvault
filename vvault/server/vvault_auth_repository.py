@@ -1329,6 +1329,76 @@ class VVaultAuthRepository:
             conn.commit()
         return created
 
+    def approve_pending_device_transfer(
+        self, *, actor_user_id: str, actor_session_id: str, code_digest: str,
+    ) -> bool:
+        """Approve one unfamiliar device from a different trusted device.
+
+        This does not issue a session to the approving browser.  The pending
+        browser must redeem its own bound HttpOnly session in a second step.
+        """
+        if not code_digest:
+            return False
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if not self._trusted_actor_locked(cur, actor_user_id=actor_user_id, actor_session_id=actor_session_id):
+                    conn.rollback(); return False
+                cur.execute(
+                    """SELECT transfer.pending_session_id, sessions.enrollment_device_id
+                         FROM enrollment_device_transfer_codes AS transfer
+                         JOIN sessions ON sessions.id=transfer.pending_session_id
+                         JOIN enrollment_devices ON enrollment_devices.id=sessions.enrollment_device_id
+                        WHERE transfer.code_digest=%s AND transfer.user_id=%s
+                          AND transfer.consumed_at IS NULL AND transfer.expires_at > now()
+                          AND sessions.revoked_at IS NULL AND sessions.expires_at > now()
+                          AND sessions.enrollment_session_kind='PENDING_DEVICE'
+                          AND enrollment_devices.status='PENDING'
+                        FOR UPDATE OF transfer, sessions, enrollment_devices""",
+                    (code_digest, actor_user_id),
+                )
+                pending = _row_to_dict(cur.fetchone())
+                if not pending:
+                    conn.rollback(); return False
+                cur.execute("UPDATE enrollment_device_transfer_codes SET consumed_at=now() WHERE code_digest=%s", (code_digest,))
+                cur.execute(
+                    """UPDATE enrollment_devices SET status='TRUSTED', approved_by_user_id=%s, approved_at=now()
+                         WHERE id=%s""",
+                    (actor_user_id, pending["enrollment_device_id"]),
+                )
+            conn.commit()
+        return True
+
+    def complete_approved_pending_device(
+        self, *, user_id: str, pending_session_id: str, normal_token_hash: str, expires_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Issue the normal session only to the browser that held the pending cookie."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT sessions.enrollment_device_id FROM sessions
+                         JOIN users ON users.id=sessions.user_id
+                         JOIN enrollment_devices ON enrollment_devices.id=sessions.enrollment_device_id
+                        WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                          AND sessions.expires_at > now() AND sessions.enrollment_session_kind='PENDING_DEVICE'
+                          AND users.account_state='ACTIVE' AND enrollment_devices.status='TRUSTED'
+                        FOR UPDATE OF sessions, enrollment_devices""",
+                    (pending_session_id, user_id),
+                )
+                pending = _row_to_dict(cur.fetchone())
+                if not pending:
+                    conn.rollback(); return None
+                cur.execute("UPDATE sessions SET revoked_at=now() WHERE id=%s", (pending_session_id,))
+                cur.execute(
+                    """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind,
+                                              enrollment_device_id, rotated_from_session_id)
+                       VALUES(%s,%s,%s,'NORMAL',%s,%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (user_id, normal_token_hash, expires_at, pending["enrollment_device_id"], pending_session_id),
+                )
+                result = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return result
+
     def complete_pending_device_webauthn(
         self, *, user_id: str, pending_session_id: str, credential_id: str,
         new_sign_count: int, normal_token_hash: str, expires_at: datetime,

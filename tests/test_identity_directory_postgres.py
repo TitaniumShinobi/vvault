@@ -5,6 +5,8 @@ import json
 import shutil
 import subprocess
 import tempfile
+from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +39,28 @@ def identity_postgres():
     binaries = {name: _binary(name) for name in ("initdb", "pg_ctl", "psql")}
     if not all(binaries.values()):
         pytest.skip("PostgreSQL binaries are unavailable")
+    # Some developer hosts already run a disposable PostgreSQL instance and
+    # cannot allocate another macOS SysV shared-memory segment.  Reuse only an
+    # explicitly supplied *test* server, inside a fresh per-run database; the
+    # default remains a fully self-contained initdb cluster.
+    external_url = os.environ.get("VVAULT_TEST_POSTGRES_URL", "").strip()
+    if external_url:
+        parsed = urlsplit(external_url)
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+            raise RuntimeError("VVAULT_TEST_POSTGRES_URL must identify a PostgreSQL test server")
+        database = f"vvault_identity_{os.getpid()}_{uuid4().hex[:10]}"
+        test_url = urlunsplit((parsed.scheme, parsed.netloc, f"/{database}", parsed.query, ""))
+        admin = [binaries["psql"], "-X", "-v", "ON_ERROR_STOP=1", external_url]
+        _run(admin + ["-c", f'CREATE DATABASE "{database}"'])
+        try:
+            yield from _configured_identity_database(
+                psql=[binaries["psql"], "-X", "-v", "ON_ERROR_STOP=1", test_url],
+                database_url=test_url,
+                receipt_root=Path(tempfile.mkdtemp(prefix="vvault-identity-receipts-", dir="/private/tmp")),
+            )
+        finally:
+            _run(admin + ["-c", f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)'], check=False)
+        return
     root = Path(tempfile.mkdtemp(prefix="vvault-identity-pg-", dir="/private/tmp"))
     data, socket = root / "data", root / "socket"
     socket.mkdir()
@@ -46,8 +70,19 @@ def identity_postgres():
         _run([binaries["initdb"], "-D", str(data), "-A", "trust", "-U", "postgres", "--no-locale", "--encoding=UTF8"])
         _run([binaries["pg_ctl"], "-D", str(data), "-l", str(root / "postgres.log"), "-o", f"-F -k {socket} -p {port} -c listen_addresses=''", "-w", "start"])
         started = True
-        psql = [binaries["psql"], "-X", "-v", "ON_ERROR_STOP=1", "-h", str(socket), "-p", str(port), "-U", "postgres", "postgres"]
-        _run(psql, input_text="""
+        yield from _configured_identity_database(
+            psql=[binaries["psql"], "-X", "-v", "ON_ERROR_STOP=1", "-h", str(socket), "-p", str(port), "-U", "postgres", "postgres"],
+            database_url=f"postgresql:///postgres?host={socket}&port={port}&user=postgres",
+            receipt_root=root,
+        )
+    finally:
+        if started:
+            _run([binaries["pg_ctl"], "-D", str(data), "-m", "immediate", "-w", "stop"], check=False)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _configured_identity_database(*, psql: list[str], database_url: str, receipt_root: Path):
+    _run(psql, input_text="""
           CREATE EXTENSION IF NOT EXISTS citext;
           CREATE SCHEMA ovvaults;
           CREATE TABLE ovvaults.users (
@@ -72,29 +107,25 @@ def identity_postgres():
           CREATE TABLE ovvaults.schema_migrations (
             migration_name text PRIMARY KEY, applied_on timestamptz NOT NULL DEFAULT now()
           );
-        """)
-        database_receipt = root / "database-backup.json"
-        object_receipt = root / "object-storage-backup.json"
-        database_receipt.write_text(json.dumps({"kind": "database", "backup_id": "test-db-0001", "verified": True}))
-        object_receipt.write_text(json.dumps({"kind": "object_storage", "backup_id": "test-obj-0001", "verified": True}))
-        runner_env = os.environ | {
-            "VVAULT_BODY_DATABASE_URL": f"postgresql:///postgres?host={socket}&port={port}&user=postgres",
-            "VVAULT_DATABASE_BACKUP_RECEIPT_PATH": str(database_receipt),
-            "VVAULT_DATABASE_BACKUP_RECEIPT_ID": "test-db-0001",
-            "VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_PATH": str(object_receipt),
-            "VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_ID": "test-obj-0001",
-            "VVAULT_MIGRATION_RECEIPT_DIR": str(root / "migration-receipts"),
-            "VVAULT_DEPLOY_REF": "disposable-postgres-proof",
-        }
-        migration = _run([str(MIGRATION_RUNNER)], env=runner_env, check=False)
-        assert migration.returncode == 0, migration.stderr
-        ledger = _run(psql + ["-tA"], input_text="SELECT version FROM ovvaults.enrollment_schema_migrations ORDER BY version;")
-        assert ledger.stdout.split() == ["0033", "0034", "0035"]
-        yield f"host={socket} port={port} user=postgres dbname=postgres"
-    finally:
-        if started:
-            _run([binaries["pg_ctl"], "-D", str(data), "-m", "immediate", "-w", "stop"], check=False)
-        shutil.rmtree(root, ignore_errors=True)
+    """)
+    database_receipt = receipt_root / "database-backup.json"
+    object_receipt = receipt_root / "object-storage-backup.json"
+    database_receipt.write_text(json.dumps({"kind": "database", "backup_id": "test-db-0001", "verified": True}))
+    object_receipt.write_text(json.dumps({"kind": "object_storage", "backup_id": "test-obj-0001", "verified": True}))
+    runner_env = os.environ | {
+        "VVAULT_BODY_DATABASE_URL": database_url,
+        "VVAULT_DATABASE_BACKUP_RECEIPT_PATH": str(database_receipt),
+        "VVAULT_DATABASE_BACKUP_RECEIPT_ID": "test-db-0001",
+        "VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_PATH": str(object_receipt),
+        "VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_ID": "test-obj-0001",
+        "VVAULT_MIGRATION_RECEIPT_DIR": str(receipt_root / "migration-receipts"),
+        "VVAULT_DEPLOY_REF": "disposable-postgres-proof",
+    }
+    migration = _run([str(MIGRATION_RUNNER)], env=runner_env, check=False)
+    assert migration.returncode == 0, migration.stderr
+    ledger = _run(psql + ["-tA"], input_text="SELECT version FROM ovvaults.enrollment_schema_migrations ORDER BY version;")
+    assert ledger.stdout.split() == ["0033", "0034", "0035", "0036"]
+    yield database_url
 
 
 @pytest.fixture
@@ -199,6 +230,35 @@ def test_legacy_owner_upgrades_in_place_after_current_legal_and_enrollment(repos
             assert cur.fetchone()["account_state"] == "ACTIVE"
             cur.execute("SELECT user_id FROM vault_files WHERE name='continuity-file'")
             assert str(cur.fetchone()["user_id"]) == legacy_id
+
+
+def test_trusted_owner_approves_only_its_own_pending_device_transfer(repository):
+    """An opaque transfer code cannot cross owner boundaries or issue an old-device session."""
+    owner = "33333333-3333-4333-8333-333333333333"
+    other_owner = "44444444-4444-4444-8444-444444444444"
+    with repository._connect() as conn:
+        with conn.cursor() as cur:
+            for user_id, email in ((owner, "owner@example.test"), (other_owner, "other@example.test")):
+                cur.execute("INSERT INTO users(id,email,password_hash,name,role,account_state) VALUES(%s,%s,'!','Owner','user','ACTIVE')", (user_id, email))
+            cur.execute(
+                """INSERT INTO enrollment_devices(user_id,device_secret_digest,status,approved_by_user_id,approved_at)
+                   VALUES(%s,'trusted-owner','TRUSTED',%s,now()) RETURNING id""",
+                (owner, owner),
+            )
+            trusted_device = str(cur.fetchone()["id"])
+            cur.execute("INSERT INTO sessions(user_id,token_hash,expires_at,enrollment_session_kind,enrollment_device_id) VALUES(%s,'trusted-owner-session',now()+interval '1 hour','NORMAL',%s) RETURNING id", (owner, trusted_device))
+            trusted_session = str(cur.fetchone()["id"])
+            cur.execute("INSERT INTO enrollment_devices(user_id,device_secret_digest,status) VALUES(%s,'pending-owner','PENDING') RETURNING id", (owner,))
+            pending_device = str(cur.fetchone()["id"])
+            cur.execute("INSERT INTO sessions(user_id,token_hash,expires_at,enrollment_session_kind,enrollment_device_id) VALUES(%s,'pending-owner-session',now()+interval '1 hour','PENDING_DEVICE',%s) RETURNING id", (owner, pending_device))
+            pending_session = str(cur.fetchone()["id"])
+        conn.commit()
+    assert repository.create_pending_device_transfer(user_id=owner, pending_session_id=pending_session, code_digest="transfer-digest", expires_at=datetime.now(timezone.utc) + timedelta(minutes=5))
+    assert not repository.approve_pending_device_transfer(actor_user_id=other_owner, actor_session_id=trusted_session, code_digest="transfer-digest")
+    assert repository.approve_pending_device_transfer(actor_user_id=owner, actor_session_id=trusted_session, code_digest="transfer-digest")
+    normal = repository.complete_approved_pending_device(user_id=owner, pending_session_id=pending_session, normal_token_hash="new-device-normal", expires_at=datetime.now(timezone.utc) + timedelta(days=30))
+    assert normal and normal["enrollment_session_kind"] == "NORMAL"
+    assert not repository.complete_approved_pending_device(user_id=owner, pending_session_id=pending_session, normal_token_hash="replay", expires_at=datetime.now(timezone.utc) + timedelta(days=30))
 
 
 def test_pending_google_subject_returns_to_its_one_legacy_owner_without_moving_vault_data(repository):

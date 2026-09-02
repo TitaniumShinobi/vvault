@@ -10161,6 +10161,47 @@ def canonical_device_transfer_start():
     return _enrollment_response({"success": True, "transfer_code": code, "expires_in": 600})
 
 
+@app.route('/api/auth/devices/transfer/approve', methods=['POST'])
+@require_auth
+def canonical_device_transfer_approve():
+    if _rate_limit_key("auth"):
+        return jsonify({"success": False, "error": "rate_limit_exceeded"}), 429
+    code = str((request.get_json(silent=True) or {}).get("transfer_code") or "")
+    current = getattr(request, "current_user", {})
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    approved = AUTH_REPOSITORY.approve_pending_device_transfer(
+        actor_user_id=str(current.get("id") or ""), actor_session_id=str(current.get("session_id") or ""),
+        code_digest=identity_crypto.keyed_digest(code, _identity_hmac_key()),
+    )
+    if not approved:
+        return jsonify({"success": False, "error": "Device approval was denied"}), 403
+    response = jsonify({"success": True})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route('/api/auth/devices/transfer/complete', methods=['POST'])
+def canonical_device_transfer_complete():
+    pending = _enrollment_session_from_request()
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_DEVICE":
+        return jsonify({"success": False, "error": "Pending device session required"}), 401
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    token = identity_crypto.opaque_token()
+    normal = AUTH_REPOSITORY.complete_approved_pending_device(
+        user_id=str(pending["user_id"]), pending_session_id=str(pending["session_id"]),
+        normal_token_hash=_session_token_hash(token), expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+    )
+    if not normal:
+        return jsonify({"success": False, "error": "Device approval is still pending"}), 409
+    return _enrollment_response({"success": True, "device_status": "TRUSTED"}, normal_token=token)
+
+
 @app.route('/api/auth/devices/<device_id>/revoke', methods=['POST'])
 @require_auth
 def revoke_canonical_device(device_id: str):
