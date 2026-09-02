@@ -9573,7 +9573,13 @@ def get_construct_ledger(construct_id):
 # material; they are never browser-readable bearer tokens.
 def _enrollment_documents() -> list[dict[str, str]]:
     documents = []
-    for key, filename in (("vvault:terms", "VVAULT_TERMS_OF_SERVICE.md"), ("vvault:privacy", "VVAULT_PRIVACY_NOTICE.md")):
+    # These keys, digests, and source artifacts are server-derived.  Do not
+    # accept a browser-provided version as evidence of legal acceptance.
+    for key, filename in (
+        ("vvault:terms", "VVAULT_TERMS_OF_SERVICE.md"),
+        ("vvault:privacy", "VVAULT_PRIVACY_NOTICE.md"),
+        ("vvault:eeccd", "VVAULT_EUROPEAN_ELECTRONIC_COMMNICATION_CODE_DISCLOSURE.md"),
+    ):
         content = (_repo_root / "docs" / "legal" / filename).read_bytes()
         digest = hashlib.sha256(content).hexdigest()
         documents.append({"key": key, "version": digest, "sha256": digest})
@@ -9602,6 +9608,23 @@ def _enrollment_response(payload: dict, *, pending_token: str | None = None, nor
     return response
 
 
+def _device_secret_from_request() -> str:
+    """Return only a syntactically bounded opaque browser-device secret."""
+    value = str(request.cookies.get("vvault_device") or "")
+    return value if 32 <= len(value) <= 512 else ""
+
+
+def _set_device_cookie(response, device_secret: str):
+    """Persist an opaque device recognizer, never an owner or session token."""
+    if device_secret:
+        response.set_cookie(
+            "vvault_device", device_secret, httponly=True,
+            secure=_runtime_is_production(), samesite="Strict",
+            max_age=365 * 24 * 60 * 60, path="/",
+        )
+    return response
+
+
 def _start_enrollment_session(user: dict, frontend: str):
     from flask import redirect
     try:
@@ -9609,7 +9632,8 @@ def _start_enrollment_session(user: dict, frontend: str):
     except ImportError:
         import vvault_auth_crypto as identity_crypto
     user_id = str(user.get("id") or "")
-    device_secret, token = identity_crypto.opaque_token(), identity_crypto.opaque_token()
+    device_secret = _device_secret_from_request() or identity_crypto.opaque_token()
+    token = identity_crypto.opaque_token()
     state = str(user.get("account_state") or "")
     token_hash = _session_token_hash(token)
     if state == "LEGACY" and user.get("_legacy_continuity"):
@@ -9631,7 +9655,39 @@ def _start_enrollment_session(user: dict, frontend: str):
         response = redirect(f"{frontend.rstrip('/')}/")
         response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
         response.set_cookie("vvault_session", token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=30 * 24 * 60 * 60, path="/")
-        return response
+        return _set_device_cookie(response, device_secret)
+    elif state == "ACTIVE" and not AUTH_REPOSITORY.has_current_legal_receipts(
+        user_id=user_id, required_documents=_enrollment_documents(),
+    ):
+        # Legal recertification is deliberately evaluated before device
+        # recognition.  It does not replace the owner, Vault, or device trust.
+        session = AUTH_REPOSITORY.create_legacy_consent_session(
+            user_id=user_id, token_hash=token_hash,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=20),
+        )
+        if not session:
+            raise RuntimeError("cannot issue legal recertification session")
+        target = f"{frontend.rstrip('/')}/?terms_update=1"
+        response = redirect(target)
+        response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
+        response.set_cookie("vvault_enrollment_session", token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=20 * 60, path="/")
+        return _set_device_cookie(response, device_secret)
+    elif state == "ACTIVE":
+        normal_token = identity_crypto.opaque_token()
+        known = AUTH_REPOSITORY.issue_known_device_session(
+            user_id=user_id,
+            device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()),
+            token_hash=_session_token_hash(normal_token),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            required_documents=_enrollment_documents(),
+        )
+        if known:
+            response = redirect(f"{frontend.rstrip('/')}/")
+            response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
+            response.set_cookie("vvault_session", normal_token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=30 * 24 * 60 * 60, path="/")
+            return _set_device_cookie(response, device_secret)
+        args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=token_hash, expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
+        session = AUTH_REPOSITORY.issue_pending_device_session(**args)
     else:
         args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=token_hash, expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
         session = AUTH_REPOSITORY.create_pending_enrollment_session(**args) if state == "PENDING_ENROLLMENT" else AUTH_REPOSITORY.issue_pending_device_session(**args)
@@ -9646,7 +9702,7 @@ def _start_enrollment_session(user: dict, frontend: str):
     response = redirect(target)
     response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
     response.set_cookie("vvault_enrollment_session", token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=20 * 60, path="/")
-    return response
+    return _set_device_cookie(response, device_secret)
 
 
 @app.route('/api/auth/enrollment/status', methods=['GET'])
@@ -9661,6 +9717,20 @@ def canonical_enrollment_status():
         "session_kind": pending.get("enrollment_session_kind"),
         "account_state": pending.get("account_state"),
         "device_status": pending.get("device_status"),
+    })
+
+
+@app.route('/api/auth/devices/status', methods=['GET'])
+def canonical_device_status():
+    """Return only resumable pending-device state for this browser session."""
+    pending = _enrollment_session_from_request()
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_DEVICE":
+        return jsonify({"success": False, "pending": False}), 401
+    return _enrollment_response({
+        "success": True,
+        "pending": True,
+        "device_status": pending.get("device_status"),
+        "session_kind": "PENDING_DEVICE",
     })
 
 
@@ -9774,17 +9844,33 @@ def accept_canonical_enrollment_consents():
     request_ip_hash = identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key())
     request_user_agent_hash = identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key())
     if (pending.get("enrollment_session_kind") == "LEGACY"
-            and pending.get("account_state") == "LEGACY"):
+            and pending.get("account_state") in {"ACTIVE", "LEGACY"}):
         normal_token = identity_crypto.opaque_token()
+        device_secret = _device_secret_from_request()
+        # A missing recognizer is intentionally treated as an unfamiliar
+        # device, not as an excuse to bypass the device-verification gate.
+        if not device_secret:
+            device_secret = identity_crypto.opaque_token()
         completed = AUTH_REPOSITORY.complete_legacy_consent(
             user_id=str(pending["user_id"]), pending_session_id=str(pending["session_id"]),
             normal_token_hash=_session_token_hash(normal_token),
             expires_at=datetime.now(timezone.utc) + timedelta(days=30), documents=documents,
             ip_hash=request_ip_hash, user_agent_hash=request_user_agent_hash,
+            device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()),
         )
         if not completed:
             return jsonify({"success": False, "error": "Terms update was denied"}), 403
-        return _enrollment_response({"success": True, "legacy_continuity": True, "documents": documents}, normal_token=normal_token)
+        if completed.get("enrollment_session_kind") == "PENDING_DEVICE":
+            response = _enrollment_response(
+                {"success": True, "legal_recertified": True, "device_approval_required": True, "documents": documents},
+                pending_token=normal_token,
+            )
+            return _set_device_cookie(response, device_secret)
+        response = _enrollment_response(
+            {"success": True, "legacy_continuity": pending.get("account_state") == "LEGACY", "documents": documents},
+            normal_token=normal_token,
+        )
+        return _set_device_cookie(response, device_secret)
     if pending.get("enrollment_session_kind") != "PENDING_ENROLLMENT":
         return jsonify({"success": False, "error": "Pending enrollment session required"}), 401
     accepted = AUTH_REPOSITORY.record_enrollment_consents(user_id=str(pending["user_id"]), session_id=str(pending["session_id"]), documents=documents, ip_hash=request_ip_hash, user_agent_hash=request_user_agent_hash)
@@ -9900,6 +9986,96 @@ def recover_canonical_device():
         return _enrollment_response({"success": True, "device_status": "TRUSTED"}, normal_token=token)
     except Exception:
         return jsonify({"success": False, "error": "Device recovery was denied"}), 403
+
+
+@app.route('/api/auth/devices/webauthn/challenge', methods=['POST'])
+def canonical_device_webauthn_challenge():
+    pending = _enrollment_session_from_request()
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_DEVICE":
+        return jsonify({"success": False, "error": "Pending device session required"}), 401
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    parsed = urlparse(_get_frontend_url())
+    if not parsed.hostname:
+        return jsonify({"success": False, "error": "WebAuthn origin is invalid"}), 503
+    credentials = AUTH_REPOSITORY.list_active_webauthn_credentials(user_id=str(pending["user_id"]))
+    if not credentials:
+        return jsonify({"success": False, "error": "No passkey is available"}), 409
+    encoded = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
+    if not AUTH_REPOSITORY.create_webauthn_assertion_challenge(
+        user_id=str(pending["user_id"]), session_id=str(pending["session_id"]),
+        challenge_digest=identity_crypto.keyed_digest(encoded, _identity_hmac_key()), rp_id=parsed.hostname,
+        allowed_origin=_get_frontend_url(), expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    ):
+        return jsonify({"success": False, "error": "WebAuthn challenge was denied"}), 403
+    return _enrollment_response({"success": True, "publicKey": {
+        "challenge": encoded, "rpId": parsed.hostname, "timeout": 300000, "userVerification": "required",
+        "allowCredentials": [{"type": "public-key", "id": row["credential_id"]} for row in credentials],
+    }})
+
+
+@app.route('/api/auth/devices/webauthn/assert', methods=['POST'])
+def canonical_device_webauthn_assert():
+    pending = _enrollment_session_from_request(); credential = request.get_json(silent=True) or {}
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_DEVICE":
+        return jsonify({"success": False, "error": "Pending device session required"}), 401
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    try:
+        client_b64 = str(((credential.get("response") or {}).get("clientDataJSON") or ""))
+        client_data = json.loads(base64.urlsafe_b64decode(client_b64 + "=" * (-len(client_b64) % 4)).decode("utf-8"))
+        if client_data.get("type") != "webauthn.get": raise ValueError("unexpected WebAuthn ceremony")
+        challenge = str(client_data.get("challenge") or "")
+        stored = AUTH_REPOSITORY.consume_webauthn_assertion_challenge(
+            user_id=str(pending["user_id"]), session_id=str(pending["session_id"]),
+            challenge_digest=identity_crypto.keyed_digest(challenge, _identity_hmac_key()),
+        )
+        credential_id = str(credential.get("id") or "")
+        current = next((row for row in AUTH_REPOSITORY.list_active_webauthn_credentials(user_id=str(pending["user_id"])) if row["credential_id"] == credential_id), None)
+        if not stored or not current: raise ValueError("challenge or credential rejected")
+        from webauthn import verify_authentication_response
+        from webauthn.helpers import parse_authentication_credential_json
+        verified = verify_authentication_response(
+            credential=parse_authentication_credential_json(credential),
+            expected_challenge=base64.urlsafe_b64decode(challenge + "=" * (-len(challenge) % 4)),
+            expected_rp_id=str(stored["rp_id"]), expected_origin=str(stored["allowed_origin"]),
+            credential_public_key=bytes(current["public_key"]), credential_current_sign_count=int(current["sign_count"]),
+            require_user_verification=True,
+        )
+        token = identity_crypto.opaque_token()
+        normal = AUTH_REPOSITORY.complete_pending_device_webauthn(
+            user_id=str(pending["user_id"]), pending_session_id=str(pending["session_id"]), credential_id=credential_id,
+            new_sign_count=int(verified.new_sign_count), normal_token_hash=_session_token_hash(token),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+        if not normal: raise ValueError("counter update rejected")
+        return _enrollment_response({"success": True, "device_status": "TRUSTED"}, normal_token=token)
+    except Exception as exc:
+        logger.warning("WebAuthn device assertion rejected: %s", type(exc).__name__)
+        return jsonify({"success": False, "error": "WebAuthn assertion was rejected"}), 400
+
+
+@app.route('/api/auth/devices/transfer/start', methods=['POST'])
+def canonical_device_transfer_start():
+    pending = _enrollment_session_from_request()
+    if not pending or pending.get("enrollment_session_kind") != "PENDING_DEVICE":
+        return jsonify({"success": False, "error": "Pending device session required"}), 401
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    code = identity_crypto.opaque_token()
+    if not AUTH_REPOSITORY.create_pending_device_transfer(
+        user_id=str(pending["user_id"]), pending_session_id=str(pending["session_id"]),
+        code_digest=identity_crypto.keyed_digest(code, _identity_hmac_key()),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    ):
+        return jsonify({"success": False, "error": "Device transfer was denied"}), 403
+    return _enrollment_response({"success": True, "transfer_code": code, "expires_in": 600})
 
 
 @app.route('/api/auth/devices/<device_id>/revoke', methods=['POST'])

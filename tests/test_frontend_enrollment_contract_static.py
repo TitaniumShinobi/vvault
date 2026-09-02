@@ -8,6 +8,7 @@ ENROLLMENT = (REPO_ROOT / "src" / "components" / "EnrollmentFlow.js").read_text(
 CREATE_CONSTRUCT = (REPO_ROOT / "src" / "components" / "CreateConstruct.js").read_text(encoding="utf-8")
 LEGACY_LOGIN = (REPO_ROOT / "src" / "components" / "LoginScreen.js").read_text(encoding="utf-8")
 SERVER = (REPO_ROOT / "vvault" / "server" / "vvault_web_server.py").read_text(encoding="utf-8")
+AUTH_REPOSITORY = (REPO_ROOT / "vvault" / "server" / "vvault_auth_repository.py").read_text(encoding="utf-8")
 
 
 class TestFrontendEnrollmentContract(unittest.TestCase):
@@ -36,6 +37,17 @@ class TestFrontendEnrollmentContract(unittest.TestCase):
         route = SERVER.split("def canonical_enrollment_status", 1)[1].split("def _chatty_pairing_callback", 1)[0]
         self.assertIn('"pending"', route)
         self.assertNotIn('"email"', route)
+
+    def test_device_verification_routes_are_separate_from_legal_recertification(self):
+        for endpoint in (
+            "/api/auth/devices/status",
+            "/api/auth/devices/webauthn/challenge",
+            "/api/auth/devices/webauthn/assert",
+            "/api/auth/devices/transfer/start",
+        ):
+            self.assertIn(endpoint, SERVER)
+        self.assertIn('("vvault:eeccd", "VVAULT_EUROPEAN_ELECTRONIC_COMMNICATION_CODE_DISCLOSURE.md")', SERVER)
+        self.assertIn("def issue_known_device_session", AUTH_REPOSITORY)
 
     def test_protected_mutations_use_cookie_credentialed_fetch(self):
         self.assertIn("authFetch('/api/chatty/construct/create'", CREATE_CONSTRUCT)

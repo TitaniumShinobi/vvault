@@ -750,13 +750,18 @@ class VVaultAuthRepository:
     def create_legacy_consent_session(
         self, *, user_id: str, token_hash: str, expires_at: datetime,
     ) -> dict[str, Any] | None:
-        """Issue a receipt-only session for an existing LEGACY owner."""
+        """Issue a receipt-only session for an existing ACTIVE or LEGACY owner.
+
+        ``LEGACY`` is the migration-compatible session kind for this bounded
+        legal checkpoint.  The account state remains authoritative, so this
+        does not turn device verification into a legal acceptance event.
+        """
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO sessions (user_id, token_hash, expires_at, enrollment_session_kind)
                        SELECT id, %s, %s, 'LEGACY' FROM users
-                        WHERE id=%s AND account_state='LEGACY'
+                        WHERE id=%s AND account_state IN ('ACTIVE', 'LEGACY')
                        RETURNING id, user_id, expires_at, enrollment_session_kind""",
                     (token_hash, expires_at, user_id),
                 )
@@ -779,13 +784,7 @@ class VVaultAuthRepository:
             raise ValueError("current legacy consent receipts are required")
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT document_key, document_version, document_sha256
-                         FROM enrollment_consents WHERE user_id=%s""",
-                    (user_id,),
-                )
-                actual = {(str(row["document_key"]), str(row["document_version"]), str(row["document_sha256"])) for row in cur.fetchall()}
-                if not required.issubset(actual):
+                if not self._has_current_legal_receipts_locked(cur, user_id=user_id, required=required):
                     conn.rollback(); return None
                 cur.execute(
                     """INSERT INTO sessions (user_id, token_hash, expires_at, enrollment_session_kind)
@@ -793,6 +792,91 @@ class VVaultAuthRepository:
                         WHERE id=%s AND account_state='LEGACY'
                        RETURNING id, user_id, expires_at, enrollment_session_kind""",
                     (token_hash, expires_at, user_id),
+                )
+                session = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return session
+
+    @staticmethod
+    def _has_current_legal_receipts_locked(
+        cur: Any, *, user_id: str, required: set[tuple[str, str, str]],
+    ) -> bool:
+        """Return whether this owner accepted every current legal artifact.
+
+        This intentionally compares the immutable key, content version, and
+        digest triple.  A receipt for an older document must never satisfy a
+        later Terms, Privacy, or EECCD checkpoint.
+        """
+        cur.execute(
+            """SELECT document_key, document_version, document_sha256
+                 FROM enrollment_consents WHERE user_id=%s""",
+            (user_id,),
+        )
+        actual = {
+            (str(row["document_key"]), str(row["document_version"]), str(row["document_sha256"]))
+            for row in cur.fetchall()
+        }
+        return required.issubset(actual)
+
+    def has_current_legal_receipts(
+        self, *, user_id: str, required_documents: Sequence[Mapping[str, str]],
+    ) -> bool:
+        """Check current legal receipts for an ACTIVE or LEGACY owner.
+
+        The caller supplies the server-derived document manifest; browser
+        values are never trusted as versions or digests.
+        """
+        required = {
+            (str(row.get("key") or ""), str(row.get("version") or ""), str(row.get("sha256") or ""))
+            for row in required_documents
+        }
+        if not required or any(not all(row) for row in required):
+            raise ValueError("current legal receipt manifest is required")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM users WHERE id=%s AND account_state IN ('ACTIVE', 'LEGACY')",
+                    (user_id,),
+                )
+                if not cur.fetchone():
+                    return False
+                return self._has_current_legal_receipts_locked(cur, user_id=user_id, required=required)
+
+    def issue_known_device_session(
+        self, *, user_id: str, device_secret_digest: str, token_hash: str,
+        expires_at: datetime, required_documents: Sequence[Mapping[str, str]],
+    ) -> dict[str, Any] | None:
+        """Rotate an ACTIVE owner's session only on its existing trusted device.
+
+        Legal recertification and device recognition are separate checks.  The
+        trusted device digest is an opaque, HttpOnly browser cookie digest; it
+        is never an identity selector and is always owner-bound in this query.
+        """
+        required = {
+            (str(row.get("key") or ""), str(row.get("version") or ""), str(row.get("sha256") or ""))
+            for row in required_documents
+        }
+        if not token_hash or not device_secret_digest or not required or any(not all(row) for row in required):
+            raise ValueError("known device session arguments are incomplete")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM users WHERE id=%s AND account_state='ACTIVE' FOR UPDATE", (user_id,))
+                if not cur.fetchone() or not self._has_current_legal_receipts_locked(cur, user_id=user_id, required=required):
+                    conn.rollback(); return None
+                cur.execute(
+                    """SELECT id FROM enrollment_devices
+                         WHERE user_id=%s AND device_secret_digest=%s AND status='TRUSTED'
+                         FOR UPDATE""",
+                    (user_id, device_secret_digest),
+                )
+                device = _row_to_dict(cur.fetchone())
+                if not device:
+                    conn.rollback(); return None
+                cur.execute(
+                    """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id)
+                       VALUES(%s,%s,%s,'NORMAL',%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (user_id, token_hash, expires_at, device["id"]),
                 )
                 session = _row_to_dict(cur.fetchone())
             conn.commit()
@@ -848,6 +932,7 @@ class VVaultAuthRepository:
         self, *, user_id: str, pending_session_id: str, normal_token_hash: str,
         expires_at: datetime, documents: Sequence[Mapping[str, str]],
         ip_hash: str | None = None, user_agent_hash: str | None = None,
+        device_secret_digest: str | None = None,
     ) -> dict[str, Any] | None:
         """Renew receipts and rotate back to the same legacy owner session."""
         receipts = {(str(row.get("key") or ""), str(row.get("version") or ""), str(row.get("sha256") or "")) for row in documents}
@@ -856,13 +941,14 @@ class VVaultAuthRepository:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT 1 FROM sessions JOIN users ON users.id=sessions.user_id
+                    """SELECT users.account_state FROM sessions JOIN users ON users.id=sessions.user_id
                         WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
                           AND sessions.expires_at > now() AND sessions.enrollment_session_kind='LEGACY'
-                          AND users.account_state='LEGACY' FOR UPDATE OF sessions, users""",
+                          AND users.account_state IN ('ACTIVE', 'LEGACY') FOR UPDATE OF sessions, users""",
                     (pending_session_id, user_id),
                 )
-                if not cur.fetchone():
+                owner = _row_to_dict(cur.fetchone())
+                if not owner:
                     conn.rollback(); return None
                 for key, version, sha256 in receipts:
                     cur.execute(
@@ -872,12 +958,39 @@ class VVaultAuthRepository:
                         (user_id, key, version, sha256, ip_hash, user_agent_hash),
                     )
                 cur.execute("UPDATE sessions SET revoked_at=now() WHERE id=%s", (pending_session_id,))
+                session_kind = 'LEGACY'
+                device_id = None
+                if owner["account_state"] == 'ACTIVE':
+                    # A current legal receipt alone never trusts a new device.
+                    # Reuse a matching trusted device when present; otherwise
+                    # leave the browser in the separate pending-device gate.
+                    if device_secret_digest:
+                        cur.execute(
+                            """SELECT id FROM enrollment_devices WHERE user_id=%s
+                                 AND device_secret_digest=%s AND status='TRUSTED' FOR UPDATE""",
+                            (user_id, device_secret_digest),
+                        )
+                        device = _row_to_dict(cur.fetchone())
+                    else:
+                        device = None
+                    if device:
+                        session_kind, device_id = 'NORMAL', device['id']
+                    else:
+                        if not device_secret_digest:
+                            conn.rollback(); return None
+                        cur.execute(
+                            """INSERT INTO enrollment_devices(user_id, device_secret_digest, status, ip_hash, user_agent_hash)
+                               VALUES(%s,%s,'PENDING',%s,%s) RETURNING id""",
+                            (user_id, device_secret_digest, ip_hash, user_agent_hash),
+                        )
+                        device_id = _row_to_dict(cur.fetchone())["id"]
+                        session_kind = 'PENDING_DEVICE'
                 cur.execute(
                     """INSERT INTO sessions (user_id, token_hash, expires_at, enrollment_session_kind,
-                                              rotated_from_session_id)
-                       VALUES (%s,%s,%s,'LEGACY',%s)
-                       RETURNING id, user_id, expires_at, enrollment_session_kind""",
-                    (user_id, normal_token_hash, expires_at, pending_session_id),
+                                              enrollment_device_id, rotated_from_session_id)
+                       VALUES (%s,%s,%s,%s,%s,%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (user_id, normal_token_hash, expires_at, session_kind, device_id, pending_session_id),
                 )
                 session = _row_to_dict(cur.fetchone())
             conn.commit()
@@ -922,6 +1035,41 @@ class VVaultAuthRepository:
                 result = _row_to_dict(cur.fetchone())
             conn.commit()
         return result
+
+    def create_webauthn_assertion_challenge(
+        self, *, user_id: str, session_id: str, challenge_digest: str,
+        rp_id: str, allowed_origin: str, expires_at: datetime,
+    ) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO enrollment_webauthn_challenges
+                       (challenge_digest, user_id, session_id, rp_id, allowed_origin, expires_at)
+                       SELECT %s,%s,%s,%s,%s,%s WHERE EXISTS (
+                         SELECT 1 FROM sessions JOIN users ON users.id=sessions.user_id
+                          WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                            AND sessions.expires_at > now() AND sessions.enrollment_session_kind='PENDING_DEVICE'
+                            AND users.account_state='ACTIVE') RETURNING challenge_digest""",
+                    (challenge_digest, user_id, session_id, rp_id, allowed_origin, expires_at, session_id, user_id),
+                )
+                created = cur.fetchone() is not None
+            conn.commit()
+        return created
+
+    def consume_webauthn_assertion_challenge(self, *, user_id: str, session_id: str, challenge_digest: str) -> dict[str, Any] | None:
+        return self.consume_webauthn_registration_challenge(
+            user_id=user_id, session_id=session_id, challenge_digest=challenge_digest,
+        )
+
+    def list_active_webauthn_credentials(self, *, user_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT credential_id, public_key, sign_count FROM enrollment_webauthn_credentials
+                         WHERE user_id=%s AND revoked_at IS NULL ORDER BY created_at ASC""",
+                    (user_id,),
+                )
+                return [dict(row) for row in cur.fetchall()]
 
     def store_webauthn_credential(
         self, *, user_id: str, credential_id: str, public_key: bytes,
@@ -1031,11 +1179,18 @@ class VVaultAuthRepository:
                 if not cur.fetchone():
                     conn.rollback(); return None
                 cur.execute(
-                    """INSERT INTO enrollment_devices(user_id, device_secret_digest, label, status, ip_hash, user_agent_hash)
-                       VALUES(%s,%s,%s,'PENDING',%s,%s) RETURNING id""",
-                    (user_id, device_secret_digest, label, ip_hash, user_agent_hash),
+                    """SELECT id FROM enrollment_devices
+                         WHERE user_id=%s AND device_secret_digest=%s AND status='PENDING' FOR UPDATE""",
+                    (user_id, device_secret_digest),
                 )
                 device = _row_to_dict(cur.fetchone())
+                if not device:
+                    cur.execute(
+                        """INSERT INTO enrollment_devices(user_id, device_secret_digest, label, status, ip_hash, user_agent_hash)
+                           VALUES(%s,%s,%s,'PENDING',%s,%s) RETURNING id""",
+                        (user_id, device_secret_digest, label, ip_hash, user_agent_hash),
+                    )
+                    device = _row_to_dict(cur.fetchone())
                 cur.execute(
                     """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id)
                        VALUES(%s,%s,%s,'PENDING_DEVICE',%s)
@@ -1111,6 +1266,69 @@ class VVaultAuthRepository:
                     """UPDATE enrollment_recovery_codes SET used_at=now()
                          WHERE user_id=%s AND code_digest=%s AND used_at IS NULL RETURNING id""",
                     (user_id, recovery_code_digest),
+                )
+                if not cur.fetchone():
+                    conn.rollback(); return None
+                device_id = str(pending["enrollment_device_id"])
+                cur.execute("UPDATE enrollment_devices SET status='TRUSTED', approved_by_user_id=%s, approved_at=now() WHERE id=%s", (user_id, device_id))
+                cur.execute("UPDATE sessions SET revoked_at=now() WHERE id=%s", (pending_session_id,))
+                cur.execute(
+                    """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id, rotated_from_session_id)
+                       VALUES(%s,%s,%s,'NORMAL',%s,%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (user_id, normal_token_hash, expires_at, device_id, pending_session_id),
+                )
+                result = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return result
+
+    def create_pending_device_transfer(
+        self, *, user_id: str, pending_session_id: str, code_digest: str,
+        expires_at: datetime,
+    ) -> bool:
+        """Store a short-lived, hashed transfer code for one pending device."""
+        if not code_digest:
+            raise ValueError("device transfer digest is required")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO enrollment_device_transfer_codes(code_digest, user_id, pending_session_id, expires_at)
+                       SELECT %s, sessions.user_id, sessions.id, %s FROM sessions
+                        JOIN enrollment_devices ON enrollment_devices.id=sessions.enrollment_device_id
+                       WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                         AND sessions.expires_at > now() AND sessions.enrollment_session_kind='PENDING_DEVICE'
+                         AND enrollment_devices.status='PENDING'
+                       RETURNING code_digest""",
+                    (code_digest, expires_at, pending_session_id, user_id),
+                )
+                created = cur.fetchone() is not None
+            conn.commit()
+        return created
+
+    def complete_pending_device_webauthn(
+        self, *, user_id: str, pending_session_id: str, credential_id: str,
+        new_sign_count: int, normal_token_hash: str, expires_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Promote a pending device after a validated assertion and counter update."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT sessions.enrollment_device_id FROM sessions JOIN enrollment_devices
+                         ON enrollment_devices.id=sessions.enrollment_device_id JOIN users ON users.id=sessions.user_id
+                        WHERE sessions.id=%s AND sessions.user_id=%s AND sessions.revoked_at IS NULL
+                          AND sessions.expires_at > now() AND sessions.enrollment_session_kind='PENDING_DEVICE'
+                          AND enrollment_devices.status='PENDING' AND users.account_state='ACTIVE'
+                        FOR UPDATE OF sessions, enrollment_devices""",
+                    (pending_session_id, user_id),
+                )
+                pending = _row_to_dict(cur.fetchone())
+                if not pending:
+                    conn.rollback(); return None
+                cur.execute(
+                    """UPDATE enrollment_webauthn_credentials SET sign_count=%s
+                         WHERE credential_id=%s AND user_id=%s AND revoked_at IS NULL
+                           AND (sign_count=0 OR %s > sign_count) RETURNING credential_id""",
+                    (new_sign_count, credential_id, user_id, new_sign_count),
                 )
                 if not cur.fetchone():
                     conn.rollback(); return None
