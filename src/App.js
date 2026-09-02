@@ -168,9 +168,12 @@ function App() {
   // Show cinematic login screen if user is not authenticated
   if (!user) {
     const authState = new URLSearchParams(window.location.search);
-    return authState.get('identity_pending') === '1'
-      ? <EnrollmentFlow returningOwner={authState.get('terms_update') === '1'} />
-      : <CinematicLogin onLogin={handleLogin} />;
+    // URL state controls presentation only; the component confirms the
+    // server-side HttpOnly pending session before rendering a checkpoint.
+    if (authState.get('device_approval_required') === '1') return <EnrollmentFlow requestedMode="device" />;
+    if (authState.get('terms_update') === '1') return <EnrollmentFlow requestedMode="recertification" />;
+    if (authState.get('identity_pending') === '1') return <EnrollmentFlow requestedMode={authState.get('terms_update') === '1' ? 'recertification' : 'enrollment'} />;
+    return <CinematicLogin onLogin={handleLogin} />;
   }
   
   return (
