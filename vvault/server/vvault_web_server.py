@@ -77,6 +77,8 @@ from vvault.security.pocketverse_guard import (
 import chatty_body_service
 import vvault_auth_repository
 import vvault_file_repository
+from vvault.server import vvault_access_assertion
+from vvault.server.relying_party_scope import set_relying_party_id
 try:
     from vvault.server import cleanhouse_files_evidence
 except ImportError:  # pragma: no cover - direct script compatibility
@@ -3265,6 +3267,26 @@ def require_chatty_auth(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        # A relying product is selected only by a verified, short-lived
+        # authority assertion.  Headers and request bodies never choose it.
+        auth_header = request.headers.get("Authorization", "")
+        bearer = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+        if bearer.count(".") == 2:
+            try:
+                verified = vvault_access_assertion.verify_access_assertion(bearer)
+            except (vvault_access_assertion.AccessAssertionRejected,
+                    vvault_access_assertion.AccessAssertionUnavailable):
+                return jsonify({"success": False, "error": "VVAULT access assertion was rejected"}), 401
+            required = vvault_access_assertion.required_scopes(request.method, request.path)
+            if not required or not required.issubset(verified["scopes"]):
+                return jsonify({"success": False, "error": "VVAULT access assertion lacks the required scope"}), 403
+            request.current_user = {
+                "id": verified["ownerUserId"], "user_id": verified["ownerUserId"],
+                "role": "user", "auth_mode": "signed_assertion",
+            }
+            request.current_token = None
+            set_relying_party_id(verified["relyingPartyId"])
+            return f(*args, **kwargs)
         expected_key = os.environ.get("VVAULT_SERVICE_TOKEN")
         provided_key = request.headers.get("X-Chatty-Key") or request.headers.get("X-Service-Token")
 
@@ -3286,6 +3308,7 @@ def require_chatty_auth(f):
             )
             request.current_user = current_user
             request.current_token = None
+            set_relying_party_id("chatty")
             return f(*args, **kwargs)
 
         if expected_key and provided_key and provided_key != expected_key:
@@ -3311,6 +3334,7 @@ def require_chatty_auth(f):
             )
             request.current_user = session
             request.current_token = token
+            set_relying_party_id("vvault")
             return f(*args, **kwargs)
 
         if not expected_key:
