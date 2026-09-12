@@ -63,7 +63,20 @@ def _connect():
     import psycopg
     from psycopg.rows import dict_row
 
-    return psycopg.connect(url, row_factory=dict_row, options=f"-c search_path={BODY_SCHEMA},public")
+    conn = psycopg.connect(url, row_factory=dict_row)
+    # The database policy is the enforcement boundary.  Scope comes from the
+    # server-verified assertion/session context, never request input.
+    try:
+        from .relying_party_scope import configure_connection
+    except ImportError:
+        from relying_party_scope import configure_connection
+    with conn.cursor() as cur:
+        # Parameters are used for values; schema names here are a fixed module
+        # constant.  Using SET avoids treating "ovvaults,public" as one quoted
+        # schema when the server applies connection options.
+        cur.execute(f"SET search_path TO {BODY_SCHEMA}, public")
+        configure_connection(cur)
+    return conn
 
 
 def _rows(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:

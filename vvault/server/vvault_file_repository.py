@@ -34,6 +34,9 @@ def _utc_now_iso() -> str:
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
     data = dict(row or {})
+    for key, value in list(data.items()):
+        if isinstance(value, bytes):
+            data[key] = value.decode("utf-8")
     for key in ("id", "user_id"):
         if data.get(key) is not None:
             data[key] = str(data[key])
@@ -86,7 +89,13 @@ def _object_key_for(record: dict[str, Any], logical_path: str, user_id: str | No
     if is_system:
         return f"system/{logical_path}".strip("/")
     if user_id:
-        return f"users/{user_id}/{logical_path}".strip("/")
+        try:
+            from .relying_party_scope import current_relying_party_id
+        except ImportError:
+            from relying_party_scope import current_relying_party_id
+        # Object storage is part of the authorization boundary, not merely a
+        # cache: identical owner/path values must remain product-partitioned.
+        return f"users/{user_id}/{current_relying_party_id()}/{logical_path}".strip("/")
     return logical_path.strip("/")
 
 
@@ -536,9 +545,12 @@ class VVaultFileRepository:
             conn.commit()
 
         action = "created" if row and row.get("inserted") else "updated"
+        record_id = row["id"] if row else None
+        if isinstance(record_id, bytes):
+            record_id = record_id.decode("utf-8")
         return {
             "action": action,
-            "id": str(row["id"]) if row else None,
+            "id": str(record_id) if record_id is not None else None,
             "deduped": 0,
             "path": logical_path,
         }
