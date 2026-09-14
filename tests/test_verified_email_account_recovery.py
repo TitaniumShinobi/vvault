@@ -8,10 +8,13 @@ ROOT = Path(__file__).parents[1]
 
 def test_recovery_magic_link_is_a_distinct_one_time_purpose():
     migration = (ROOT / "vvault/migrations/0037_verified_email_account_recovery.up.sql").read_text()
+    actor_migration = (ROOT / "vvault/migrations/0038_verified_email_recovery_actor_context.up.sql").read_text()
     repository = (ROOT / "vvault/server/vvault_auth_repository.py").read_text()
     server = (ROOT / "vvault/server/vvault_web_server.py").read_text()
 
     assert "'recovery'" in migration
+    assert "purpose IN ('signin', 'recovery')" in actor_migration
+    assert "initiating_user_id IS NULL" in actor_migration
     assert 'purpose = "recovery" if intent == "ACCOUNT_RECOVERY" else "signin"' in server
     assert 'challenge.get("purpose") not in {"signin", "recovery"}' in server
     assert 'if purpose not in {"signin", "link", "recovery"}' in repository
