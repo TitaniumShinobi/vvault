@@ -10612,20 +10612,23 @@ def request_email_magic_link():
     # unavailable delivery, so email existence is never disclosed.
     if not _magic_link_delivery_available():
         return jsonify({"success": False, "error": "magic_link_delivery_unavailable"}), 503
+    if _rate_limit_key("auth"):
+        # This says nothing about the supplied address.  Unlike the old
+        # generic 202 path it does not falsely imply a mail was sent.
+        return jsonify({"success": False, "error": "try_again_later"}), 429
     try:
-        if not _rate_limit_key("auth"):
-            body = request.get_json(silent=True) or {}
-            email = identity_crypto.normalize_email(str(body.get("email") or ""))
-            intent = str(body.get("intent") or "SIGN_IN").upper()
-            purpose = "recovery" if intent == "ACCOUNT_RECOVERY" else "signin"
-            token = identity_crypto.opaque_token()
-            frontend = _get_frontend_url()
-            token_digest = identity_crypto.keyed_digest(token, _identity_hmac_key())
-            AUTH_REPOSITORY.issue_magic_link_challenge(token_digest=token_digest, normalized_email=email,
-                purpose=purpose, redirect_uri=frontend, expires_at=datetime.now(timezone.utc) + timedelta(minutes=15))
-            if not _deliver_magic_link(email, f"{frontend}/#magic_link={token}"):
-                AUTH_REPOSITORY.revoke_magic_link_challenge(token_digest)
-                return jsonify({"success": False, "error": "magic_link_delivery_failed"}), 503
+        body = request.get_json(silent=True) or {}
+        email = identity_crypto.normalize_email(str(body.get("email") or ""))
+        intent = str(body.get("intent") or "SIGN_IN").upper()
+        purpose = "recovery" if intent == "ACCOUNT_RECOVERY" else "signin"
+        token = identity_crypto.opaque_token()
+        frontend = _get_frontend_url()
+        token_digest = identity_crypto.keyed_digest(token, _identity_hmac_key())
+        AUTH_REPOSITORY.issue_magic_link_challenge(token_digest=token_digest, normalized_email=email,
+            purpose=purpose, redirect_uri=frontend, expires_at=datetime.now(timezone.utc) + timedelta(minutes=15))
+        if not _deliver_magic_link(email, f"{frontend}/#magic_link={token}"):
+            AUTH_REPOSITORY.revoke_magic_link_challenge(token_digest)
+            return jsonify({"success": False, "error": "magic_link_delivery_failed"}), 503
     except Exception as exc:
         logger.warning("magic-link request not delivered: %s", type(exc).__name__)
         # Preserve account-enumeration resistance while never telling a person
