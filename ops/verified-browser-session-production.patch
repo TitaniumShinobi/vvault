@@ -1,0 +1,44 @@
+--- a/vvault/server/vvault_auth_repository.py
++++ b/vvault/server/vvault_auth_repository.py
+@@ -1115,7 +1115,31 @@
+                 )
+-                device = _row_to_dict(cur.fetchone()) or {'id': None}
+-                if not device:
+-                    conn.rollback(); return None
++                device = _row_to_dict(cur.fetchone())
++                if not device:
++                    # OAuth/email identity proof and current legal receipts have
++                    # already been verified.  Bind this opaque browser
++                    # recognizer to the same owner before issuing NORMAL.
++                    cur.execute(
++                        """INSERT INTO enrollment_devices
++                           (user_id, device_secret_digest, label, status, approved_by_user_id, approved_at)
++                           VALUES (%s,%s,'Verified browser','TRUSTED',%s,now())
++                           ON CONFLICT (device_secret_digest) DO NOTHING
++                           RETURNING id""",
++                        (user_id, device_secret_digest, user_id),
++                    )
++                    device = _row_to_dict(cur.fetchone())
++                if not device:
++                    # A recognizer collision is reusable only by its existing
++                    # owner; it is never rebound across accounts.
++                    cur.execute(
++                        """SELECT id FROM enrollment_devices
++                            WHERE user_id=%s AND device_secret_digest=%s
++                              AND status='TRUSTED' AND revoked_at IS NULL
++                            FOR UPDATE""",
++                        (user_id, device_secret_digest),
++                    )
++                    device = _row_to_dict(cur.fetchone())
++                if not device:
++                    conn.rollback(); return None
+                 cur.execute(
+                     """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id)
+                        VALUES(%s,%s,%s,'NORMAL',%s)
+--- a/vvault/server/vvault_web_server.py
++++ b/vvault/server/vvault_web_server.py
+@@ -4987,3 +4987,3 @@
+         device_status = str(session.get('enrollment_device_status') or '')
+-        if state == 'ACTIVE' and kind == 'NORMAL':
++        if state == 'ACTIVE' and kind == 'NORMAL' and device_status == 'TRUSTED':
+             return session, token
