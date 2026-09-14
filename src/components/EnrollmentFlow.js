@@ -1,16 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import './EnrollmentFlow.css';
+import { requestEnrollmentJson } from '../utils/enrollmentRequest.mjs';
+import { enrollmentCheckpoint } from '../utils/enrollmentContinuation.mjs';
+import { validatedPairedLaunch, reserveCompanionTab, launchVerifiedPair } from '../utils/pairedEnrollmentLaunch.mjs';
 
 const b64url = (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer)))
   .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const decode = (value) => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4)), (c) => c.charCodeAt(0));
 
-async function api(path, options = {}) {
-  const response = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...options });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || 'Request was denied');
-  return payload;
-}
+const api = requestEnrollmentJson;
 
 const legalDocuments = [
   { name: 'Terms of Service', key: 'vvault:terms' },
@@ -40,29 +38,59 @@ function RecoveryCode({ onRecovered, run, working }) {
   </form>;
 }
 
-export default function EnrollmentFlow({ requestedMode = 'enrollment' }) {
+export default function EnrollmentFlow({ requestedMode = 'enrollment', embedded = false }) {
   const [status, setStatus] = useState(null);
   const [step, setStep] = useState('loading');
   const [codes, setCodes] = useState([]);
   const [error, setError] = useState('');
   const [working, setWorking] = useState(false);
   const [transferCode, setTransferCode] = useState('');
+  const [pairedLaunch, setPairedLaunch] = useState(null);
 
   const reloadStatus = useCallback(async () => {
+    setError('');
+    setStep('loading');
     try {
       const current = await api('/api/auth/enrollment/status');
-      if (!current.pending) throw new Error('This secure checkpoint has expired. Sign in again to continue.');
+      if (current.completed === true && current.pending === false) {
+        setStatus(current);
+        setPairedLaunch(validatedPairedLaunch(current.pairedLaunch));
+        setStep('finished');
+        return;
+      }
+      const checkpoint = enrollmentCheckpoint(current);
       setStatus(current);
-      setStep(current.session_kind === 'PENDING_DEVICE' ? 'device' : current.legal_receipts_current ? 'passkey' : 'consent');
+      setStep(checkpoint);
     } catch (failure) {
       setError(failure.message || 'This secure checkpoint is unavailable.');
-      setStep('expired');
+      setStep(failure.status === 401 || failure.status === 403 ? 'expired' : 'error');
     }
   }, []);
 
   useEffect(() => { reloadStatus(); }, [reloadStatus]);
-  const run = async (action) => { setWorking(true); setError(''); try { await action(); } catch (failure) { setError(failure.message); } finally { setWorking(false); } };
-  const complete = () => window.location.assign('/');
+  const run = async (action) => { setWorking(true); setError(''); try { await action(); } catch (failure) { setError(failure.message); if (failure.status === 401) setStep('expired'); } finally { setWorking(false); } };
+  const complete = () => window.location.assign('/api/auth/enrollment/continue');
+  const activate = () => {
+    // Reserve on the existing personal final click; navigate only after the
+    // authoritative activation transaction succeeds. No extra popup permission.
+    const tab = reserveCompanionTab(window);
+    run(async () => {
+      try {
+        const result = await api('/api/auth/enrollment/activate', { method: 'POST', body: '{}' });
+        const opened = launchVerifiedPair(result, tab, window);
+        if (opened.launched) return;
+        if (opened.plan) {
+          setPairedLaunch(opened.plan);
+          setStep('finished');
+          return;
+        }
+        complete();
+      } catch (failure) {
+        try { tab?.close(); } catch { /* Already closed. */ }
+        throw failure;
+      }
+    });
+  };
   const mode = status?.session_kind === 'PENDING_DEVICE' ? 'device' : status?.session_kind === 'LEGACY' ? 'recertification' : requestedMode;
 
   const passkey = () => run(async () => {
@@ -90,10 +118,11 @@ export default function EnrollmentFlow({ requestedMode = 'enrollment' }) {
   const title = mode === 'device' ? 'Verify this device' : mode === 'recertification' ? 'Welcome back' : 'Secure enrollment';
   const subtitle = mode === 'device' ? 'This browser is not yet trusted. Verify it to continue to your existing VVAULT.' : mode === 'recertification' ? 'We’ve updated our legal documents. Accept the current versions to return to your existing VVAULT.' : 'Review the current documents before creating your personal VVAULT.';
 
-  return <main className="lifecycle-container"><section className="lifecycle-card" aria-live="polite">
-    <p className="lifecycle-eyebrow">VVAULT security checkpoint</p><h1>{title}</h1><p>{subtitle}</p>
+  return <div className={embedded ? 'lifecycle-embedded' : 'lifecycle-container'}><section className="lifecycle-card" aria-live="polite">
+    {!embedded && <><p className="lifecycle-eyebrow">VVAULT security checkpoint</p><h1>{title}</h1><p>{subtitle}</p></>}
     {step === 'loading' && <p>Checking this secure session…</p>}
-    {step === 'expired' && <><p>This link or device-verification session is no longer active.</p><a className="lifecycle-link" href="/">Return to sign in</a></>}
+    {step === 'expired' && <><p>This sign-in session is no longer active. Sign in again to continue from your saved setup steps.</p><a className="lifecycle-link" href="/">Return to sign in</a></>}
+    {step === 'error' && <><button type="button" onClick={reloadStatus}>Retry enrollment</button><a href="/">Return to sign in</a></>}
     {step === 'consent' && <><LegalDocuments documents={status?.documents || []} /><button disabled={working} onClick={() => run(async () => {
       const result = await api('/api/auth/enrollment/consents', { method: 'POST', body: '{}' });
       // A legal update and an unfamiliar device are separate events.  The
@@ -113,8 +142,13 @@ export default function EnrollmentFlow({ requestedMode = 'enrollment' }) {
     {step === 'passkey' && <><p>Create a passkey for future sign-ins on your devices.</p><button disabled={working} onClick={passkey}>Create passkey</button></>}
     {step === 'recovery' && <><p>Keep recovery codes offline. They are displayed once.</p><button disabled={working} onClick={() => run(async () => { const result = await api('/api/auth/enrollment/recovery-codes', { method: 'POST', body: '{}' }); setCodes(result.recovery_codes || []); setStep('activate'); })}>Generate recovery codes</button></>}
     {codes.length > 0 && <pre aria-label="Recovery codes">{codes.join('\n')}</pre>}
-    {step === 'activate' && <><p>Trust this device to finish enrollment.</p><button disabled={working} onClick={() => run(async () => { await api('/api/auth/enrollment/activate', { method: 'POST', body: '{}' }); complete(); })}>Trust this device</button></>}
+    {step === 'activate' && <><p>Trust this device to finish enrollment.</p><button disabled={working} onClick={activate}>Trust this device</button></>}
+    {step === 'finished' && <><p>Signup is complete. Your saved enrollment steps are intact.</p>{pairedLaunch ? <>
+      <p>If the second tab did not open, use the link below. Each product checks your account before admitting you.</p>
+      <a href={pairedLaunch.companionUrl} target="_blank" rel="noopener noreferrer">Open {pairedLaunch.companionProduct}</a>
+      <button type="button" onClick={() => window.location.assign(pairedLaunch.currentUrl)}>Continue in this tab</button>
+    </> : <button type="button" onClick={complete}>Continue securely</button>}</>}
     {step === 'device' && <div className="device-options"><p>Device verification is separate from legal-document acceptance.</p><button disabled={working} onClick={assertPasskey}>Use an existing passkey</button><RecoveryCode working={working} run={run} onRecovered={complete} /><div className="transfer-option"><button disabled={working} onClick={startTransfer}>Get approval code</button>{transferCode && <><p>On an authenticated trusted device, approve this new device with:</p><code>{transferCode}</code><p className="lifecycle-note">This code expires shortly and does not reveal identity or Vault data.</p><button disabled={working} onClick={() => run(async () => { await api('/api/auth/devices/transfer/complete', { method: 'POST', body: '{}' }); complete(); })}>Finish after approval</button></>}</div></div>}
     {error && <p className="error-message" role="alert">{error}</p>}
-  </section></main>;
+  </section></div>;
 }

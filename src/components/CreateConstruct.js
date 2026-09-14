@@ -111,8 +111,22 @@ const CreateConstruct = ({ user }) => {
       formData.append('color_hex', colorHex);
       if (centerImage) formData.append('center_image', centerImage);
 
-      const response = await authFetch('/api/chatty/construct/create', {
+      const headers = {};
+      const provenanceResponse = await fetch('/api/chatty/construct/create-provenance', {
+        method: 'GET',
+        headers,
+        credentials: 'same-origin',
+      });
+      const provenanceData = await provenanceResponse.json();
+      if (!provenanceResponse.ok || !provenanceData.provenance) {
+        throw new Error(provenanceData.error || 'Construct creation authorization failed.');
+      }
+      headers['X-VVAULT-Creation-Provenance'] = provenanceData.provenance;
+
+      const response = await fetch('/api/chatty/construct/create', {
         method: 'POST',
+        headers,
+        credentials: 'same-origin',
         body: formData
       });
 

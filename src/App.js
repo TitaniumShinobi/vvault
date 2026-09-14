@@ -108,6 +108,8 @@ const StatusIndicator = () => {
 // Main App component
 function App() {
   const [user, setUser] = useState(null);
+  const [pendingSignup, setPendingSignup] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
   const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   
@@ -116,8 +118,12 @@ function App() {
     // accepted from query parameters or browser storage.
     fetch('/api/auth/verify', { credentials: 'same-origin' })
       .then((response) => response.ok ? response.json() : null)
-      .then((payload) => { if (payload?.user) setUser(payload.user); })
-      .catch(() => setUser(null));
+      .then(async (payload) => {
+        if (payload?.user) { setUser(payload.user); return; }
+        const response=await fetch('/api/auth/paired-signup/resume',{credentials:'same-origin'});
+        if (response.ok) setPendingSignup(await response.json());
+      })
+      .catch(() => setUser(null)).finally(() => setAuthChecked(true));
     
     // Load system info
     const loadSystemInfo = async () => {
@@ -153,7 +159,7 @@ function App() {
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
   }, []);
   
-  if (loading) {
+  if (loading || !authChecked) {
     return (
       <div className="app-loading">
         <div className="loading-content">
@@ -170,9 +176,10 @@ function App() {
     const authState = new URLSearchParams(window.location.search);
     // URL state controls presentation only; the component confirms the
     // server-side HttpOnly pending session before rendering a checkpoint.
+    if (pendingSignup?.pending) return pendingSignup.signupRequired ? <CinematicLogin onLogin={handleLogin} pendingSignup /> : <CinematicLogin onLogin={handleLogin}><EnrollmentFlow requestedMode="enrollment" embedded /></CinematicLogin>;
     if (authState.get('device_approval_required') === '1') return <EnrollmentFlow requestedMode="device" />;
     if (authState.get('terms_update') === '1') return <EnrollmentFlow requestedMode="recertification" />;
-    if (authState.get('identity_pending') === '1') return <EnrollmentFlow requestedMode={authState.get('terms_update') === '1' ? 'recertification' : 'enrollment'} />;
+    if (authState.get('identity_pending') === '1') return <CinematicLogin onLogin={handleLogin}><EnrollmentFlow requestedMode="enrollment" embedded /></CinematicLogin>;
     return <CinematicLogin onLogin={handleLogin} />;
   }
   
@@ -184,7 +191,7 @@ function App() {
         <main className="main-content">
           <Routes>
             <Route path="/" element={<Dashboard systemInfo={systemInfo} user={user} />} />
-            <Route path="/vault" element={<VaultBrowser user={user} />} />
+            <Route path="/vault/*" element={<VaultBrowser user={user} />} />
             <Route path="/capsules" element={<Capsules user={user} />} />
             <Route path="/settings" element={<Settings systemInfo={systemInfo} user={user} />} />
             <Route path="/blockchain" element={<Navigate to="/vault" replace />} />

@@ -6,3 +6,8 @@
 .lifecycle-document-list { padding-left: 1.2rem; }.lifecycle-document-list li { margin: .55rem 0; }.lifecycle-card a { color: #9cc7ff; }.lifecycle-link { display: inline-block; margin-top: 1rem; }
 .lifecycle-card label { display: block; margin-top: 1rem; font-weight: 700; }.lifecycle-card input { width: 100%; margin-top: .4rem; padding: .75rem; border: 1px solid #536074; background: #060a11; color: #fff; }
 .lifecycle-card pre, .lifecycle-card code { display: block; overflow-wrap: anywhere; padding: 1rem; background: #060a11; border: 1px solid #283246; color: #e7eefc; }.lifecycle-note { color: #abb6c9 !important; font-size: .9rem; }.transfer-option { margin-top: 1.25rem; }
+
+/* First-time setup stays inside the existing cinematic signup surface. */
+.lifecycle-embedded .lifecycle-card { width: 100%; padding: 0; border: 0; background: transparent; box-shadow: none; }
+.lifecycle-embedded .lifecycle-card button { background: linear-gradient(110deg, #f56b26, #ee9510); border-radius: 9px; }
+.lifecycle-embedded .lifecycle-card pre { white-space: pre-wrap; max-width: 100%; }
