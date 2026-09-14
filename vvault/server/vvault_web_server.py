@@ -1606,11 +1606,36 @@ def _get_current_user_email() -> Optional[str]:
     return current_user.get('email')
 
 
+def _legacy_chatty_service_owner() -> Optional[Dict[str, Any]]:
+    expected_key = os.environ.get("VVAULT_SERVICE_TOKEN")
+    provided_key = request.headers.get("X-Chatty-Key") or request.headers.get("X-Service-Token")
+    chatty_email = request.headers.get("X-Chatty-User")
+    if not expected_key or provided_key != expected_key or not chatty_email:
+        return None
+    user = db_get_user(chatty_email)
+    user_id = str((user or {}).get("id") or "").strip()
+    if not _is_uuid(user_id):
+        return None
+    return {
+        "id": user_id,
+        "email": user.get("email") or chatty_email,
+        "auth_mode": "legacy_chatty_service",
+        "relying_party_id": "chatty",
+    }
+
+
 def _get_authenticated_user_id() -> Optional[str]:
     current_user = getattr(request, 'current_user', None) or {}
     current_user_id = current_user.get('id') or current_user.get('user_id')
     if _is_uuid(current_user_id):
         return current_user_id.strip()
+    if (
+        current_user.get("auth_mode") == "legacy_chatty_service"
+        and current_user.get("relying_party_id") == "chatty"
+    ):
+        legacy_user = db_get_user(current_user.get("email") or "")
+        legacy_user_id = str((legacy_user or {}).get("id") or "").strip()
+        return legacy_user_id if _is_uuid(legacy_user_id) else None
     return None
 
 
@@ -3246,6 +3271,11 @@ def deny_untrusted_data_route_access():
         return None
     if path in {'/api/vault/health', '/api/chatty/health'}:
         return None
+    legacy_owner = _legacy_chatty_service_owner()
+    if legacy_owner:
+        request.current_user = legacy_owner
+        request.current_token = None
+        return None
     session, token = get_current_user()
     if not session:
         return jsonify({"success": False, "error": "Active trusted-device session required"}), 401
@@ -3291,13 +3321,10 @@ def require_chatty_auth(f):
         provided_key = request.headers.get("X-Chatty-Key") or request.headers.get("X-Service-Token")
 
         if expected_key and provided_key == expected_key:
-            chatty_email = request.headers.get("X-Chatty-User")
-            if not chatty_email:
-                return jsonify({"success": False, "error": "X-Chatty-User header required with API key auth"}), 400
-            chatty_user_id = request.headers.get("X-Chatty-User-Id")
-            current_user = {"email": chatty_email}
-            if _is_uuid(chatty_user_id):
-                current_user["id"] = chatty_user_id.strip()
+            current_user = _legacy_chatty_service_owner()
+            if not current_user:
+                return jsonify({"success": False, "error": "Canonical VVAULT owner binding is required"}), 409
+            chatty_email = current_user["email"]
             log_auth_decision(
                 action="access_granted",
                 user_id=chatty_email,

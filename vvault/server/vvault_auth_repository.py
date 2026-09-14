@@ -103,6 +103,11 @@ class VVaultAuthRepository:
                            last_login_at, created_at, updated_at
                     FROM users
                     WHERE email = %s
+                    ORDER BY
+                        CASE account_state WHEN 'ACTIVE' THEN 0 ELSE 1 END,
+                        last_login_at DESC NULLS LAST,
+                        created_at ASC
+                    LIMIT 1
                     """,
                     (email.strip().lower(),),
                 )
