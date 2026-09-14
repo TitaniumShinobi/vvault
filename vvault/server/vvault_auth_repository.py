@@ -407,6 +407,39 @@ class VVaultAuthRepository:
                     raise ValueError("verified contact owner is ambiguous")
                 return rows[0] if rows else None
 
+    def begin_verified_email_recovery(self, *, email: str, expected_owner_id: str) -> dict[str, Any] | None:
+        """Reset lost device factors only after a consumed, server-bound email proof.
+
+        This preserves the canonical owner and every owner-bound Vault record.
+        It deliberately revokes existing sessions, devices, passkeys, and
+        recovery codes before the caller starts a fresh pending enrollment.
+        """
+        email = vvault_auth_crypto.normalize_email(email)
+        owner = str(UUID(str(expected_owner_id)))
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (_identity_lock_key('recovery', email),))
+                cur.execute(
+                    """SELECT users.id, users.name, users.email, users.role, users.account_state
+                         FROM managed_emails m JOIN external_identities i ON i.id=m.identity_id AND i.user_id=m.user_id
+                         JOIN users ON users.id=m.user_id
+                        WHERE m.normalized_email=%s AND m.revoked_at IS NULL AND m.verified_at IS NOT NULL
+                          AND i.revoked_at IS NULL AND i.verified_at IS NOT NULL
+                          AND users.id=%s AND users.account_state='ACTIVE' FOR UPDATE OF users, m, i""",
+                    (email, owner),
+                )
+                user = _row_to_dict(cur.fetchone())
+                if not user:
+                    conn.rollback(); return None
+                cur.execute("UPDATE sessions SET revoked_at=now() WHERE user_id=%s AND revoked_at IS NULL", (owner,))
+                cur.execute("UPDATE enrollment_devices SET status='REVOKED', revoked_at=now() WHERE user_id=%s AND revoked_at IS NULL", (owner,))
+                cur.execute("UPDATE enrollment_webauthn_credentials SET revoked_at=now() WHERE user_id=%s AND revoked_at IS NULL", (owner,))
+                cur.execute("UPDATE enrollment_recovery_codes SET used_at=now() WHERE user_id=%s AND used_at IS NULL", (owner,))
+                cur.execute("UPDATE users SET account_state='PENDING_ENROLLMENT', updated_at=now() WHERE id=%s RETURNING id, name, email, role, account_state", (owner,))
+                user = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return user
+
     def link_verified_email_identity(self, *, email: str, expected_owner_id: str) -> dict[str, Any]:
         """Called only after atomic successful OTP consumption; preserve ownership."""
         email = vvault_auth_crypto.normalize_email(email)
@@ -884,10 +917,12 @@ class VVaultAuthRepository:
         initiating_session_id: str | None = None,
     ) -> None:
         email = vvault_auth_crypto.normalize_email(normalized_email)
-        if purpose not in {"signin", "link"}:
+        # Recovery is a distinct, verified-email ceremony.  It never creates
+        # an owner and is consumed only by the recovery path in the web layer.
+        if purpose not in {"signin", "link", "recovery"}:
             raise ValueError("invalid magic-link purpose")
         linked = bool(initiating_user_id and initiating_session_id)
-        if (purpose == "signin") == linked:
+        if (purpose in {"signin", "recovery"}) == linked:
             raise ValueError("magic-link actor context is invalid")
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -1393,7 +1428,7 @@ class VVaultAuthRepository:
                 )
                 if not cur.fetchone():
                     conn.rollback(); return False
-                cur.execute("SELECT 1 FROM enrollment_recovery_codes WHERE user_id=%s LIMIT 1 FOR UPDATE", (user_id,))
+                cur.execute("SELECT 1 FROM enrollment_recovery_codes WHERE user_id=%s AND used_at IS NULL LIMIT 1 FOR UPDATE", (user_id,))
                 if cur.fetchone():
                     conn.rollback(); return False
                 for digest in digests:

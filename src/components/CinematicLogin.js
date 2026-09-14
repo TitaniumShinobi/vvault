@@ -1,506 +1,120 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import './CinematicLogin.css';
 import wreckSymbol from '../../assets/WRECK_INVERTED.svg';
 
-const CinematicLogin = ({ onLogin }) => {
-  const [isSignInMode, setIsSignInMode] = useState(true);
-  const [signupStep, setSignupStep] = useState(1);
-  const [isTrustedDevice, setIsTrustedDevice] = useState(false);
-  const [formData, setFormData] = useState({
-    name: '',
-    email: '',
-    password: '',
-    confirmPassword: '',
-    rememberMe: false,
-    agreeToTerms: false
-  });
+const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
+  const recoveryMode = new URLSearchParams(window.location.search).get('account_recovery') === '1';
+  const [isSignInMode, setIsSignInMode] = useState(!pendingSignup && !children);
+  const signupStep = 1;
+  const [signupDocuments, setSignupDocuments] = useState([]);
+  const [chattyAccepted, setChattyAccepted] = useState(false);
+  const [vvaultAccepted, setVvaultAccepted] = useState(false);
+  useEffect(() => {
+    if (isSignInMode || children) return;
+    fetch('/api/auth/paired-signup/documents', {credentials:'same-origin'})
+      .then(async response => { if (!response.ok) throw new Error('Current signup documents could not load.'); return response.json(); })
+      .then(value => { setSignupDocuments(value.documents); setChattyAccepted(false); setVvaultAccepted(false); })
+      .catch(err => setError(err.message));
+  }, [isSignInMode, children]);
+  const [email, setEmail] = useState('');
+  const [emailCode, setEmailCode] = useState('');
+  const [codeRequested, setCodeRequested] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const [cloudflareVerified, setCloudflareVerified] = useState(false);
-
-  const [turnstileToken, setTurnstileToken] = useState('');
-  const [turnstileWidgetId, setTurnstileWidgetId] = useState('');
-  const [turnstileError, setTurnstileError] = useState('');
-  const turnstileSiteKey = '0x4AAAAAAB9IaDdnFsA9yISn';
-
-  const [glyphColorHex, setGlyphColorHex] = useState('#722F37');
-  const [glyphCenterImage, setGlyphCenterImage] = useState(null);
-  const [glyphPreviewB64, setGlyphPreviewB64] = useState(null);
-  const [glyphLoading, setGlyphLoading] = useState(false);
-  const glyphFileRef = useRef(null);
-  const previewDebounceRef = useRef(null);
-
-  useEffect(() => {
-    const loadTurnstile = () => {
-      if (window.turnstile) return;
-      if (!turnstileSiteKey) {
-        setTurnstileError('Human verification is temporarily unavailable. Please contact support.');
-        return;
-      }
-      const script = document.createElement('script');
-      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
-      script.async = true;
-      script.defer = true;
-      document.head.appendChild(script);
-    };
-    loadTurnstile();
-  }, [turnstileSiteKey]);
-
-  useEffect(() => {
-    if (!isSignInMode && signupStep === 2 && window.turnstile && !turnstileWidgetId) {
-      if (!turnstileSiteKey) return;
-      const el = document.getElementById('turnstile-widget');
-      if (!el) return;
-      const widgetId = window.turnstile.render('#turnstile-widget', {
-        sitekey: turnstileSiteKey,
-        callback: (token) => {
-          setTurnstileToken(token);
-          setTurnstileError('');
-        },
-        'error-callback': () => {
-          setTurnstileError('Human verification failed. Please try again.');
-          setTurnstileToken('');
-        },
-        'expired-callback': () => {
-          setTurnstileError('Verification expired. Please verify again.');
-          setTurnstileToken('');
-        },
-        theme: 'auto',
-        size: 'normal'
-      });
-      setTurnstileWidgetId(widgetId);
-    }
-  }, [isSignInMode, signupStep, turnstileWidgetId, turnstileSiteKey]);
-
-  useEffect(() => {
-    if ((isSignInMode || signupStep !== 2) && turnstileWidgetId && window.turnstile) {
-      window.turnstile.remove(turnstileWidgetId);
-      setTurnstileWidgetId('');
-      setTurnstileToken('');
-      setTurnstileError('');
-    }
-  }, [isSignInMode, signupStep, turnstileWidgetId]);
-
-  useEffect(() => {
-    const savedDevice = localStorage.getItem('vvault_trusted_device');
-    if (savedDevice) {
-      setIsTrustedDevice(true);
-    } else {
-      const isTrusted = Math.random() > 0.5;
-      setIsTrustedDevice(isTrusted);
-      if (isTrusted) localStorage.setItem('vvault_trusted_device', 'true');
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!isSignInMode && signupStep === 2 && formData.name) {
-      if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
-      previewDebounceRef.current = setTimeout(() => {
-        fetchGlyphPreview();
-      }, 600);
-    }
-    return () => {
-      if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
-    };
-  }, [glyphColorHex, glyphCenterImage, signupStep, isSignInMode]);
-
-  useEffect(() => {
-    if (!isSignInMode && signupStep === 2 && formData.name && !glyphPreviewB64) {
-      fetchGlyphPreview();
-    }
-  }, [signupStep]);
-
-  const fetchGlyphPreview = async () => {
-    setGlyphLoading(true);
-    try {
-      const fd = new FormData();
-      fd.append('name', formData.name || 'preview');
-      fd.append('color_hex', glyphColorHex);
-      if (glyphCenterImage) fd.append('center_image', glyphCenterImage);
-      const resp = await fetch('/api/auth/glyph-preview', { method: 'POST', body: fd });
-      const result = await resp.json();
-      if (result.success && result.glyph_base64) {
-        setGlyphPreviewB64(result.glyph_base64);
-      }
-    } catch (err) {
-      console.error('Glyph preview failed:', err);
-    } finally {
-      setGlyphLoading(false);
-    }
-  };
-
-  const handleInputChange = (e) => {
-    const { name, value, type, checked } = e.target;
-    setFormData(prev => ({
-      ...prev,
-      [name]: type === 'checkbox' ? checked : value
-    }));
-    setError('');
-  };
-
-  const handleCloudflareVerification = () => {
-    setCloudflareVerified(true);
-  };
-
-  const validateStep1 = () => {
-    if (!formData.name) {
-      setError('Name is required.');
-      return false;
-    }
-    if (!formData.email) {
-      setError('Email is required.');
-      return false;
-    }
-    if (!formData.password) {
-      setError('Password is required.');
-      return false;
-    }
-    if (formData.password.length < 8) {
-      setError('Password must be at least 8 characters.');
-      return false;
-    }
-    if (formData.password !== formData.confirmPassword) {
-      setError('Passwords do not match.');
-      return false;
-    }
-    return true;
-  };
-
-  const validateForm = () => {
-    if (!formData.email || !formData.password) {
-      setError('Email and password are required.');
-      return false;
-    }
-    if (!isSignInMode) {
-      if (!formData.name) {
-        setError('Name is required.');
-        return false;
-      }
-      if (formData.password !== formData.confirmPassword) {
-        setError('Passwords do not match.');
-        return false;
-      }
-      if (!formData.agreeToTerms) {
-        setError('You must agree to the Terms of Service and Privacy Notice.');
-        return false;
-      }
-    }
-    return true;
-  };
-
-  const handleNextStep = () => {
-    if (validateStep1()) {
-      setError('');
-      setSignupStep(2);
-    }
-  };
-
-  const handleBackStep = () => {
-    setError('');
-    setSignupStep(1);
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-
-    if (!validateForm()) return;
-
-    if (!isSignInMode && !turnstileToken) {
-      setError('Please complete human verification.');
+  const [status, setStatus] = useState('');
+  const [magicAvailable, setMagicAvailable] = useState(null);
+  const switchToSignup = () => { setIsSignInMode(false); setError(''); setStatus(''); };
+  const switchToSignin = () => { setIsSignInMode(true); setError(''); setStatus(''); };
+  const handleOAuth = (name) => {
+    const provider = name.toLowerCase();
+    if (!['google', 'github'].includes(provider)) {
+      setError(`${name} sign-in is not configured. Choose Google or email.`);
       return;
     }
-
-    setIsLoading(true);
-    setError('');
-
-    try {
-      if (isSignInMode) {
-        const response = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: formData.email,
-            password: formData.password,
-          })
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'Login failed');
-        localStorage.setItem('vvault_user', JSON.stringify(result.user));
-        localStorage.setItem('vvault_token', result.token);
-        onLogin(result.user);
-      } else {
-        const fd = new FormData();
-        fd.append('name', formData.name);
-        fd.append('email', formData.email);
-        fd.append('password', formData.password);
-        fd.append('confirmPassword', formData.confirmPassword);
-        fd.append('turnstileToken', turnstileToken);
-        fd.append('glyphColorHex', glyphColorHex);
-        if (glyphCenterImage) fd.append('glyphCenterImage', glyphCenterImage);
-
-        const response = await fetch('/api/auth/register', {
-          method: 'POST',
-          body: fd
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'Registration failed');
-        localStorage.setItem('vvault_user', JSON.stringify(result.user));
-        localStorage.setItem('vvault_token', result.token);
-        onLogin(result.user);
+    if (!isSignInMode) {
+      if (!chattyAccepted || !vvaultAccepted || signupDocuments.length !== 6) {
+        setError('Review and accept both products’ current documents to create your accounts.'); return;
       }
-    } catch (err) {
-      setError(err.message || 'Authentication failed. Please try again.');
-    } finally {
-      setIsLoading(false);
+      let policy = document.querySelector('meta[name="referrer"]'); if (!policy) { policy = document.createElement('meta'); policy.name='referrer'; document.head.appendChild(policy); } policy.content='strict-origin';
+      const form = document.createElement('form'); form.method = 'POST'; form.action = `/api/auth/oauth/${provider}`;
+      for (const [name,value] of Object.entries({intent:'SIGN_UP',chattyAccepted:'true',vvaultAccepted:'true',documents:JSON.stringify(signupDocuments)})) {
+        const input=document.createElement('input'); input.type='hidden'; input.name=name; input.value=value; form.appendChild(input);
+      }
+      document.body.appendChild(form); form.submit(); return;
     }
+    window.location.assign(`/api/auth/oauth/${provider}`);
   };
-
-  const handleOAuth = (provider) => {
-    if (provider === 'Google') {
-      window.location.href = '/api/auth/google';
-    } else {
-      console.log(`${provider} OAuth not yet implemented`);
+  useEffect(() => {
+    fetch('/api/auth/email-codes/health', { credentials: 'same-origin' })
+      .then(async response => setMagicAvailable(response.ok && (await response.json()).available === true))
+      .catch(() => setMagicAvailable(false));
+    if(new URLSearchParams(window.location.search).get('email_code_requested')==='1') {
+      fetch('/api/auth/email-codes/status',{credentials:'same-origin'}).then(async response=>{
+        if(!response.ok) throw new Error('Request a new verification code.');
+        const context=await response.json();
+        setCodeRequested(context.codeRequested===true);setEmail(context.email || '');
+        setIsSignInMode(context.intent!=='SIGN_UP');
+        setStatus('Enter the code sent to your email. Your signup acceptance is saved with this request.');
+      }).catch(err=>setError(err.message));
     }
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const token = params.get('magic_link');
+    if (!token) return;
+    window.history.replaceState({}, document.title, window.location.pathname + window.location.search);
+    setIsLoading(true);
+    fetch('/api/auth/email-magic-links/consume', {
+      method: 'POST', credentials: 'same-origin', headers: {'Content-Type':'application/json'}, body: JSON.stringify({token}),
+    }).then(async response => {
+      if (!response.ok) throw new Error('That sign-in link is invalid or expired. Request a new one.');
+      if (response.redirected) {
+        const destination = new URL(response.url);
+        if (destination.origin !== window.location.origin) throw new Error('Unexpected sign-in destination.');
+        window.location.assign(destination.pathname + destination.search);
+      } else { window.location.assign('/'); }
+    }).catch(err => setError(err.message)).finally(() => setIsLoading(false));
+  }, []);
+  const resumeSignup = async () => {
+    setIsLoading(true); setError('');
+    try {
+      const response=await fetch('/api/auth/paired-signup/resume',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({intent:'SIGN_UP',chattyAccepted,vvaultAccepted,documents:signupDocuments})});
+      const result=await response.json();
+      if (!response.ok) throw new Error(result.error || 'Signup could not continue.');
+      window.location.assign('/?identity_pending=1');
+    } catch(err) { setError(err.message); } finally { setIsLoading(false); }
   };
-
-  const switchToSignup = () => {
-    setIsSignInMode(false);
-    setSignupStep(1);
-    setError('');
-    setGlyphPreviewB64(null);
-    setGlyphColorHex('#722F37');
-    setGlyphCenterImage(null);
+  const requestMagicLink = async event => {
+    event.preventDefault(); setIsLoading(true); setError(''); setStatus('');
+    try {
+      // Account recovery is a one-time link ceremony.  It must use the
+      // recovery-aware link endpoint, rather than the sign-in/sign-up code
+      // endpoint, which intentionally does not accept recovery intent.
+      const endpoint = recoveryMode
+        ? '/api/auth/email-magic-links'
+        : (codeRequested ? '/api/auth/email-codes/resend' : '/api/auth/email-codes');
+      const payload = recoveryMode
+        ? {email, intent:'ACCOUNT_RECOVERY'}
+        : {email, intent:isSignInMode?'SIGN_IN':'SIGN_UP',chattyAccepted,vvaultAccepted,documents:signupDocuments};
+      const response=await fetch(endpoint,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const result=await response.json();
+      if (result.disposition === 'SIGNUP_REQUIRED') { setIsSignInMode(false); setStatus('Create your account first. Review both products’ documents below.'); return; }
+      if (!response.ok) throw new Error(result.error || (recoveryMode ? 'A recovery link could not be sent.' : 'A verification code could not be sent.'));
+      if (recoveryMode) {
+        setStatus(result.message || 'If this verified address can receive recovery mail, a secure link is on its way.');
+        return;
+      }
+      setCodeRequested(true); setEmailCode(''); setStatus(result.message);
+    } catch(err) { setError(err.message); } finally { setIsLoading(false); }
   };
-
-  const switchToSignin = () => {
-    setIsSignInMode(true);
-    setSignupStep(1);
-    setError('');
+  const verifyEmailCode = async () => {
+    setIsLoading(true); setError('');
+    try {
+      const response=await fetch('/api/auth/email-codes/verify',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:emailCode})});
+      if (!response.ok) { const result=await response.json(); throw new Error(result.error || 'Request a new verification code.'); }
+      const destination=new URL(response.url);
+      if (destination.origin!==window.location.origin) throw new Error('Unexpected sign-in destination.');
+      window.location.assign(destination.pathname+destination.search);
+    } catch(err) { setError(err.message); setEmailCode(''); } finally { setIsLoading(false); }
   };
-
-  const backgroundImage = isSignInMode ? 'vvault_sunrise.png' : 'vvault_sunset.png';
-
-  const renderSignupStep1 = () => (
-    <>
-      <div className="form-group">
-        <label htmlFor="name" className="form-label">Name</label>
-        <input
-          type="text"
-          id="name"
-          name="name"
-          value={formData.name}
-          onChange={handleInputChange}
-          className="form-input"
-          placeholder="Your name"
-          disabled={isLoading}
-        />
-      </div>
-      <div className="form-group">
-        <label htmlFor="email" className="form-label">Email Address</label>
-        <input
-          type="email"
-          id="email"
-          name="email"
-          value={formData.email}
-          onChange={handleInputChange}
-          className="form-input"
-          placeholder="Enter your email"
-          disabled={isLoading}
-        />
-      </div>
-      <div className="form-group">
-        <label htmlFor="password" className="form-label">Password</label>
-        <input
-          type="password"
-          id="password"
-          name="password"
-          value={formData.password}
-          onChange={handleInputChange}
-          className="form-input"
-          placeholder="At least 8 characters"
-          disabled={isLoading}
-        />
-      </div>
-      <div className="form-group">
-        <label htmlFor="confirmPassword" className="form-label">Confirm Password</label>
-        <input
-          type="password"
-          id="confirmPassword"
-          name="confirmPassword"
-          value={formData.confirmPassword}
-          onChange={handleInputChange}
-          className="form-input"
-          placeholder="Confirm your password"
-          disabled={isLoading}
-        />
-      </div>
-      {error && <div className="error-message">{error}</div>}
-      <button
-        type="button"
-        className="btn-primary"
-        onClick={handleNextStep}
-        disabled={isLoading}
-        style={{ width: '100%', textAlign: 'center' }}
-      >
-        Next: Create Your Glyph
-      </button>
-    </>
-  );
-
-  const renderSignupStep2 = () => (
-    <>
-      <div className="glyph-step-header">
-        <p className="glyph-step-desc">
-          Your Codex Glyph is your unique visual identity in VVAULT. Choose a color and optionally upload a center image.
-        </p>
-      </div>
-
-      <div className="glyph-preview-container">
-        {glyphLoading ? (
-          <div className="glyph-preview-loading">
-            <div className="loading-spinner" />
-            <span style={{ color: 'rgba(255,255,255,0.7)', marginTop: '12px', fontSize: '0.85rem' }}>Generating glyph...</span>
-          </div>
-        ) : glyphPreviewB64 ? (
-          <img
-            src={`data:image/png;base64,${glyphPreviewB64}`}
-            alt="Your Glyph Preview"
-            className="glyph-preview-image"
-          />
-        ) : (
-          <div className="glyph-preview-placeholder">
-            <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.9rem' }}>Glyph preview will appear here</span>
-          </div>
-        )}
-      </div>
-
-      <div className="glyph-controls">
-        <div className="form-group">
-          <label className="form-label">Glyph Color</label>
-          <div className="glyph-color-row">
-            <input
-              type="color"
-              value={glyphColorHex}
-              onChange={(e) => setGlyphColorHex(e.target.value)}
-              className="glyph-color-picker"
-              disabled={isLoading}
-            />
-            <input
-              type="text"
-              value={glyphColorHex}
-              onChange={(e) => {
-                if (/^#[0-9a-fA-F]{0,6}$/.test(e.target.value)) setGlyphColorHex(e.target.value);
-              }}
-              className="form-input glyph-hex-input"
-              placeholder="#722F37"
-              disabled={isLoading}
-            />
-            <button
-              type="button"
-              className="glyph-refresh-btn"
-              onClick={fetchGlyphPreview}
-              disabled={glyphLoading || isLoading}
-              title="Refresh preview"
-            >
-              Refresh
-            </button>
-          </div>
-        </div>
-
-        <div className="glyph-color-presets">
-          {['#722F37', '#CC0000', '#1a1aff', '#6B21A8', '#059669', '#D97706', '#0891B2', '#FFFFFF'].map(c => (
-            <button
-              key={c}
-              type="button"
-              className={`glyph-preset-swatch ${glyphColorHex === c ? 'active' : ''}`}
-              style={{ backgroundColor: c, border: c === '#FFFFFF' ? '2px solid #666' : '2px solid transparent' }}
-              onClick={() => setGlyphColorHex(c)}
-              disabled={isLoading}
-            />
-          ))}
-        </div>
-
-        <div className="form-group" style={{ marginTop: '16px' }}>
-          <label className="form-label">Center Image (optional)</label>
-          <div className="glyph-file-upload">
-            <button
-              type="button"
-              className="glyph-upload-btn"
-              onClick={() => glyphFileRef.current?.click()}
-              disabled={isLoading}
-            >
-              {glyphCenterImage ? glyphCenterImage.name : 'Choose Image'}
-            </button>
-            <input
-              ref={glyphFileRef}
-              type="file"
-              accept="image/*"
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                if (e.target.files?.[0]) setGlyphCenterImage(e.target.files[0]);
-              }}
-            />
-            {glyphCenterImage && (
-              <button
-                type="button"
-                className="glyph-clear-btn"
-                onClick={() => {
-                  setGlyphCenterImage(null);
-                  if (glyphFileRef.current) glyphFileRef.current.value = '';
-                }}
-              >
-                Clear
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="terms-checkbox">
-        <input
-          type="checkbox"
-          name="agreeToTerms"
-          checked={formData.agreeToTerms}
-          onChange={handleInputChange}
-          disabled={isLoading}
-        />
-        <label htmlFor="agreeToTerms">
-          By continuing, I confirm I understand and agree to the{' '}
-          <a href="/vvault-terms.html" target="_blank" className="terms-link">V²AULT Terms of Service</a> and the{' '}
-          <a href="/vvault-privacy.html" target="_blank" className="terms-link">V²AULT Privacy Notice</a>.{' '}
-          If I am in the EEA or UK, I have read and agree to the{' '}
-          <a href="/vvault-eeccd.html" target="_blank" className="terms-link">European Electronic Communications Code Disclosure</a>.
-        </label>
-      </div>
-
-      <div className="turnstile-verification">
-        <div id="turnstile-widget" className="flex justify-center"></div>
-        {turnstileError && <div className="turnstile-error">{turnstileError}</div>}
-      </div>
-
-      {error && <div className="error-message">{error}</div>}
-
-      <div className="glyph-step-buttons">
-        <button
-          type="button"
-          className="glyph-back-btn"
-          onClick={handleBackStep}
-          disabled={isLoading}
-        >
-          Back
-        </button>
-        <button
-          type="submit"
-          className="btn-primary"
-          disabled={isLoading}
-          style={{ flex: 1 }}
-        >
-          {isLoading ? 'Creating Account...' : 'Create Account'}
-        </button>
-      </div>
-    </>
-  );
-
   return (
     <div
       className={`cinematic-login-container ${isSignInMode ? 'vvault-sunrise-bg' : 'vvault-sunset-bg'}`}
@@ -530,7 +144,7 @@ const CinematicLogin = ({ onLogin }) => {
             </p>
             <p className="welcome-description">
               {isSignInMode
-                ? "Click 'Remember Me' to skip login on this device next time."
+                ? 'Sign in to continue to your personal VVAULT.'
                 : ''
               }
             </p>
@@ -574,72 +188,34 @@ const CinematicLogin = ({ onLogin }) => {
               {isSignInMode ? 'Sign in' : signupStep === 1 ? 'Create Account' : 'Your Codex Glyph'}
             </h2>
 
-            {!isSignInMode && (
-              <div className="signup-step-indicator">
-                <div className={`step-dot ${signupStep >= 1 ? 'active' : ''}`}>1</div>
-                <div className="step-line" />
-                <div className={`step-dot ${signupStep >= 2 ? 'active' : ''}`}>2</div>
+            {children || <form onSubmit={requestMagicLink}>
+              {!pendingSignup && <><div className="form-group">
+                <label htmlFor="email" className="form-label">Email Address</label>
+                <input type="email" id="email" name="email" autoComplete="email"
+                  value={email} onChange={(event) => setEmail(event.target.value)}
+                  className="form-input" placeholder="Enter your email" required disabled={isLoading} />
               </div>
-            )}
-
-            <form onSubmit={handleSubmit}>
-              {isSignInMode ? (
-                <>
-                  <div className="form-group">
-                    <label htmlFor="email" className="form-label">Email Address</label>
-                    <input
-                      type="email"
-                      id="email"
-                      name="email"
-                      value={formData.email}
-                      onChange={handleInputChange}
-                      className="form-input"
-                      placeholder="Enter your email"
-                      disabled={isLoading}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label htmlFor="password" className="form-label">Password</label>
-                    <input
-                      type="password"
-                      id="password"
-                      name="password"
-                      value={formData.password}
-                      onChange={handleInputChange}
-                      className="form-input"
-                      placeholder="Enter your password"
-                      disabled={isLoading}
-                    />
-                  </div>
-                  <div className="form-checkbox">
-                    <input
-                      type="checkbox"
-                      name="rememberMe"
-                      checked={formData.rememberMe}
-                      onChange={handleInputChange}
-                      disabled={isLoading}
-                    />
-                    <label htmlFor="rememberMe">Remember Me</label>
-                  </div>
-                  <button
-                    type="submit"
-                    className="btn-primary"
-                    disabled={isLoading}
-                  >
-                    {isLoading ? 'Processing...' : 'Sign in now'}
-                  </button>
-                  <div className="password-link">
-                    <a href="#" className="form-link">Lost your password?</a>
-                  </div>
-                  {error && <div className="error-message">{error}</div>}
-                </>
-              ) : signupStep === 1 ? (
-                renderSignupStep1()
-              ) : (
-                renderSignupStep2()
-              )}
-
-              <div className="oauth-section">
+              <button type="submit" className="btn-primary" disabled={isLoading || magicAvailable === false}>
+                {isLoading ? 'Sending…' : recoveryMode ? 'Email me a secure recovery link' : codeRequested ? 'Send a new code' : 'Email me a verification code'}
+              </button>
+              {codeRequested && <div className="form-group"><label htmlFor="email-code" className="form-label">Verification code</label><input id="email-code" className="form-input" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={emailCode} onChange={event=>setEmailCode(event.target.value)} /><p>Each code allows one attempt. If incorrect, request a new code.</p><button type="button" className="btn-primary" disabled={isLoading || emailCode.length!==8} onClick={verifyEmailCode}>Verify code</button></div>}
+              <p className="welcome-description">{isSignInMode ? 'Use a verification code, or continue with your provider below.' : 'Verify your email, then complete account setup.'}</p>
+              {magicAvailable === false && <p role="status">Email sign-in is not configured yet. Google remains available.</p>}
+              </>}
+              {status && <p role="status">{status}</p>}
+              {error && <div className="error-message" role="alert">{error}</div>}
+              {!isSignInMode && !codeRequested && <div className="signup-consents">
+                {['chatty','vvault'].map(product => <label key={product} style={{display:'block',margin:'12px 0',lineHeight:1.5}}>
+                  <input type="checkbox" checked={product === 'chatty' ? chattyAccepted : vvaultAccepted}
+                    onChange={event => product === 'chatty' ? setChattyAccepted(event.target.checked) : setVvaultAccepted(event.target.checked)} />{' '}
+                  I agree to {product === 'chatty' ? 'Chatty' : 'VVAULT'}’s current{' '}
+                  {signupDocuments.filter(doc => doc.key.startsWith(product + ':')).map((doc,index) => <React.Fragment key={doc.key}>
+                    {index > 0 && ', '}<a href={doc.url} target="_blank" rel="noopener noreferrer" style={{color:'#b8dcff',textDecoration:'underline'}}>{doc.label}</a>
+                  </React.Fragment>)}.
+                </label>)}
+              </div>}
+              {pendingSignup && <><p>Your identity is verified. Accept both products’ documents to finish creating your accounts.</p><button type="button" className="btn-primary" disabled={isLoading || !chattyAccepted || !vvaultAccepted || signupDocuments.length !== 6} onClick={resumeSignup}>Create accounts and continue</button></>}
+              {!pendingSignup && <><div className="oauth-section">
                 <div className="oauth-buttons">
                   <button type="button" onClick={() => handleOAuth('Google')} className="btn-oauth" disabled={isLoading}>
                     <svg className="oauth-icon" viewBox="0 0 24 24" width="20" height="20">
@@ -694,8 +270,8 @@ const CinematicLogin = ({ onLogin }) => {
                     </span>
                   </div>
                 )}
-              </div>
-            </form>
+              </div></>}
+            </form>}
           </div>
         </div>
       </div>
