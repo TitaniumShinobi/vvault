@@ -3,6 +3,7 @@ import './CinematicLogin.css';
 import wreckSymbol from '../../assets/WRECK_INVERTED.svg';
 
 const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
+  const recoveryMode = new URLSearchParams(window.location.search).get('account_recovery') === '1';
   const [isSignInMode, setIsSignInMode] = useState(!pendingSignup && !children);
   const signupStep = 1;
   const [signupDocuments, setSignupDocuments] = useState([]);
@@ -84,6 +85,12 @@ const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
   const requestMagicLink = async event => {
     event.preventDefault(); setIsLoading(true); setError(''); setStatus('');
     try {
+      if (recoveryMode) {
+        const response = await fetch('/api/auth/email-magic-links', {method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,intent:'ACCOUNT_RECOVERY'})});
+        if (!response.ok) throw new Error('Account recovery is temporarily unavailable. Try again later.');
+        setStatus('If this is the verified email for an active VVAULT, a one-time recovery link is on its way. Open it in this browser to enroll a new passkey and recovery codes.');
+        return;
+      }
       const response=await fetch(codeRequested?'/api/auth/email-codes/resend':'/api/auth/email-codes',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,intent:isSignInMode?'SIGN_IN':'SIGN_UP',chattyAccepted,vvaultAccepted,documents:signupDocuments})});
       const result=await response.json();
       if (result.disposition === 'SIGNUP_REQUIRED') { setIsSignInMode(false); setStatus('Create your account first. Review both products’ documents below.'); return; }
@@ -171,7 +178,7 @@ const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
         <div className="form-section">
           <div className="login-form-container">
             <h2 className="form-title">
-              {isSignInMode ? 'Sign in' : signupStep === 1 ? 'Create Account' : 'Your Codex Glyph'}
+              {recoveryMode ? 'Recover your account' : isSignInMode ? 'Sign in' : signupStep === 1 ? 'Create Account' : 'Your Codex Glyph'}
             </h2>
 
             {children || <form onSubmit={requestMagicLink}>
@@ -181,16 +188,16 @@ const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
                   value={email} onChange={(event) => setEmail(event.target.value)}
                   className="form-input" placeholder="Enter your email" required disabled={isLoading} />
               </div>
-              <button type="submit" className="btn-primary" disabled={isLoading || magicAvailable === false}>
-                {isLoading ? 'Sending…' : codeRequested ? 'Send a new code' : 'Email me a verification code'}
+              <button type="submit" className="btn-primary" disabled={isLoading || (!recoveryMode && magicAvailable === false)}>
+                {isLoading ? 'Sending…' : recoveryMode ? 'Email me a recovery link' : codeRequested ? 'Send a new code' : 'Email me a verification code'}
               </button>
-              {codeRequested && <div className="form-group"><label htmlFor="email-code" className="form-label">Verification code</label><input id="email-code" className="form-input" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={emailCode} onChange={event=>setEmailCode(event.target.value)} /><p>Each code allows one attempt. If incorrect, request a new code.</p><button type="button" className="btn-primary" disabled={isLoading || emailCode.length!==8} onClick={verifyEmailCode}>Verify code</button></div>}
-              <p className="welcome-description">{isSignInMode ? 'Use a verification code, or continue with your provider below.' : 'Verify your email, then complete account setup.'}</p>
-              {magicAvailable === false && <p role="status">Email sign-in is not configured yet. Google remains available.</p>}
+              {!recoveryMode && codeRequested && <div className="form-group"><label htmlFor="email-code" className="form-label">Verification code</label><input id="email-code" className="form-input" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={emailCode} onChange={event=>setEmailCode(event.target.value)} /><p>Each code allows one attempt. If incorrect, request a new code.</p><button type="button" className="btn-primary" disabled={isLoading || emailCode.length!==8} onClick={verifyEmailCode}>Verify code</button></div>}
+              <p className="welcome-description">{recoveryMode ? 'This resets lost device factors only. Your VVAULT data and account identity stay intact.' : isSignInMode ? 'Use a verification code, or continue with your provider below.' : 'Verify your email, then complete account setup.'}</p>
+              {!recoveryMode && magicAvailable === false && <p role="status">Email sign-in is not configured yet. Google remains available.</p>}
               </>}
               {status && <p role="status">{status}</p>}
               {error && <div className="error-message" role="alert">{error}</div>}
-              {!isSignInMode && !codeRequested && <div className="signup-consents">
+              {!recoveryMode && !isSignInMode && !codeRequested && <div className="signup-consents">
                 {['chatty','vvault'].map(product => <label key={product} style={{display:'block',margin:'12px 0',lineHeight:1.5}}>
                   <input type="checkbox" checked={product === 'chatty' ? chattyAccepted : vvaultAccepted}
                     onChange={event => product === 'chatty' ? setChattyAccepted(event.target.checked) : setVvaultAccepted(event.target.checked)} />{' '}
@@ -201,7 +208,7 @@ const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
                 </label>)}
               </div>}
               {pendingSignup && <><p>Your identity is verified. Accept both products’ documents to finish creating your accounts.</p><button type="button" className="btn-primary" disabled={isLoading || !chattyAccepted || !vvaultAccepted || signupDocuments.length !== 6} onClick={resumeSignup}>Create accounts and continue</button></>}
-              {!pendingSignup && <><div className="oauth-section">
+              {!pendingSignup && !recoveryMode && <><div className="oauth-section">
                 <div className="oauth-buttons">
                   <button type="button" onClick={() => handleOAuth('Google')} className="btn-oauth" disabled={isLoading}>
                     <svg className="oauth-icon" viewBox="0 0 24 24" width="20" height="20">
@@ -237,7 +244,7 @@ const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
               </div>
 
               <div className="form-links">
-                {isSignInMode ? (
+                {recoveryMode ? <div className="form-toggle"><a className="form-link" href="/">Return to sign in</a></div> : isSignInMode ? (
                   <div className="form-toggle">
                     <span className="form-toggle-text">
                       Don't have an account?{' '}
@@ -256,6 +263,7 @@ const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
                     </span>
                   </div>
                 )}
+                {!recoveryMode && isSignInMode && <div className="form-toggle"><a className="form-link" href="/?account_recovery=1">Can’t use your passkey or recovery code?</a></div>}
               </div></>}
             </form>}
           </div>

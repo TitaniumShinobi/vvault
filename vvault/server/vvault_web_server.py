@@ -10614,12 +10614,15 @@ def request_email_magic_link():
         return jsonify({"success": False, "error": "magic_link_delivery_unavailable"}), 503
     try:
         if not _rate_limit_key("auth"):
-            email = identity_crypto.normalize_email(str((request.get_json(silent=True) or {}).get("email") or ""))
+            body = request.get_json(silent=True) or {}
+            email = identity_crypto.normalize_email(str(body.get("email") or ""))
+            intent = str(body.get("intent") or "SIGN_IN").upper()
+            purpose = "recovery" if intent == "ACCOUNT_RECOVERY" else "signin"
             token = identity_crypto.opaque_token()
             frontend = _get_frontend_url()
             token_digest = identity_crypto.keyed_digest(token, _identity_hmac_key())
             AUTH_REPOSITORY.issue_magic_link_challenge(token_digest=token_digest, normalized_email=email,
-                purpose="signin", redirect_uri=frontend, expires_at=datetime.now(timezone.utc) + timedelta(minutes=15))
+                purpose=purpose, redirect_uri=frontend, expires_at=datetime.now(timezone.utc) + timedelta(minutes=15))
             if not _deliver_magic_link(email, f"{frontend}/#magic_link={token}"):
                 AUTH_REPOSITORY.revoke_magic_link_challenge(token_digest)
                 return jsonify({"success": False, "error": "magic_link_delivery_failed"}), 503
@@ -10642,9 +10645,18 @@ def consume_email_magic_link():
     try:
         token = str((request.get_json(silent=True) or {}).get("token") or "")
         challenge = AUTH_REPOSITORY.consume_magic_link_challenge(identity_crypto.keyed_digest(token, _identity_hmac_key()))
-        if not challenge or challenge.get("purpose") != "signin":
+        if not challenge or challenge.get("purpose") not in {"signin", "recovery"}:
             return response, 400
-        user, _created = AUTH_REPOSITORY.admit_verified_identity(provider="email", provider_subject=str(challenge["normalized_email"]), verified_email=str(challenge["normalized_email"]), name=None)
+        email = str(challenge["normalized_email"])
+        if challenge.get("purpose") == "recovery":
+            owner = AUTH_REPOSITORY.resolve_verified_email_owner(email)
+            if not owner:
+                return response, 400
+            user = AUTH_REPOSITORY.begin_verified_email_recovery(email=email, expected_owner_id=str(owner["id"]))
+            if not user:
+                return response, 400
+        else:
+            user, _created = AUTH_REPOSITORY.admit_verified_identity(provider="email", provider_subject=email, verified_email=email, name=None)
         return _start_enrollment_session(user, str(challenge.get("redirect_uri") or _get_frontend_url()))
     except Exception as exc:
         logger.warning("magic-link consume rejected: %s", type(exc).__name__)
