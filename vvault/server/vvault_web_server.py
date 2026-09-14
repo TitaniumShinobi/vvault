@@ -10628,6 +10628,9 @@ def request_email_magic_link():
                 return jsonify({"success": False, "error": "magic_link_delivery_failed"}), 503
     except Exception as exc:
         logger.warning("magic-link request not delivered: %s", type(exc).__name__)
+        # Preserve account-enumeration resistance while never telling a person
+        # that a link was sent when the server failed before delivery.
+        return jsonify({"success": False, "error": "magic_link_delivery_failed"}), 503
     response = jsonify({"success": True, "message": "If the address can receive sign-in mail, a secure link is on its way."})
     response.status_code = 202
     response.headers["Cache-Control"] = "no-store"

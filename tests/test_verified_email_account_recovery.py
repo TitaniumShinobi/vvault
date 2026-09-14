@@ -20,6 +20,13 @@ def test_recovery_magic_link_is_a_distinct_one_time_purpose():
     assert 'if purpose not in {"signin", "link", "recovery"}' in repository
 
 
+def test_magic_link_request_never_claims_delivery_after_a_server_failure():
+    server = (ROOT / "vvault/server/vvault_web_server.py").read_text()
+
+    assert 'logger.warning("magic-link request not delivered: %s", type(exc).__name__)' in server
+    assert 'return jsonify({"success": False, "error": "magic_link_delivery_failed"}), 503' in server
+
+
 def test_recovery_requires_verified_owner_and_revokes_old_factors_before_reenrollment():
     repository = (ROOT / "vvault/server/vvault_auth_repository.py").read_text()
     server = (ROOT / "vvault/server/vvault_web_server.py").read_text()
