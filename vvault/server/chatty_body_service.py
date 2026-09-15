@@ -428,6 +428,113 @@ def list_constructs() -> BodyResult:
     )
 
 
+def list_constructs_for_vvault_workspace(user_id: str) -> BodyResult:
+    """Project an authenticated Vault owner's construct roots across product lanes.
+
+    This is intentionally a narrow server-side capability: callers supply only
+    the owner derived from the VVAULT session.  The server selects each allowed
+    relying-party lane itself, binds it to the database connection, and retains
+    the lane on every returned DTO.  It is not a general cross-product query.
+    """
+    try:
+        from .relying_party_scope import current_relying_party_id, set_relying_party_id
+    except ImportError:  # direct script launcher compatibility
+        from relying_party_scope import current_relying_party_id, set_relying_party_id
+
+    owner_id = str(user_id or "").strip()
+    route = "/api/vault/drive/workspace-root"
+    if not owner_id:
+        return BodyResult(
+            status="body_invalid",
+            route=route,
+            source_database=source_database_name(),
+            payload={"error_code": "VVAULT_WORKSPACE_OWNER_REQUIRED"},
+            http_status=400,
+        )
+
+    original_scope = current_relying_party_id()
+    if original_scope != "vvault":
+        return BodyResult(
+            status="body_invalid",
+            route=route,
+            source_database=source_database_name(),
+            payload={"error_code": "VVAULT_NATIVE_SESSION_REQUIRED"},
+            http_status=403,
+        )
+
+    constructs: list[dict[str, Any]] = []
+    try:
+        for lane in ("chatty", "chatty-cli", "vvault"):
+            set_relying_party_id(lane)
+            rows = _rows(
+                """
+                SELECT id, filename, object_key, storage_path, construct_id,
+                       metadata, created_at
+                FROM vault_files
+                WHERE user_id=%s
+                  AND (
+                    nullif(btrim(coalesce(construct_id, '')), '') IS NOT NULL
+                    OR lower(
+                        coalesce(storage_path, '') || ' ' ||
+                        coalesce(object_key, '') || ' ' ||
+                        coalesce(filename, '')
+                    ) LIKE %s
+                  )
+                ORDER BY created_at ASC
+                """,
+                (owner_id, "%instances/%"),
+            )
+            seen: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                callsign = _construct_from_file(row)
+                if not callsign:
+                    continue
+                created = row.get("created_at")
+                created_text = created.isoformat() if hasattr(created, "isoformat") else created
+                current = seen.get(callsign)
+                if current and (current.get("created_at") or "") >= (created_text or ""):
+                    continue
+                seen[callsign] = {
+                    "construct_id": callsign,
+                    "callsign": callsign,
+                    "name": display_name(callsign),
+                    "displayName": display_name(callsign),
+                    "created_at": created_text,
+                    "sourceRelyingPartyId": lane,
+                }
+            constructs.extend(seen.values())
+    except Exception as exc:
+        return _blocked(
+            route,
+            reason=f"VVAULT workspace projection is unavailable: {type(exc).__name__}",
+            missing_fields=[],
+            missing_tables=["ovvaults.vault_files"],
+        )
+    finally:
+        set_relying_party_id(original_scope)
+
+    constructs.sort(
+        key=lambda item: (
+            str(item["displayName"]).casefold(),
+            str(item["sourceRelyingPartyId"]),
+            str(item["callsign"]),
+        )
+    )
+    return BodyResult(
+        status="body_native",
+        route=route,
+        source_database=source_database_name(),
+        payload={
+            "degraded": False,
+            "storage_mode": "vvault_body",
+            "constructs": constructs,
+            "count": len(constructs),
+            "body_native_available": True,
+            "projectionScope": "native_vvault_owner_workspace",
+        },
+    )
+
+
 def construct_files(construct_id: str, *, folder: str | None = None) -> BodyResult:
     callsign = normalize_callsign(construct_id)
     route = f"/api/chatty/construct/{callsign}/files"

@@ -33,6 +33,7 @@ const parseVaultLocation = (pathname, search) => {
       mode: 'drive',
       constructId: params.get('constructId') || '',
       nodeId: decodeURIComponent(segments[1]),
+      workspaceRef: params.get('workspaceRef') || '',
       legacyPath: [],
     };
   }
@@ -42,6 +43,7 @@ const parseVaultLocation = (pathname, search) => {
       mode: 'drive',
       constructId,
       nodeId: 'root',
+      workspaceRef: params.get('workspaceRef') || '',
       legacyPath: ['instances', constructId],
     };
   }
@@ -60,11 +62,16 @@ const vaultLocationForLegacyPath = (segments = []) => (
   segments.length ? `/vault/browse/${encodePathSegments(segments)}` : '/vault'
 );
 
-const vaultLocationForDriveFolder = (constructId, nodeId = 'root') => (
-  nodeId === 'root'
+const vaultLocationForDriveFolder = (constructId, nodeId = 'root', workspaceRef = '') => {
+  const params = new URLSearchParams();
+  if (workspaceRef) params.set('workspaceRef', workspaceRef);
+  if (nodeId !== 'root') params.set('constructId', constructId);
+  const query = params.toString();
+  const path = nodeId === 'root'
     ? `/vault/instances/${encodeURIComponent(constructId)}`
-    : `/vault/folders/${encodeURIComponent(nodeId)}?constructId=${encodeURIComponent(constructId)}`
-);
+    : `/vault/folders/${encodeURIComponent(nodeId)}`;
+  return query ? `${path}?${query}` : path;
+};
 
 const materialIconManifest = generateManifest({ activeIconPack: 'react' });
 // Keep the browser bundle bounded. Importing the package-wide SVG context emits
@@ -388,11 +395,11 @@ const VaultBrowser = ({ user }) => {
     }
   }, []);
 
-  const fetchDriveChildren = useCallback(async ({ constructId, nodeId }) => {
-    if (!constructId) return;
+  const fetchDriveChildren = useCallback(async ({ constructId, nodeId, workspaceRef }) => {
+    if (!constructId || !workspaceRef) return;
     setDriveState((previous) => ({ ...previous, loading: true, error: null }));
     try {
-      const params = new URLSearchParams({ constructId, parentNodeId: nodeId || 'root' });
+      const params = new URLSearchParams({ constructId, parentNodeId: nodeId || 'root', workspaceRef });
       const response = await authFetch(`/api/vault/drive/children?${params.toString()}`);
       const data = await response.json();
       if (!response.ok || !data.success) {
@@ -442,7 +449,11 @@ const VaultBrowser = ({ user }) => {
     if (routeState.mode === 'drive' && routeState.constructId) {
       setSelectedNodeIds([]);
       setNodeMenuId(null);
-      fetchDriveChildren({ constructId: routeState.constructId, nodeId: routeState.nodeId || 'root' });
+      fetchDriveChildren({
+        constructId: routeState.constructId,
+        nodeId: routeState.nodeId || 'root',
+        workspaceRef: routeState.workspaceRef,
+      });
     }
   }, [routeState.mode, routeState.constructId, routeState.nodeId, fetchDriveChildren]);
 
@@ -599,9 +610,9 @@ const VaultBrowser = ({ user }) => {
   const navigateToFolder = (folder) => {
     previewRequestIdRef.current += 1;
     if (routeState.mode === 'drive' && folder?.nodeId) {
-      navigate(vaultLocationForDriveFolder(routeState.constructId, folder.nodeId));
+      navigate(vaultLocationForDriveFolder(routeState.constructId, folder.nodeId, routeState.workspaceRef));
     } else if (['home', 'my-ai-files'].includes(routeState.mode) && folder?.constructId) {
-      navigate(vaultLocationForDriveFolder(folder.constructId, 'root'));
+      navigate(vaultLocationForDriveFolder(folder.constructId, 'root', folder.workspaceRef));
     } else {
       const folderName = typeof folder === 'string' ? folder : folder?.name;
       navigate(vaultLocationForLegacyPath([...currentPath, folderName]));
@@ -634,10 +645,10 @@ const VaultBrowser = ({ user }) => {
     previewRequestIdRef.current += 1;
     if (routeState.mode === 'drive') {
       if (index === 0) navigate('/vault');
-      else if (index === 1) navigate(vaultLocationForDriveFolder(routeState.constructId, 'root'));
+      else if (index === 1) navigate(vaultLocationForDriveFolder(routeState.constructId, 'root', routeState.workspaceRef));
       else {
         const breadcrumb = driveState.breadcrumbs[index - 2];
-        if (breadcrumb?.nodeId) navigate(vaultLocationForDriveFolder(routeState.constructId, breadcrumb.nodeId));
+        if (breadcrumb?.nodeId) navigate(vaultLocationForDriveFolder(routeState.constructId, breadcrumb.nodeId, routeState.workspaceRef));
       }
     } else {
       navigate(vaultLocationForLegacyPath(currentPath.slice(0, index + 1)));

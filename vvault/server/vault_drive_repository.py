@@ -263,9 +263,9 @@ class VaultDriveRepository:
         The user-directory contract is stable even when a namespace currently has
         no materialized files: account/, instances/, and library/ always exist as
         logical roots.  Construct children come only from the already owner-scoped
-        projectable construct projection supplied by the caller.  Other top-level
-        namespaces are discovered from metadata-only path prefixes and are exposed
-        as honest existing roots rather than silently discarded.
+        projectable construct projection supplied by the caller.  Storage prefixes
+        are deliberately not promoted to workspace folders: they are not a Drive
+        contract and could expose operational namespaces such as ``system``.
         """
         try:
             from .relying_party_scope import current_relying_party_id
@@ -277,15 +277,6 @@ class VaultDriveRepository:
             if cached and time.monotonic() - cached[0] <= self.CACHE_TTL_SECONDS:
                 return json.loads(json.dumps({**cached[1], "cacheState": "fresh"}))
 
-        rows = self._fetch_workspace_roots(owner_user_id)
-        materialized_roots = sorted(
-            {
-                str(row.get("root_name") or "").strip()
-                for row in rows
-                if str(row.get("root_name") or "").strip()
-            },
-            key=str.casefold,
-        )
         construct_items = sorted(
             (
                 {
@@ -297,6 +288,8 @@ class VaultDriveRepository:
                     "semanticKind": "instance_root",
                     "protected": True,
                     "source": "owner_construct_projection",
+                    "sourceRelyingPartyId": str(item.get("sourceRelyingPartyId") or "vvault"),
+                    "workspaceRef": str(item.get("workspaceRef") or ""),
                 }
                 for item in constructs
                 if str(item.get("callsign") or item.get("construct_id") or "").strip()
@@ -339,18 +332,8 @@ class VaultDriveRepository:
             }
             for name in ("assets", "gallery", "documents")
         ]
-        template_roots = {"account", "instances", "library"}
-        existing = [
-            {
-                **root_node(name, "existing_root", protected=False),
-                "nodeId": f"workspace:existing:{name}",
-                "source": "ovvaults.vault_files",
-            }
-            for name in materialized_roots
-            if name not in template_roots
-        ]
         payload = {
-            "projectionSchemaVersion": "1.0.0",
+            "projectionSchemaVersion": "1.1.0",
             "root": {
                 "nodeId": "workspace:root",
                 "nodeType": "folder",
@@ -359,10 +342,9 @@ class VaultDriveRepository:
                 "semanticKind": "workspace_root",
                 "protected": True,
             },
-            "children": [account, instances, library, *existing],
-            "count": 3 + len(existing),
+            "children": [account, instances, library],
+            "count": 3,
             "instanceCount": len(construct_items),
-            "materializedRootNames": materialized_roots,
             "cacheState": "miss",
             "refreshing": False,
         }
@@ -372,25 +354,6 @@ class VaultDriveRepository:
                 self._cache.pop(oldest, None)
             self._cache[key] = (time.monotonic(), payload)
         return json.loads(json.dumps(payload))
-
-    def _fetch_workspace_roots(self, owner_user_id: str) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT DISTINCT split_part(
-                        regexp_replace(coalesce(nullif(storage_path,''),filename), '^/+', ''),
-                        '/', 1
-                    ) AS root_name
-                    FROM ovvaults.vault_files
-                    WHERE user_id=%s
-                      AND drive_trashed_at IS NULL
-                      AND coalesce(is_system,false)=false
-                    ORDER BY root_name
-                    """,
-                    (owner_user_id,),
-                )
-                return [_dict(row) for row in cur.fetchall()]
 
     def _receipt(self, cur, *, owner_user_id: str, construct_id: str, operation: str, node_id: str, detail: dict[str, Any]) -> dict[str, Any]:
         receipt = {

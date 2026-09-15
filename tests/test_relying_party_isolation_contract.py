@@ -34,13 +34,11 @@ def test_isolation_migration_is_additive_and_routed_by_verified_database_scope()
 
 def test_workspace_projection_cache_is_partitioned_by_verified_relying_party(monkeypatch):
     repository = VaultDriveRepository()
-    calls: list[str] = []
 
-    def roots(owner_user_id: str):
-        calls.append(relying_party_scope.current_relying_party_id())
-        return [{"root_name": f"{relying_party_scope.current_relying_party_id()}-only"}]
+    def no_database():
+        raise AssertionError("workspace root must not discover raw storage prefixes")
 
-    monkeypatch.setattr(repository, "_fetch_workspace_roots", roots)
+    monkeypatch.setattr(repository, "_connect", no_database)
 
     relying_party_scope.set_relying_party_id("chatty")
     chatty_first = repository.workspace_root(owner_user_id="owner", constructs=[])
@@ -50,9 +48,12 @@ def test_workspace_projection_cache_is_partitioned_by_verified_relying_party(mon
     cli_first = repository.workspace_root(owner_user_id="owner", constructs=[])
     cli_second = repository.workspace_root(owner_user_id="owner", constructs=[])
 
-    assert calls == ["chatty", "chatty-cli"]
-    assert chatty_first["materializedRootNames"] == ["chatty-only"]
+    assert [child["name"] for child in chatty_first["children"]] == [
+        "account", "instances", "library"
+    ]
     assert chatty_second["cacheState"] == "fresh"
-    assert cli_first["materializedRootNames"] == ["chatty-cli-only"]
+    assert [child["name"] for child in cli_first["children"]] == [
+        "account", "instances", "library"
+    ]
     assert cli_second["cacheState"] == "fresh"
     relying_party_scope.set_relying_party_id("vvault")

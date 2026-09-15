@@ -29,6 +29,7 @@ except ImportError:
 import re
 import logging
 import threading
+from contextlib import contextmanager
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,7 @@ import secrets
 import base64
 import jwt
 import bcrypt
+from itsdangerous import BadSignature, URLSafeSerializer
 from datetime import datetime, timedelta, timezone
 import requests  # For Turnstile verification
 from oauthlib.oauth2 import WebApplicationClient
@@ -79,6 +81,12 @@ import vvault_auth_repository
 import vvault_file_repository
 from vvault.server import vvault_access_assertion
 from vvault.server.relying_party_scope import set_relying_party_id
+try:
+    from vvault.server.relying_party_scope import current_relying_party_id
+    from vvault.server.vault_drive_repository import VAULT_DRIVE_REPOSITORY
+except ImportError:  # pragma: no cover - direct script compatibility
+    from relying_party_scope import current_relying_party_id
+    from vault_drive_repository import VAULT_DRIVE_REPOSITORY
 try:
     from vvault.server import cleanhouse_files_evidence
 except ImportError:  # pragma: no cover - direct script compatibility
@@ -4541,6 +4549,134 @@ def session_bridge_from_standalone_auth():
         "token": session_token,
         "expires_at": expires_at.isoformat(),
     })
+
+
+@contextmanager
+def _native_vault_drive_read_scope(source_scope: str):
+    """Bind a server-derived product lane to PostgreSQL RLS for one read."""
+    if source_scope not in {"chatty", "chatty-cli", "vvault"}:
+        raise ValueError("invalid source scope")
+    original_scope = current_relying_party_id()
+    if original_scope != "vvault":
+        raise PermissionError("native VVAULT session scope is required")
+    set_relying_party_id(source_scope)
+    try:
+        yield
+    finally:
+        set_relying_party_id(original_scope)
+
+
+def _workspace_ref_serializer() -> URLSafeSerializer:
+    return URLSafeSerializer(
+        str(app.config["SECRET_KEY"]), salt="vvault.workspace-instance.v1"
+    )
+
+
+def _workspace_ref(owner_user_id: str, construct_id: str, source_scope: str) -> str:
+    return _workspace_ref_serializer().dumps({
+        "owner": str(owner_user_id),
+        "construct": str(construct_id),
+        "scope": str(source_scope),
+    })
+
+
+def _workspace_construct_for_authenticated_owner():
+    """Resolve the owner-bound, server-signed workspace item for one read."""
+    owner_user_id = _get_authenticated_user_id()
+    if not owner_user_id:
+        raise PermissionError("User not found")
+    workspace_ref = str(request.args.get("workspaceRef") or "").strip()
+    if not workspace_ref:
+        raise PermissionError("workspace reference is required")
+    try:
+        reference = _workspace_ref_serializer().loads(workspace_ref)
+    except BadSignature as exc:
+        raise PermissionError("workspace reference is invalid") from exc
+    if not isinstance(reference, dict) or str(reference.get("owner") or "") != owner_user_id:
+        raise PermissionError("workspace reference does not belong to this account")
+    construct_id = _normalize_callsign(str(reference.get("construct") or ""))
+    source_scope = str(reference.get("scope") or "")
+    if not construct_id or source_scope not in {"chatty", "chatty-cli", "vvault"}:
+        raise PermissionError("workspace reference is invalid")
+    projection = chatty_body_service.list_constructs_for_vvault_workspace(owner_user_id)
+    if projection.http_status != 200:
+        raise RuntimeError("Canonical construct projection is unavailable")
+    if not any(
+        str(item.get("callsign") or item.get("construct_id") or "") == construct_id
+        and str(item.get("sourceRelyingPartyId") or "") == source_scope
+        for item in projection.payload.get("constructs") or []
+    ):
+        raise LookupError("construct not found")
+    return owner_user_id, construct_id, source_scope
+
+
+def _vault_drive_error_response(exc: Exception):
+    if isinstance(exc, PermissionError):
+        return jsonify({"success": False, "error": str(exc), "error_code": "VVAULT_DRIVE_FORBIDDEN"}), 403
+    if isinstance(exc, LookupError):
+        return jsonify({"success": False, "error": str(exc), "error_code": "VVAULT_DRIVE_NODE_NOT_FOUND"}), 404
+    if isinstance(exc, ValueError):
+        return jsonify({"success": False, "error": str(exc), "error_code": "VVAULT_DRIVE_INVALID_REQUEST"}), 400
+    logger.exception("VVAULT Drive request failed")
+    return jsonify({"success": False, "error": "VVAULT Drive operation failed", "error_code": type(exc).__name__}), 503
+
+
+@app.route('/api/vault/drive/workspace-root')
+@require_auth
+def get_vault_drive_workspace_root():
+    """Return only the authenticated account's workspace projection."""
+    try:
+        owner_user_id = _get_authenticated_user_id()
+        if not owner_user_id:
+            raise PermissionError("User not found")
+        result = chatty_body_service.list_constructs_for_vvault_workspace(owner_user_id)
+        if result.http_status != 200:
+            return jsonify({
+                "success": False,
+                "error": "Canonical construct projection is unavailable",
+                "error_code": "VVAULT_WORKSPACE_ROOT_UNAVAILABLE",
+            }), result.http_status
+        constructs = [
+            {
+                **item,
+                "workspaceRef": _workspace_ref(
+                    owner_user_id,
+                    str(item.get("callsign") or item.get("construct_id") or ""),
+                    str(item.get("sourceRelyingPartyId") or ""),
+                ),
+            }
+            for item in result.payload.get("constructs") or []
+        ]
+        projection = VAULT_DRIVE_REPOSITORY.workspace_root(
+            owner_user_id=owner_user_id,
+            constructs=constructs,
+        )
+        return jsonify({
+            "success": True,
+            "canonical": True,
+            "scope": "owner_workspace",
+            "ownerIdentifiersProjected": False,
+            **projection,
+        })
+    except Exception as exc:
+        return _vault_drive_error_response(exc)
+
+
+@app.route('/api/vault/drive/children')
+@require_auth
+def get_vault_drive_children():
+    try:
+        owner_user_id, construct_id, source_scope = _workspace_construct_for_authenticated_owner()
+        parent_node_id = (request.args.get("parentNodeId") or "root").strip()
+        with _native_vault_drive_read_scope(source_scope):
+            result = VAULT_DRIVE_REPOSITORY.children(
+                owner_user_id=owner_user_id,
+                construct_id=construct_id,
+                parent_node_id=parent_node_id,
+            )
+        return jsonify({"success": True, "canonical": True, "constructId": construct_id, **result})
+    except Exception as exc:
+        return _vault_drive_error_response(exc)
 
 
 @app.route('/api/vault/user-info')
