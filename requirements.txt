@@ -11,12 +11,19 @@ bcrypt>=4.0.0
 cryptography>=41.0.0
 PyJWT>=2.8.0
 oauthlib>=3.2.0
+webauthn>=2.2.0
 
 # HTTP & Networking
 requests>=2.31.0
 
+# Image canonicalization
+# Required by avatar ingress; keep this a runtime dependency so a healthy
+# VVAULT process cannot accept create requests without image support.
+Pillow>=12.1,<13
+
 # Database
 psycopg[binary]>=3.1,<4
+psycopg-pool>=3.2,<4
 
 # Configuration
 python-dotenv>=1.0.0

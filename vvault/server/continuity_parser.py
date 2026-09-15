@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-ContinuityGPT Parser — Supabase-Integrated
+ContinuityGPT Parser — OVVAULTS-Integrated
 ============================================
 
-Adapted from the original MasterContinuityParser to work with Supabase vault_files
-instead of local filesystem. Generates structured Continuity Ledger entries with
+Adapted from the original MasterContinuityParser to work with canonical OVVAULTS
+records through the VVAULT repository. Generates structured Continuity Ledger entries with
 chronological estimation, session classification, topic extraction, vibe detection,
 and continuity hooks.
 
@@ -75,7 +75,7 @@ TOPIC_PATTERNS = [
 
 
 class ContinuityParser:
-    """Parses Supabase transcript files into structured ContinuityGPT ledger entries."""
+    """Parses canonical VVAULT transcript records into ContinuityGPT ledger entries."""
 
     def __init__(self, construct_id: str):
         self.construct_id = construct_id
@@ -179,12 +179,32 @@ class ContinuityParser:
             stripped = line.strip()
             if not stripped:
                 continue
+            if stripped == '---' or stripped.startswith('<!-- chatty-'):
+                continue
 
             line_lower = stripped.lower()
             is_construct = False
             is_user = False
+            inline_text = None
 
-            if stripped.startswith('**') and stripped.endswith(':'):
+            # Canonical OVVAULTS transcripts use the append-only Desktop/CLI
+            # shape ``**User** (timestamp):`` and ``**Zenith** (timestamp):``.
+            # Parse that header explicitly; stripping punctuation from the
+            # whole line leaves the timestamp attached to the speaker name and
+            # causes otherwise valid canonical sessions to be discarded.
+            canonical_header = re.match(
+                r'^\*\*(?P<label>[^*\n]+)\*\*\s*(?:\([^)]*\))?\s*:\s*(?P<text>.*)$',
+                stripped,
+            )
+            if canonical_header:
+                label = canonical_header.group('label').strip().lower()
+                inline_text = canonical_header.group('text').strip()
+                if label in ('user', 'human', 'devon', 'you'):
+                    is_user = True
+                elif self.construct_name in label or label in ('assistant', 'chatty'):
+                    is_construct = True
+
+            if not canonical_header and stripped.startswith('**') and stripped.endswith(':'):
                 label = stripped.strip('*').strip(':').strip().lower()
                 if label in ('user', 'human', 'devon'):
                     is_user = True
@@ -215,7 +235,9 @@ class ContinuityParser:
                     if len(text) > 3:
                         turns.append({'speaker': current_speaker, 'text': text})
                 current_speaker = 'construct' if is_construct else 'user'
-                if '**:' in stripped:
+                if inline_text is not None:
+                    current_text = [inline_text] if inline_text else []
+                elif '**:' in stripped:
                     after = stripped.split('**:', 1)[1].strip()
                     current_text = [after] if after else []
                 elif ':' in stripped:
@@ -281,9 +303,6 @@ class ContinuityParser:
             hooks = self.extract_continuity_hooks(content)
             pairs = self.parse_exchanges(content)
 
-            if not pairs:
-                return None
-
             session_id = self.generate_session_id(self.construct_id, filename, file_index)
 
             first_user = pairs[0]['user'][:200] if pairs else ''
@@ -312,6 +331,7 @@ class ContinuityParser:
                 },
                 'exchanges': pairs,
                 'content_length': len(content),
+                'exchange_projection': 'parsed' if pairs else 'source_only',
             }
         except Exception as e:
             logger.error(f'[ContinuityParser] Error processing {filename}: {e}')
@@ -417,6 +437,7 @@ class ContinuityParser:
                 'position': entry.get('position', 'unknown'),
                 'chronological_index': entry.get('chronological_index', 0),
                 'total_sessions': entry.get('total_sessions', 1),
+                'exchange_projection': entry.get('exchange_projection', 'parsed'),
             }
             if include_exchanges:
                 item['exchanges'] = entry.get('exchanges', [])

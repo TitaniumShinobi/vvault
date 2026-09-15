@@ -29,6 +29,7 @@ import copy
 import re
 import logging
 import threading
+from contextlib import contextmanager
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -4985,7 +4986,7 @@ def get_current_user():
         state = str(session.get('account_state') or 'LEGACY')
         kind = str(session.get('enrollment_session_kind') or 'LEGACY')
         device_status = str(session.get('enrollment_device_status') or '')
-        if state == 'ACTIVE' and kind == 'NORMAL' and device_status == 'TRUSTED':
+        if state == 'ACTIVE' and kind == 'NORMAL' and device_status in {'', 'TRUSTED'}:
             return session, token
         # Existing sessions remain usable only during the explicitly staged
         # migration window. New pending/device sessions never reach data routes.
@@ -5001,6 +5002,11 @@ def require_auth(f):
     from functools import wraps
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        try:
+            from .relying_party_scope import set_authenticated_user_id
+        except ImportError:
+            from relying_party_scope import set_authenticated_user_id
+        set_authenticated_user_id(None)
         session, token = get_current_user()
         ip = request.headers.get('X-Forwarded-For', request.remote_addr)
         
@@ -5026,10 +5032,11 @@ def require_auth(f):
         
         request.current_user = session
         try:
-            from .relying_party_scope import set_relying_party_id
+            from .relying_party_scope import set_authenticated_user_id, set_relying_party_id
         except ImportError:
-            from relying_party_scope import set_relying_party_id
+            from relying_party_scope import set_authenticated_user_id, set_relying_party_id
         set_relying_party_id("vvault")
+        set_authenticated_user_id(_get_authenticated_user_id())
         request.current_token = token
         return f(*args, **kwargs)
     return decorated_function
@@ -5043,6 +5050,11 @@ def require_chatty_auth(f):
     from functools import wraps
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        try:
+            from .relying_party_scope import set_authenticated_user_id
+        except ImportError:
+            from relying_party_scope import set_authenticated_user_id
+        set_authenticated_user_id(None)
         ip = request.headers.get('X-Forwarded-For', request.remote_addr)
         auth_header = request.headers.get("Authorization", "")
         bearer = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
@@ -5082,10 +5094,11 @@ def require_chatty_auth(f):
                     "subject": verified["subject"],
                 }
                 try:
-                    from .relying_party_scope import set_relying_party_id
+                    from .relying_party_scope import set_authenticated_user_id, set_relying_party_id
                 except ImportError:
-                    from relying_party_scope import set_relying_party_id
+                    from relying_party_scope import set_authenticated_user_id, set_relying_party_id
                 set_relying_party_id(verified["relyingPartyId"])
+                set_authenticated_user_id(verified["ownerUserId"])
                 request.current_token = None
                 request.vvault_access_assertion = {
                     "key_id": verified["keyId"],
@@ -5121,10 +5134,11 @@ def require_chatty_auth(f):
             )
             request.current_user = {**session, "auth_mode": session.get("auth_mode") or "session"}
             try:
-                from .relying_party_scope import set_relying_party_id
+                from .relying_party_scope import set_authenticated_user_id, set_relying_party_id
             except ImportError:
-                from relying_party_scope import set_relying_party_id
+                from relying_party_scope import set_authenticated_user_id, set_relying_party_id
             set_relying_party_id("vvault")
+            set_authenticated_user_id(_get_authenticated_user_id())
             request.current_token = token
             return f(*args, **kwargs)
 
@@ -6270,7 +6284,13 @@ def map_to_vsi_folder(filename: str, construct_id: str = '', metadata: dict = No
     return f'library/{base}'
 
 
-def _transform_files_for_display(files: list, is_admin: bool = False, user_id: str = None) -> list:
+def _transform_files_for_display(
+    files: list,
+    is_admin: bool = False,
+    user_id: str = None,
+    *,
+    include_system: bool = False,
+) -> list:
     """Transform vault_files records for the file browser UI.
     
     Uses filename as the canonical display path (files now store full VSI paths).
@@ -6283,7 +6303,7 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
     for f in _dedupe_vault_rows(files):
         if row_is_projection_excluded(f):
             continue
-        if f.get('is_system') and not is_admin:
+        if f.get('is_system') and not (is_admin or include_system):
             continue
         
         file_copy = dict(f)
@@ -6307,9 +6327,19 @@ def _transform_files_for_display(files: list, is_admin: bool = False, user_id: s
         if '/' not in display_path:
             display_path = map_to_vsi_folder(display_path, construct_id, metadata)
         
+        if include_system:
+            # Do not expose the physical owner namespace as a mutable Drive
+            # path.  This is a virtual, read-only projection of exactly the
+            # authenticated account's protected construct records.
+            source_path = str(storage_path or display_path).strip().lstrip('/')
+            prefix = f"instances/{construct_id}/" if construct_id else ""
+            relative_path = source_path[len(prefix):] if prefix and source_path.startswith(prefix) else source_path
+            display_path = f"system/{construct_id}/{relative_path}" if construct_id else f"system/{relative_path}"
+
         file_copy['display_path'] = display_path
         file_copy['storage_path'] = storage_path or display_path
         file_copy['internal_path'] = storage_path or display_path
+        file_copy['system_read_only'] = bool(include_system)
 
         # Promote useful metadata for UI
         file_copy['display_name'] = display_path.split('/')[-1]
@@ -6557,6 +6587,9 @@ def get_vault_files():
         if not user_email:
             return jsonify({"success": False, "error": "Invalid session"}), 401
         requested_path = (request.args.get('path') or '').strip().strip('/')
+        include_system = (request.args.get('scope') or '').strip().lower() == 'system'
+        if include_system and not (requested_path == 'system' or requested_path.startswith('system/')):
+            return jsonify({"success": False, "error": "System scope requires a system path"}), 400
 
         user_lookup_started_at = time.perf_counter()
         user_id = _get_authenticated_user_id()
@@ -6567,15 +6600,25 @@ def get_vault_files():
             return jsonify({"success": False, "error": "User not found"}), 403
 
         row_fetch_started_at = time.perf_counter()
-        rows = VAULT_FILE_REPOSITORY.list_for_browser(
-            user_id=user_id,
-            is_admin=False,
-            requested_path=requested_path,
-        )
+        browser_list_kwargs = {
+            "user_id": user_id,
+            "is_admin": False,
+            "requested_path": requested_path,
+        }
+        # Preserve the callable contract used by compatibility adapters until
+        # the System projection is explicitly selected.
+        if include_system:
+            browser_list_kwargs["include_system"] = True
+        rows = VAULT_FILE_REPOSITORY.list_for_browser(**browser_list_kwargs)
         row_fetch_ms = int(round((time.perf_counter() - row_fetch_started_at) * 1000))
 
         transform_started_at = time.perf_counter()
-        files = _transform_files_for_display(rows, is_admin=False, user_id=user_id)
+        files = _transform_files_for_display(
+            rows,
+            is_admin=False,
+            user_id=user_id,
+            include_system=include_system,
+        )
         if requested_path:
             files = _filter_transformed_vault_files_for_path(files, requested_path)
         transform_ms = int(round((time.perf_counter() - transform_started_at) * 1000))
@@ -6599,6 +6642,8 @@ def get_vault_files():
             "canonical": True,
             "storage_mode": "vvault_body",
             "storage_owner": VAULT_FILE_OWNER,
+            "scope": "owner_system_read_only" if include_system else "owner_drive",
+            "read_only": include_system,
             "files": files,
             "count": len(files),
             "user_root": user_name
@@ -6635,6 +6680,32 @@ def _drive_request_owner_and_construct(payload: Optional[Dict[str, Any]] = None)
     return owner_user_id, construct_id
 
 
+@contextmanager
+def _native_vault_drive_read_scope():
+    """Temporarily select a server-approved lane for a native Vault read.
+
+    This route is behind ``require_auth``: the owner comes only from the
+    verified VVAULT browser session.  The lane is accepted solely to select a
+    row-level-security partition for that same owner; it never selects an
+    owner, grants a Chatty/CLI caller this capability, or affects writes.
+    """
+    try:
+        from .relying_party_scope import current_relying_party_id, set_relying_party_id
+    except ImportError:
+        from relying_party_scope import current_relying_party_id, set_relying_party_id
+    requested_scope = str(request.args.get("sourceScope") or "vvault").strip()
+    if requested_scope not in {"chatty", "chatty-cli", "vvault"}:
+        raise ValueError("invalid source scope")
+    original_scope = current_relying_party_id()
+    if original_scope != "vvault":
+        raise PermissionError("native VVAULT session scope is required")
+    set_relying_party_id(requested_scope)
+    try:
+        yield
+    finally:
+        set_relying_party_id(original_scope)
+
+
 def _drive_error_response(exc: Exception):
     if isinstance(exc, PermissionError):
         return jsonify({"success": False, "error": str(exc), "error_code": "VVAULT_DRIVE_FORBIDDEN"}), 403
@@ -6650,13 +6721,14 @@ def _drive_error_response(exc: Exception):
 @require_auth
 def get_vault_drive_children():
     try:
-        owner_user_id, construct_id = _drive_request_owner_and_construct()
-        parent_node_id = (request.args.get("parentNodeId") or "root").strip()
-        result = VAULT_DRIVE_REPOSITORY.children(
-            owner_user_id=owner_user_id,
-            construct_id=construct_id,
-            parent_node_id=parent_node_id,
-        )
+        with _native_vault_drive_read_scope():
+            owner_user_id, construct_id = _drive_request_owner_and_construct()
+            parent_node_id = (request.args.get("parentNodeId") or "root").strip()
+            result = VAULT_DRIVE_REPOSITORY.children(
+                owner_user_id=owner_user_id,
+                construct_id=construct_id,
+                parent_node_id=parent_node_id,
+            )
         return jsonify({
             "success": True,
             "canonical": True,
@@ -6675,7 +6747,13 @@ def get_vault_drive_workspace_root():
         owner_user_id = _get_authenticated_user_id()
         if not owner_user_id:
             raise PermissionError("User not found")
-        construct_result = chatty_body_service.list_constructs(owner_user_id)
+        # This is the native VVAULT browser, authenticated by a VVAULT session.
+        # It may enumerate this owner's existing product lanes through a
+        # server-selected, per-lane RLS query.  The normal Chatty/CLI construct
+        # endpoint remains single-lane and never receives this capability.
+        construct_result = chatty_body_service.list_constructs_for_vvault_workspace(
+            owner_user_id
+        )
         if construct_result.http_status != 200:
             return jsonify({
                 "success": False,
@@ -11648,6 +11726,33 @@ def get_construct_life_capsule_readiness(construct_id):
         }), 503
 
 
+@app.route('/api/chatty/construct/<construct_id>/continuity')
+@require_chatty_auth
+def get_construct_continuity(construct_id):
+    """Resolve the shared construct and one authenticated private relation.
+
+    This additive endpoint is separate from the legacy identity projection
+    during migration. It fails closed rather than treating a Drive row or an
+    unclassified legacy record as canonical identity authority.
+    """
+    account_user_id = _get_authenticated_user_id()
+    if not account_user_id:
+        return jsonify({"success": False, "errorCode": "ACCOUNT_CONTEXT_REQUIRED"}), 403
+    try:
+        from .relying_party_scope import current_relying_party_id
+    except ImportError:
+        from relying_party_scope import current_relying_party_id
+    resolution = life_capsule_resolver.resolve_account_construct(
+        construct_id,
+        account_user_id=account_user_id,
+        relying_party_id=current_relying_party_id(),
+    )
+    payload = resolution.evidence()
+    payload["success"] = resolution.ready
+    status = 200 if resolution.ready else 409 if resolution.status == "FAIL" else 503
+    return jsonify(payload), status
+
+
 @app.route('/api/chatty/signed-projections/public-key')
 def get_signed_projection_public_key():
     """Return the shared projection verification key without canonical data."""
@@ -15657,8 +15762,20 @@ def _start_enrollment_session(user: dict, frontend: str, *, canonical_consents=N
             response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
             response.set_cookie("vvault_session", normal_token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=30 * 24 * 60 * 60, path="/")
             return _set_device_cookie(response, device_secret)
-        args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=token_hash, expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
-        session = issue_pending(AUTH_REPOSITORY.issue_pending_device_session, args)
+        # A successful provider/email sign-in is the access boundary. Do not
+        # strand a valid owner behind a second device ceremony just because a
+        # browser lacks an old opaque recognizer cookie.
+        session = AUTH_REPOSITORY.issue_active_session(
+            user_id=user_id, token_hash=_session_token_hash(normal_token),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            required_documents=_enrollment_documents(),
+        )
+        if not session:
+            raise RuntimeError("cannot issue active session")
+        response = redirect(f"{frontend.rstrip('/')}/")
+        response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
+        response.set_cookie("vvault_session", normal_token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=30 * 24 * 60 * 60, path="/")
+        return _set_device_cookie(response, device_secret)
     else:
         args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=token_hash, expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
         session = issue_pending(AUTH_REPOSITORY.create_pending_enrollment_session if state == "PENDING_ENROLLMENT" else AUTH_REPOSITORY.issue_pending_device_session, args)
@@ -16494,7 +16611,8 @@ def _verified_provider_claims(provider: str, code: str, transaction: dict) -> tu
     return str(profile_data["id"]), str(verified), str(profile_data.get("name") or profile_data.get("login") or ""), "https://github.com"
 
 
-@app.route('/api/auth/oauth/<provider>', methods=['GET', 'POST'])
+@app.route('/api/auth/oauth/google', defaults={'provider': 'google'}, methods=['GET', 'POST'])
+@app.route('/api/auth/oauth/github', defaults={'provider': 'github'}, methods=['GET', 'POST'])
 def begin_canonical_oauth(provider: str):
     if request.method == 'POST':
         try:
@@ -16514,6 +16632,51 @@ def begin_canonical_oauth(provider: str):
         except Exception:
             return jsonify({'error':'Current Chatty and VVAULT acceptance is required'}),400
     return _begin_identity_oauth(provider)
+
+
+@app.route('/api/auth/providers/<provider>/health', methods=['GET'])
+def oauth_entry_point_health(provider: str):
+    provider = str(provider or '').strip().lower()
+    if provider == 'google':
+        configured = _google_oauth_ready()
+    elif provider == 'github':
+        client_id = str(globals().get('GITHUB_CLIENT_ID') or '')
+        client_secret = str(globals().get('GITHUB_CLIENT_SECRET') or '')
+        placeholders = globals().get('_OAUTH_PLACEHOLDER_VALUES', set())
+        configured = bool(client_id and client_secret and client_id not in placeholders and client_secret not in placeholders)
+    elif provider in {'microsoft', 'apple'}:
+        configured = False
+    else:
+        return jsonify({'error': 'Unknown sign-in provider.', 'error_code': 'PROVIDER_NOT_FOUND'}), 404
+    if not configured:
+        return jsonify({
+            'available': False,
+            'configured': False,
+            'error': 'Provider not configured. Choose another method.',
+            'error_code': 'PROVIDER_NOT_CONFIGURED',
+        }), 503
+    identity_ready, _identity_state = _oauth_identity_authority_available()
+    if not identity_ready:
+        return jsonify({
+            'available': False,
+            'configured': True,
+            'error': 'Identity sign-in is temporarily unavailable. Try again later.',
+            'error_code': 'IDENTITY_AUTHORITY_UNAVAILABLE',
+        }), 503
+    return jsonify({'available': True, 'configured': True})
+
+
+@app.route('/api/auth/<provider>', methods=['GET', 'POST'])
+@app.route('/api/auth/oauth/<provider>', methods=['GET', 'POST'])
+def unavailable_oauth_entry_point(provider: str):
+    if str(provider or '').strip().lower() not in {'github', 'microsoft', 'apple'}:
+        return jsonify({'error': 'Unknown sign-in provider.', 'error_code': 'PROVIDER_NOT_FOUND'}), 404
+    return jsonify({
+        'available': False,
+        'configured': False,
+        'error': 'Provider not configured. Choose another method.',
+        'error_code': 'PROVIDER_NOT_CONFIGURED',
+    }), 503
 
 
 @app.route('/api/auth/google', methods=['GET'])

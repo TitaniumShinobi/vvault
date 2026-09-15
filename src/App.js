@@ -5,7 +5,8 @@ import Capsules from './components/Capsules';
 import VaultBrowser from './components/VaultBrowser';
 import Settings from './components/Settings';
 import CinematicLogin from './components/CinematicLogin';
-import { validateSession, SESSION_EXPIRED_EVENT } from './utils/authFetch';
+import EnrollmentFlow from './components/EnrollmentFlow';
+import { SESSION_EXPIRED_EVENT } from './utils/authFetch';
 import vvaultLogo from '../assets/vvaultlogo_inverted.svg';
 import './App.css';
 
@@ -19,8 +20,8 @@ const Navigation = ({ user, onLogout }) => {
     { path: '/settings', label: 'Settings' }
   ];
   
-  const handleLogout = () => {
-    onLogout();
+  const handleLogout = (event) => {
+    onLogout(event);
   };
   
   return (
@@ -107,51 +108,22 @@ const StatusIndicator = () => {
 // Main App component
 function App() {
   const [user, setUser] = useState(null);
+  const [pendingSignup, setPendingSignup] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
   const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   
   useEffect(() => {
-    // Check for OAuth callback params in URL
-    const urlParams = new URLSearchParams(window.location.search);
-    const token = urlParams.get('token');
-    const email = urlParams.get('email');
-    const name = urlParams.get('name');
-    
-    if (token && email) {
-      // OAuth successful - save user session
-      const userData = {
-        email: decodeURIComponent(email),
-        name: name ? decodeURIComponent(name) : email.split('@')[0],
-        token: token
-      };
-      localStorage.setItem('vvault_user', JSON.stringify(userData));
-      localStorage.setItem('vvault_token', token);
-      setUser(userData);
-      
-      // Clean up URL
-      window.history.replaceState({}, document.title, window.location.pathname);
-      console.log('OAuth login successful:', userData.email);
-    } else {
-      const savedUser = localStorage.getItem('vvault_user');
-      if (savedUser) {
-        try {
-          const parsed = JSON.parse(savedUser);
-          setUser(parsed);
-          validateSession().then(valid => {
-            if (!valid) {
-              console.warn('Stored session is no longer valid — clearing');
-              localStorage.removeItem('vvault_user');
-              localStorage.removeItem('vvault_token');
-              setUser(null);
-            }
-          });
-        } catch (error) {
-          console.error('Failed to parse saved user:', error);
-          localStorage.removeItem('vvault_user');
-          localStorage.removeItem('vvault_token');
-        }
-      }
-    }
+    // Canonical sessions are HttpOnly cookies. No identity or bearer token is
+    // accepted from query parameters or browser storage.
+    fetch('/api/auth/verify', { credentials: 'same-origin' })
+      .then((response) => response.ok ? response.json() : null)
+      .then(async (payload) => {
+        if (payload?.user) { setUser(payload.user); return; }
+        const response=await fetch('/api/auth/paired-signup/resume',{credentials:'same-origin'});
+        if (response.ok) setPendingSignup(await response.json());
+      })
+      .catch(() => setUser(null)).finally(() => setAuthChecked(true));
     
     // Load system info
     const loadSystemInfo = async () => {
@@ -173,9 +145,9 @@ function App() {
     setUser(userData);
   };
   
-  const handleLogout = useCallback(() => {
-    localStorage.removeItem('vvault_user');
-    localStorage.removeItem('vvault_token');
+  const handleLogout = useCallback((event) => {
+    if (event?.isTrusted !== true && event?.nativeEvent?.isTrusted !== true) return;
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
     setUser(null);
   }, []);
 
@@ -188,7 +160,7 @@ function App() {
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
   }, []);
   
-  if (loading) {
+  if (loading || !authChecked) {
     return (
       <div className="app-loading">
         <div className="loading-content">
@@ -202,6 +174,15 @@ function App() {
   
   // Show cinematic login screen if user is not authenticated
   if (!user) {
+    const authState = new URLSearchParams(window.location.search);
+    // URL state controls presentation only; the component confirms the
+    // server-side HttpOnly pending session before rendering a checkpoint.
+    if (pendingSignup?.pending) return pendingSignup.signupRequired ? <CinematicLogin onLogin={handleLogin} pendingSignup /> : <CinematicLogin onLogin={handleLogin}><EnrollmentFlow requestedMode="enrollment" embedded /></CinematicLogin>;
+    // Older bookmarked checkpoint URLs return to ordinary sign-in. A
+    // successful verified sign-in now creates the normal session directly.
+    if (authState.get('device_approval_required') === '1') return <CinematicLogin onLogin={handleLogin} />;
+    if (authState.get('terms_update') === '1') return <EnrollmentFlow requestedMode="recertification" />;
+    if (authState.get('identity_pending') === '1') return <CinematicLogin onLogin={handleLogin}><EnrollmentFlow requestedMode="enrollment" embedded /></CinematicLogin>;
     return <CinematicLogin onLogin={handleLogin} />;
   }
   
@@ -213,7 +194,7 @@ function App() {
         <main className="main-content">
           <Routes>
             <Route path="/" element={<Dashboard systemInfo={systemInfo} user={user} />} />
-            <Route path="/vault" element={<VaultBrowser user={user} />} />
+            <Route path="/vault/*" element={<VaultBrowser user={user} />} />
             <Route path="/capsules" element={<Capsules user={user} />} />
             <Route path="/settings" element={<Settings systemInfo={systemInfo} user={user} />} />
             <Route path="/blockchain" element={<Navigate to="/vault" replace />} />

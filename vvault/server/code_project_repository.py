@@ -108,6 +108,15 @@ def _file_storage_path(project_instance_id: str, relative_path: str) -> str:
     return f"{PROJECT_FILE_ROOT}/{project_instance_id}/files/{relative_path}"
 
 
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
 def _project_metadata(project_instance_id: str, project: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
     existing_meta = _metadata(existing.get("metadata") if existing else None)
     transcript_ids = project.get("transcriptIds")
@@ -144,6 +153,56 @@ def _project_payload(project_instance_id: str, raw_project: dict[str, Any], exis
     }
     project["transcriptIdentityVersion"] = project.get("transcriptIdentityVersion") or 2
     return project
+
+
+def _conversation_project_instance_id(row: dict[str, Any]) -> str:
+    metadata = _metadata(row.get("metadata"))
+    candidate = _project_instance_id(metadata.get("projectInstanceId"))
+    if candidate:
+        return candidate
+    storage_path = str(row.get("storage_path") or row.get("filename") or "").strip("/")
+    marker = "instances/hydro-001/code/"
+    if marker not in storage_path:
+        return ""
+    tail = storage_path.split(marker, 1)[1]
+    if tail.endswith("/thread.md"):
+        return _project_instance_id(tail[: -len("/thread.md")])
+    if tail.endswith("_hydro_chat.md"):
+        return _project_instance_id(tail[: -len("_hydro_chat.md")])
+    if tail.endswith(".md"):
+        return _project_instance_id(tail[:-3])
+    return ""
+
+
+def _conversation_project_payload(project_instance_id: str, row: dict[str, Any]) -> dict[str, Any]:
+    metadata = _metadata(row.get("metadata"))
+    last_updated = metadata.get("lastUpdated")
+    project_slug = _text(metadata.get("projectSlug"))
+    name = project_slug or project_instance_id
+    created_at = row.get("created_at")
+    updated_at = row.get("updated_at") or row.get("materialized_at") or created_at
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    last_opened_at = int(last_updated) if isinstance(last_updated, (int, float)) else now_ms
+    transcript_id = str(row.get("id") or "").strip()
+    return {
+        "id": project_instance_id,
+        "projectId": project_instance_id,
+        "projectInstanceId": project_instance_id,
+        "rootPath": f".hydro/workspaces/{project_instance_id}",
+        "name": name,
+        "source": "recovered",
+        "createdAt": last_opened_at,
+        "lastOpenedAt": last_opened_at,
+        "starterIntent": None,
+        "hydroInterestTags": [],
+        "stack": "react-vite-ts",
+        "transcriptIdentityVersion": metadata.get("transcriptPathVersion") or 2,
+        "transcriptIds": [transcript_id] if transcript_id else [],
+        "vvaultStoragePath": row.get("storage_path"),
+        "vvaultFileId": transcript_id or None,
+        "transcriptPath": row.get("storage_path"),
+        "updatedAt": updated_at,
+    }
 
 
 class CodeProjectRepository:
@@ -215,6 +274,29 @@ class CodeProjectRepository:
             current = projects_by_instance.get(project_instance_id)
             if not current or int(project.get("lastOpenedAt") or 0) >= int(current.get("lastOpenedAt") or 0):
                 projects_by_instance[project_instance_id] = project
+        conversation_rows = self._fetch(
+            f"""
+            SELECT {self._columns(include_content=False)}
+            FROM vault_files
+            WHERE user_id = %s
+              AND coalesce(is_system, false) = false
+              AND file_type IN ('conversation', 'transcript')
+              AND (
+                storage_path ILIKE 'instances/hydro-001/code/%%'
+                OR metadata->>'projectInstanceId' IS NOT NULL
+              )
+            ORDER BY coalesce(updated_at, created_at) DESC
+            """,
+            (user_id,),
+        )
+        for row in conversation_rows:
+            project_instance_id = _conversation_project_instance_id(row)
+            if not project_instance_id:
+                continue
+            project = _conversation_project_payload(project_instance_id, row)
+            current = projects_by_instance.get(project_instance_id)
+            if not current or int(project.get("lastOpenedAt") or 0) >= int(current.get("lastOpenedAt") or 0):
+                projects_by_instance[project_instance_id] = project
         return sorted(
             projects_by_instance.values(),
             key=lambda item: (-(int(item.get("lastOpenedAt") or 0)), str(item.get("name") or "")),
@@ -238,11 +320,98 @@ class CodeProjectRepository:
             (user_id, _project_storage_path(project_instance_id), PROJECT_FILE_TYPE),
         )
         if not row:
-            return None
+            row = self._one(
+                f"""
+                SELECT {self._columns(include_content=False)}
+                FROM vault_files
+                WHERE user_id = %s
+                  AND coalesce(is_system, false) = false
+                  AND file_type IN ('conversation', 'transcript')
+                  AND (
+                    metadata->>'projectInstanceId' = %s
+                    OR storage_path = %s
+                    OR storage_path = %s
+                  )
+                ORDER BY coalesce(updated_at, created_at) DESC
+                LIMIT 1
+                """,
+                (
+                    user_id,
+                    project_instance_id,
+                    f"instances/hydro-001/code/{project_instance_id}/thread.md",
+                    f"instances/hydro-001/code/{project_instance_id}_hydro_chat.md",
+                ),
+            )
+            if not row:
+                return None
+            return _conversation_project_payload(project_instance_id, row)
         project = _project_payload(project_instance_id, _json(row.get("content")), row)
         project["vvaultFileId"] = row.get("id")
         project["vvaultStoragePath"] = row.get("storage_path")
         return project
+
+    def get_project_authority(
+        self, *, user_id: str, project_instance_id: str
+    ) -> dict[str, Any] | None:
+        """Return exact owner-qualified evidence for one canonical Code project.
+
+        Recovered conversation-only projections are intentionally excluded.  An
+        execution grant may be bound only to the canonical ``project.json`` row,
+        whose declared hash is checked against its normalized JSON content.
+        """
+
+        project_instance_id = _project_instance_id(project_instance_id)
+        if not project_instance_id:
+            return None
+        row = self._one(
+            f"""
+            SELECT {self._columns(include_content=True)}
+            FROM vault_files
+            WHERE user_id = %s
+              AND coalesce(is_system, false) = false
+              AND storage_path = %s
+              AND file_type = %s
+            ORDER BY coalesce(updated_at, created_at) DESC
+            LIMIT 1
+            """,
+            (user_id, _project_storage_path(project_instance_id), PROJECT_FILE_TYPE),
+        )
+        if not row:
+            return None
+        content = _json(row.get("content"))
+        if not content:
+            raise ValueError("Canonical Code project content is malformed")
+        canonical_bytes = _canonical_json_bytes(content)
+        actual_sha256 = hashlib.sha256(canonical_bytes).hexdigest()
+        declared_sha256 = _text(row.get("sha256")).lower()
+        # Historical rows were written with JSON's default separators.  Accept
+        # that exact stored representation as evidence while still projecting a
+        # stable canonical record hash for new runtime bindings.
+        legacy_bytes = json.dumps(content, sort_keys=True).encode("utf-8")
+        legacy_sha256 = hashlib.sha256(legacy_bytes).hexdigest()
+        if declared_sha256 not in {actual_sha256, legacy_sha256}:
+            raise ValueError("Canonical Code project hash is inconsistent")
+        project = _project_payload(project_instance_id, content, row)
+        updated_at = str(row.get("updated_at") or row.get("created_at") or "")
+        revision_basis = {
+            "fileId": str(row.get("id") or ""),
+            "ownerId": str(row.get("user_id") or user_id),
+            "projectInstanceId": project_instance_id,
+            "projectRecordSha256": actual_sha256,
+            "storagePath": str(row.get("storage_path") or ""),
+            "updatedAt": updated_at,
+        }
+        return {
+            "projectInstanceId": project_instance_id,
+            "projectName": str(project.get("name") or project_instance_id),
+            "canonicalRootPath": str(project.get("rootPath") or ""),
+            "projectRecordSha256": actual_sha256,
+            "projectRevision": hashlib.sha256(
+                _canonical_json_bytes(revision_basis)
+            ).hexdigest(),
+            "storagePath": str(row.get("storage_path") or ""),
+            "updatedAt": updated_at,
+        }
 
     def upsert_project(self, *, user_id: str, project: dict[str, Any]) -> dict[str, Any]:
         project_instance_id = _project_instance_id(project.get("projectInstanceId") or project.get("projectId") or project.get("id"))
@@ -452,7 +621,9 @@ class CodeProjectRepository:
             conn.commit()
         return changed
 
-    def list_transcript_links(self, *, project_instance_id: str) -> list[dict[str, Any]]:
+    def list_transcript_links(
+        self, *, user_id: str, project_instance_id: str
+    ) -> list[dict[str, Any]]:
         project_instance_id = _project_instance_id(project_instance_id)
         if not project_instance_id:
             return []
@@ -460,9 +631,10 @@ class CodeProjectRepository:
             """
             SELECT id::text AS id, title, created_at, materialized_at, source_row_id, source_hash
             FROM transcripts
-            WHERE lower(coalesce(title, '') || ' ' || coalesce(source_row_id::text, '') || ' ' || coalesce(source_hash, ''))
+            WHERE user_id = %s
+              AND lower(coalesce(title, '') || ' ' || coalesce(source_row_id::text, '') || ' ' || coalesce(source_hash, ''))
                   LIKE %s
             ORDER BY coalesce(materialized_at, created_at) DESC
             """,
-            (f"%{project_instance_id.lower()}%",),
+            (user_id, f"%{project_instance_id.lower()}%"),
         )

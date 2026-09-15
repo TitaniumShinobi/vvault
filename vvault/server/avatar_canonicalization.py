@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-MAX_AVATAR_BYTES = 5 * 1024 * 1024
+MAX_AVATAR_BYTES = 50 * 1024 * 1024
 DATA_URL_RE = re.compile(r"^data:(image/[^;]+);base64,(.+)$", re.IGNORECASE | re.DOTALL)
 
 

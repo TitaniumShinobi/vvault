@@ -102,16 +102,6 @@ const CreateConstruct = ({ user }) => {
     setLoading(true);
 
     try {
-      let token = null;
-      try {
-        const savedUser = localStorage.getItem('vvault_user');
-        if (savedUser) {
-          const parsed = JSON.parse(savedUser);
-          if (parsed.token) token = parsed.token;
-        }
-      } catch (err) {}
-      if (!token) token = localStorage.getItem('vvault_token') || null;
-
       const formData = new FormData();
       formData.append('name', name.trim());
       formData.append('callsign', callsign.trim());
@@ -122,13 +112,21 @@ const CreateConstruct = ({ user }) => {
       if (centerImage) formData.append('center_image', centerImage);
 
       const headers = {};
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
+      const provenanceResponse = await fetch('/api/chatty/construct/create-provenance', {
+        method: 'GET',
+        headers,
+        credentials: 'same-origin',
+      });
+      const provenanceData = await provenanceResponse.json();
+      if (!provenanceResponse.ok || !provenanceData.provenance) {
+        throw new Error(provenanceData.error || 'Construct creation authorization failed.');
       }
+      headers['X-VVAULT-Creation-Provenance'] = provenanceData.provenance;
 
       const response = await fetch('/api/chatty/construct/create', {
         method: 'POST',
         headers,
+        credentials: 'same-origin',
         body: formData
       });
 

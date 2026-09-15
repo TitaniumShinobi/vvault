@@ -1125,7 +1125,7 @@ class VVaultAuthRepository:
         self, *, user_id: str, device_secret_digest: str, token_hash: str,
         expires_at: datetime, required_documents: Sequence[Mapping[str, str]],
     ) -> dict[str, Any] | None:
-        """Rotate an ACTIVE owner's session only on its existing trusted device.
+        """Issue an ACTIVE owner's session on a verified browser device.
 
         Legal recertification and device recognition are separate checks.  The
         trusted device digest is an opaque, HttpOnly browser cookie digest; it
@@ -1150,12 +1150,66 @@ class VVaultAuthRepository:
                 )
                 device = _row_to_dict(cur.fetchone())
                 if not device:
+                    # The caller has already verified OAuth/email identity and
+                    # current legal receipts. Bind this opaque browser
+                    # recognizer to the same owner before issuing NORMAL.
+                    cur.execute(
+                        """INSERT INTO enrollment_devices
+                           (user_id, device_secret_digest, label, status, approved_by_user_id, approved_at)
+                           VALUES (%s,%s,'Verified browser','TRUSTED',%s,now())
+                           ON CONFLICT (device_secret_digest) DO NOTHING
+                           RETURNING id""",
+                        (user_id, device_secret_digest, user_id),
+                    )
+                    device = _row_to_dict(cur.fetchone())
+                if not device:
+                    # A recognizer can only be reused by its existing owner;
+                    # never bind a conflicting digest across accounts.
+                    cur.execute(
+                        """SELECT id FROM enrollment_devices
+                            WHERE user_id=%s AND device_secret_digest=%s
+                              AND status='TRUSTED' AND revoked_at IS NULL
+                            FOR UPDATE""",
+                        (user_id, device_secret_digest),
+                    )
+                    device = _row_to_dict(cur.fetchone())
+                if not device:
                     conn.rollback(); return None
                 cur.execute(
                     """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind, enrollment_device_id)
                        VALUES(%s,%s,%s,'NORMAL',%s)
                        RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
                     (user_id, token_hash, expires_at, device["id"]),
+                )
+                session = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return session
+
+    def issue_active_session(
+        self, *, user_id: str, token_hash: str, expires_at: datetime,
+        required_documents: Sequence[Mapping[str, str]],
+    ) -> dict[str, Any] | None:
+        """Issue a normal session after a verified sign-in.
+
+        This remains owner- and legal-receipt-bound, but does not require a
+        previously enrolled browser as a second sign-in factor.
+        """
+        required = {
+            (str(row.get("key") or ""), str(row.get("version") or ""), str(row.get("sha256") or ""))
+            for row in required_documents
+        }
+        if not token_hash or not required or any(not all(row) for row in required):
+            raise ValueError("active session arguments are incomplete")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM users WHERE id=%s AND account_state='ACTIVE' FOR UPDATE", (user_id,))
+                if not cur.fetchone() or not self._has_current_legal_receipts_locked(cur, user_id=user_id, required=required):
+                    conn.rollback(); return None
+                cur.execute(
+                    """INSERT INTO sessions(user_id, token_hash, expires_at, enrollment_session_kind)
+                       VALUES(%s,%s,%s,'NORMAL')
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (user_id, token_hash, expires_at),
                 )
                 session = _row_to_dict(cur.fetchone())
             conn.commit()

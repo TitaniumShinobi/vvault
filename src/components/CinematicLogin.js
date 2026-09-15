@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import './CinematicLogin.css';
 import wreckSymbol from '../../assets/WRECK_INVERTED.svg';
+import { checkOAuthProvider } from '../utils/oauthEntryPoints.mjs';
 
-const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
-  const recoveryMode = new URLSearchParams(window.location.search).get('account_recovery') === '1';
+const CinematicLogin = ({ onLogin, pendingSignup = false, children, accountRecovery = false }) => {
+  const recoveryMode = accountRecovery || new URLSearchParams(window.location.search).get('account_recovery') === '1';
   const [isSignInMode, setIsSignInMode] = useState(!pendingSignup && !children);
   const signupStep = 1;
   const [signupDocuments, setSignupDocuments] = useState([]);
@@ -25,15 +26,17 @@ const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
   const [magicAvailable, setMagicAvailable] = useState(null);
   const switchToSignup = () => { setIsSignInMode(false); setError(''); setStatus(''); };
   const switchToSignin = () => { setIsSignInMode(true); setError(''); setStatus(''); };
-  const handleOAuth = (name) => {
+  const handleOAuth = async (name) => {
     const provider = name.toLowerCase();
-    if (!['google', 'github'].includes(provider)) {
-      setError(`${name} sign-in is not configured. Choose Google or email.`);
-      return;
-    }
     if (!isSignInMode) {
       if (!chattyAccepted || !vvaultAccepted || signupDocuments.length !== 6) {
         setError('Review and accept both products’ current documents to create your accounts.'); return;
+      }
+      try {
+        await checkOAuthProvider(provider);
+      } catch (err) {
+        setError(err.message);
+        return;
       }
       let policy = document.querySelector('meta[name="referrer"]'); if (!policy) { policy = document.createElement('meta'); policy.name='referrer'; document.head.appendChild(policy); } policy.content='strict-origin';
       const form = document.createElement('form'); form.method = 'POST'; form.action = `/api/auth/oauth/${provider}`;
@@ -42,10 +45,19 @@ const CinematicLogin = ({ onLogin, pendingSignup = false, children }) => {
       }
       document.body.appendChild(form); form.submit(); return;
     }
+    try {
+      await checkOAuthProvider(provider);
+    } catch (err) {
+      setError(err.message);
+      return;
+    }
     window.location.assign(`/api/auth/oauth/${provider}`);
   };
   useEffect(() => {
-    fetch('/api/auth/email-codes/health', { credentials: 'same-origin' })
+    // Recovery links use the independent magic-link delivery path.  Checking
+    // OTP configuration here would incorrectly disable an otherwise healthy
+    // recovery button.
+    fetch(recoveryMode ? '/api/auth/email-magic-links/health' : '/api/auth/email-codes/health', { credentials: 'same-origin' })
       .then(async response => setMagicAvailable(response.ok && (await response.json()).available === true))
       .catch(() => setMagicAvailable(false));
     if(new URLSearchParams(window.location.search).get('email_code_requested')==='1') {
