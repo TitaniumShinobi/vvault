@@ -7996,7 +7996,10 @@ def get_chatty_constructs():
     'katana-001' transcripts exist, only 'katana-001' is returned.
     """
     try:
-        body_payload, body_status = chatty_body_service.list_constructs().to_response()
+        owner_user_id = _get_authenticated_user_id()
+        if not owner_user_id:
+            return jsonify({"success": False, "error": "Canonical VVAULT owner binding is required"}), 409
+        body_payload, body_status = chatty_body_service.list_constructs(owner_user_id).to_response()
         return jsonify(body_payload), body_status
         read_allowed, read_state = LEGACY_REMOTE_STEWARD.allow_read()
         if not read_allowed:

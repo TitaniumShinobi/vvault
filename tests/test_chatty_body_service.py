@@ -84,7 +84,7 @@ def test_construct_list_is_body_native_and_uses_canonical_construct_metadata(mon
         fake_rows,
     )
 
-    payload, status = body.list_constructs().to_response()
+    payload, status = body.list_constructs("00000000-0000-4000-8000-000000000001").to_response()
 
     assert status == 200
     assert payload["success"] is True
@@ -92,13 +92,15 @@ def test_construct_list_is_body_native_and_uses_canonical_construct_metadata(mon
     assert payload["storage_mode"] == "vvault_body"
     assert payload["source_database"] == "vvault_body_20260504t123219z"
     assert "construct_id" in captured["sql"]
-    assert "chat_with" not in captured["params"][0]
+    assert captured["params"] == ("00000000-0000-4000-8000-000000000001", "%instances/%")
     assert payload["constructs"] == [
         {
             "construct_id": "nova-001",
             "name": "Nova",
             "filename": "chat_with_nova-001.md",
             "created_at": "2026-05-04T12:00:00+00:00",
+            "avatar_exists": False,
+            "avatar_sha256": None,
             "body_source": "ovvaults.vault_files",
         },
         {
@@ -106,10 +108,68 @@ def test_construct_list_is_body_native_and_uses_canonical_construct_metadata(mon
             "name": "Zen",
             "filename": "chat_with_zen-001.md",
             "created_at": "2026-05-04T12:00:00+00:00",
+            "avatar_exists": False,
+            "avatar_sha256": None,
             "body_source": "ovvaults.vault_files",
         }
     ]
     assert payload["count"] == 2
+
+
+def test_construct_list_is_owner_scoped_and_retains_avatar_hash_when_newer_metadata_wins(monkeypatch):
+    owner_id = "00000000-0000-4000-8000-000000000001"
+    avatar_sha = "a" * 64
+
+    def fake_rows(sql, params=()):
+        assert "WHERE user_id = %s" in sql
+        assert params == (owner_id, "%instances/%")
+        return [
+            {
+                "id": "avatar-1",
+                "filename": "avatar.png",
+                "object_key": "instances/zen-001/identity/avatar.png",
+                "storage_path": "instances/zen-001/identity/avatar.png",
+                "construct_id": "zen-001",
+                "metadata": {},
+                "content_type": "image/png",
+                "created_at": _created_at(),
+                "sha256": avatar_sha,
+            },
+            {
+                "id": "metadata-1",
+                "filename": "metadata.json",
+                "object_key": "instances/zen-001/config/metadata.json",
+                "storage_path": "instances/zen-001/config/metadata.json",
+                "construct_id": "zen-001",
+                "metadata": {},
+                "content_type": "application/json",
+                "created_at": _created_at().replace(year=2027),
+                "sha256": "b" * 64,
+            },
+        ]
+
+    monkeypatch.setattr(body, "_rows", fake_rows)
+
+    payload, status = body.list_constructs(owner_id).to_response()
+
+    assert status == 200
+    assert payload["constructs"] == [{
+        "construct_id": "zen-001",
+        "name": "Zen",
+        "filename": "chat_with_zen-001.md",
+        "created_at": "2027-05-04T12:00:00+00:00",
+        "avatar_exists": True,
+        "avatar_sha256": avatar_sha,
+        "body_source": "ovvaults.vault_files",
+    }]
+
+
+def test_construct_list_rejects_an_unbound_owner():
+    payload, status = body.list_constructs("").to_response()
+
+    assert status == 503
+    assert payload["success"] is False
+    assert payload["reason"] == "A canonical VVAULT owner binding is required"
 
 
 def test_construct_file_inventory_is_body_native(monkeypatch):
