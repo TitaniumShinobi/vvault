@@ -2609,6 +2609,44 @@ def _binary_data_url_from_row(row: Optional[Dict[str, Any]]) -> Tuple[Optional[s
     return data_url, mime
 
 
+def _chatty_owner_avatar(owner_user_id: str, construct_id: str) -> Dict[str, Any]:
+    """Read one owner-qualified canonical avatar and verify its stored hash."""
+    callsign = _normalize_callsign(construct_id)
+    rows = _query_construct_identity_rows(callsign, str(owner_user_id))
+    avatar_row = next(
+        (
+            row for row in rows
+            if re.search(
+                r"(?:^|/)identity/avatar\.(?:png|jpe?g|webp|gif|avif)$",
+                str(row.get("storage_path") or row.get("object_key") or row.get("filename") or ""),
+                re.IGNORECASE,
+            )
+        ),
+        None,
+    )
+    if not avatar_row:
+        return {"state": "missing", "errorCode": None}
+    data_url, content_type = _binary_data_url_from_row(avatar_row)
+    if not data_url or not content_type or "," not in data_url:
+        return {"state": "hydration_error", "errorCode": "AVATAR_BODY_UNAVAILABLE"}
+    try:
+        image_bytes = base64.b64decode(data_url.split(",", 1)[1], validate=True)
+    except (ValueError, TypeError):
+        return {"state": "hydration_error", "errorCode": "AVATAR_BODY_INVALID"}
+    expected_sha = str(avatar_row.get("sha256") or "").strip().lower()
+    actual_sha = hashlib.sha256(image_bytes).hexdigest()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        return {"state": "hydration_error", "errorCode": "AVATAR_SHA256_UNAVAILABLE"}
+    if not hmac.compare_digest(actual_sha, expected_sha):
+        return {"state": "hydration_error", "errorCode": "AVATAR_SHA256_MISMATCH"}
+    return {
+        "state": "available",
+        "sha256": expected_sha,
+        "contentType": content_type,
+        "body": image_bytes,
+    }
+
+
 def _query_construct_identity_rows(callsign: str, user_id: Optional[str]) -> List[Dict[str, Any]]:
     bare_name = _bare_name_from_callsign(callsign)
     return _dedupe_vault_rows(
@@ -7384,6 +7422,51 @@ def get_construct_files(construct_id):
     except Exception as e:
         logger.error(f"Error fetching construct files for {construct_id}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/chatty/construct/<construct_id>/avatar')
+@require_chatty_auth
+def get_construct_avatar_descriptor(construct_id):
+    owner_user_id = _get_authenticated_user_id()
+    if not owner_user_id:
+        return jsonify({"success": False, "error": "Canonical VVAULT owner binding is required"}), 409
+    result = _chatty_owner_avatar(owner_user_id, construct_id)
+    status = 200 if result["state"] in {"available", "missing"} else 503
+    response = {
+        "success": status == 200,
+        "status": "body_native",
+        "constructId": _normalize_callsign(construct_id),
+        "state": result["state"],
+        "avatar": {
+            "state": result["state"],
+            "sha256": result.get("sha256"),
+            "contentType": result.get("contentType"),
+        },
+        "errorCode": result.get("errorCode"),
+    }
+    return jsonify(response), status
+
+
+@app.route('/api/chatty/construct/<construct_id>/avatar/bytes')
+@require_chatty_auth
+def get_construct_avatar_bytes(construct_id):
+    owner_user_id = _get_authenticated_user_id()
+    if not owner_user_id:
+        return jsonify({"success": False, "error": "Canonical VVAULT owner binding is required"}), 409
+    result = _chatty_owner_avatar(owner_user_id, construct_id)
+    if result["state"] == "missing":
+        return jsonify({"success": False, "state": "missing", "errorCode": "AVATAR_NOT_FOUND"}), 404
+    if result["state"] != "available":
+        return jsonify({"success": False, "state": "hydration_error", "errorCode": result.get("errorCode")}), 503
+    etag = f'"{result["sha256"]}"'
+    if request.headers.get("If-None-Match") == etag:
+        return Response(status=304)
+    response = Response(result["body"], status=200, mimetype=result["contentType"])
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "private, max-age=60, stale-if-error=300"
+    response.headers["Vary"] = "Authorization, Cookie, X-Chatty-User"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @app.route('/api/chatty/construct/<construct_id>/identity')

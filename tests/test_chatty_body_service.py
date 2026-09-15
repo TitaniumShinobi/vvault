@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 from datetime import datetime, timezone
 from unittest.mock import Mock
 from uuid import uuid4
@@ -170,6 +172,34 @@ def test_construct_list_rejects_an_unbound_owner():
     assert status == 503
     assert payload["success"] is False
     assert payload["reason"] == "A canonical VVAULT owner binding is required"
+
+
+def test_owner_avatar_hydration_reads_only_the_owner_qualified_identity_row(monkeypatch):
+    owner_id = "00000000-0000-4000-8000-000000000001"
+    image_bytes = b"\x89PNG\r\n\x1a\nverified-avatar"
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    expected_sha = hashlib.sha256(image_bytes).hexdigest()
+
+    def fake_rows(callsign, user_id):
+        assert callsign == "zen-001"
+        assert user_id == owner_id
+        return [{
+            "filename": "avatar.png",
+            "storage_path": "instances/zen-001/identity/avatar.png",
+            "content": f"data:image/png;base64,{encoded}",
+            "sha256": expected_sha,
+        }]
+
+    monkeypatch.setattr(server, "_query_construct_identity_rows", fake_rows)
+
+    result = server._chatty_owner_avatar(owner_id, "zen-001")
+
+    assert result == {
+        "state": "available",
+        "sha256": expected_sha,
+        "contentType": "image/png",
+        "body": image_bytes,
+    }
 
 
 def test_construct_file_inventory_is_body_native(monkeypatch):
