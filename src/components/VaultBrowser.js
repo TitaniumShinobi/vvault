@@ -28,11 +28,18 @@ const parseVaultLocation = (pathname, search) => {
   if (segments[0] === 'my-ai-files') {
     return { mode: 'home', constructId: '', nodeId: '', legacyPath: [] };
   }
+  // Instances is a workspace projection, not a legacy filesystem path.
+  // Keeping it first-class prevents its construct preview from being replaced
+  // by the generic legacy listing after a direct /vault/instances navigation.
+  if (segments[0] === 'instances' && !segments[1]) {
+    return { mode: 'instances', constructId: '', nodeId: '', legacyPath: ['instances'] };
+  }
   if (segments[0] === 'folders' && segments[1]) {
     return {
       mode: 'drive',
       constructId: params.get('constructId') || '',
       nodeId: decodeURIComponent(segments[1]),
+      sourceScope: params.get('sourceScope') || 'vvault',
       workspaceRef: params.get('workspaceRef') || '',
       legacyPath: [],
     };
@@ -43,6 +50,7 @@ const parseVaultLocation = (pathname, search) => {
       mode: 'drive',
       constructId,
       nodeId: 'root',
+      sourceScope: params.get('sourceScope') || 'vvault',
       workspaceRef: params.get('workspaceRef') || '',
       legacyPath: ['instances', constructId],
     };
@@ -62,8 +70,9 @@ const vaultLocationForLegacyPath = (segments = []) => (
   segments.length ? `/vault/browse/${encodePathSegments(segments)}` : '/vault'
 );
 
-const vaultLocationForDriveFolder = (constructId, nodeId = 'root', workspaceRef = '') => {
+const vaultLocationForDriveFolder = (constructId, nodeId = 'root', sourceScope = 'vvault', workspaceRef = '') => {
   const params = new URLSearchParams();
+  if (sourceScope) params.set('sourceScope', sourceScope);
   if (workspaceRef) params.set('workspaceRef', workspaceRef);
   if (nodeId !== 'root') params.set('constructId', constructId);
   const query = params.toString();
@@ -435,8 +444,8 @@ const VaultBrowser = ({ user }) => {
     fetchUserInfo();
     fetchConstructs();
     if (routeState.mode === 'trash') fetchTrash();
-    else if (routeState.mode === 'home') fetchWorkspaceRoot();
-    else if (!['drive', 'home'].includes(routeState.mode)) fetchFiles();
+    else if (['home', 'instances'].includes(routeState.mode)) fetchWorkspaceRoot();
+    else if (!['drive', 'home', 'instances'].includes(routeState.mode)) fetchFiles();
   }, [fetchUserInfo, fetchFiles, fetchConstructs, fetchTrash, fetchWorkspaceRoot, routeState.mode]);
 
   useEffect(() => {
@@ -610,9 +619,11 @@ const VaultBrowser = ({ user }) => {
   const navigateToFolder = (folder) => {
     previewRequestIdRef.current += 1;
     if (routeState.mode === 'drive' && folder?.nodeId) {
-      navigate(vaultLocationForDriveFolder(routeState.constructId, folder.nodeId, routeState.workspaceRef));
-    } else if (['home', 'my-ai-files'].includes(routeState.mode) && folder?.constructId) {
-      navigate(vaultLocationForDriveFolder(folder.constructId, 'root', folder.workspaceRef));
+      navigate(vaultLocationForDriveFolder(routeState.constructId, folder.nodeId, routeState.sourceScope, routeState.workspaceRef));
+    } else if (['home', 'instances', 'my-ai-files'].includes(routeState.mode) && folder?.constructId) {
+      navigate(vaultLocationForDriveFolder(folder.constructId, 'root', folder.sourceRelyingPartyId, folder.workspaceRef));
+    } else if (routeState.mode === 'home' && folder?.semanticKind === 'instances_root') {
+      navigate('/vault/instances');
     } else {
       const folderName = typeof folder === 'string' ? folder : folder?.name;
       navigate(vaultLocationForLegacyPath([...currentPath, folderName]));
@@ -645,11 +656,13 @@ const VaultBrowser = ({ user }) => {
     previewRequestIdRef.current += 1;
     if (routeState.mode === 'drive') {
       if (index === 0) navigate('/vault');
-      else if (index === 1) navigate(vaultLocationForDriveFolder(routeState.constructId, 'root', routeState.workspaceRef));
+      else if (index === 1) navigate(vaultLocationForDriveFolder(routeState.constructId, 'root', routeState.sourceScope, routeState.workspaceRef));
       else {
         const breadcrumb = driveState.breadcrumbs[index - 2];
-        if (breadcrumb?.nodeId) navigate(vaultLocationForDriveFolder(routeState.constructId, breadcrumb.nodeId, routeState.workspaceRef));
+        if (breadcrumb?.nodeId) navigate(vaultLocationForDriveFolder(routeState.constructId, breadcrumb.nodeId, routeState.sourceScope, routeState.workspaceRef));
       }
+    } else if (routeState.mode === 'instances') {
+      navigate('/vault');
     } else {
       navigate(vaultLocationForLegacyPath(currentPath.slice(0, index + 1)));
     }
@@ -663,7 +676,7 @@ const VaultBrowser = ({ user }) => {
     if (path.length === 1 && path[0] === 'trash') {
       navigate('/vault/trash');
     } else if (path.length === 2 && path[0] === 'instances') {
-      navigate(vaultLocationForDriveFolder(path[1], 'root'));
+      navigate(vaultLocationForDriveFolder(path[1], 'root', routeState.sourceScope));
     } else {
       navigate(vaultLocationForLegacyPath(path));
     }
@@ -1151,17 +1164,31 @@ const VaultBrowser = ({ user }) => {
   const legacyFiles = currentFolder.files
     .filter((file) => !normalizedQuery || (file.displayName || file.filename || '').toLocaleLowerCase().includes(normalizedQuery))
     .sort((a, b) => (a.displayName || a.filename).localeCompare(b.displayName || b.filename));
+  const instanceRoot = workspaceState.children.find((child) => child.semanticKind === 'instances_root');
+  const instanceEntries = Array.isArray(instanceRoot?.childrenPreview)
+    ? instanceRoot.childrenPreview
+        .filter((child) => !normalizedQuery || child.name.toLocaleLowerCase().includes(normalizedQuery))
+        .map((child) => ({ ...child, updatedAt: child.updatedAt || null }))
+    : [];
   const folderEntries = routeState.mode === 'home'
     ? workspaceState.children
         .filter((child) => child.nodeType === 'folder')
         .filter((child) => !normalizedQuery || child.name.toLocaleLowerCase().includes(normalizedQuery))
         .map((child) => ({ ...child, updatedAt: child.updatedAt || null }))
+    : routeState.mode === 'instances'
+      ? instanceEntries
     : ['drive', 'trash'].includes(routeState.mode)
       ? driveFolders
       : legacyFolderNames.map((name) => ({ name }));
   const fileList = routeState.mode === 'home'
     ? []
     : ['drive', 'trash'].includes(routeState.mode) ? driveFiles : legacyFiles;
+  const projectionLoading = ['home', 'instances'].includes(routeState.mode)
+    ? workspaceState.loading
+    : routeState.mode === 'trash' ? trashState.loading : driveState.loading;
+  const projectionError = ['home', 'instances'].includes(routeState.mode)
+    ? workspaceState.error
+    : routeState.mode === 'trash' ? trashState.error : driveState.error;
 
   const favorites = [
     { name: 'All Files', icon: '📂', path: [] },
@@ -1172,7 +1199,7 @@ const VaultBrowser = ({ user }) => {
     { name: 'Trash', icon: '🗑️', path: ['trash'] },
   ];
 
-  if (loading && !['drive', 'trash', 'home', 'my-ai-files'].includes(routeState.mode)) {
+  if (loading && !['drive', 'trash', 'home', 'instances', 'my-ai-files'].includes(routeState.mode)) {
     return (
       <div className="vault-browser">
         <div className="vault-loading">
@@ -1183,7 +1210,7 @@ const VaultBrowser = ({ user }) => {
     );
   }
 
-  if (error && !['drive', 'trash', 'home', 'my-ai-files'].includes(routeState.mode)) {
+  if (error && !['drive', 'trash', 'home', 'instances', 'my-ai-files'].includes(routeState.mode)) {
     return (
       <div className="vault-browser">
         <div className="vault-error">
@@ -1203,6 +1230,10 @@ const VaultBrowser = ({ user }) => {
             <button className={`sidebar-item drive-nav-button ${routeState.mode === 'home' ? 'active' : ''}`} onClick={navigateHome}>
               <span className="sidebar-icon">⌂</span>
               <span className="sidebar-label">Home</span>
+            </button>
+            <button className={`sidebar-item drive-nav-button ${routeState.mode === 'instances' ? 'active' : ''}`} onClick={() => navigate('/vault/instances')}>
+              <span className="sidebar-icon">🤖</span>
+              <span className="sidebar-label">Instances</span>
             </button>
             <button className={`sidebar-item drive-nav-button ${routeState.mode === 'trash' ? 'active' : ''}`} onClick={() => navigate('/vault/trash')}>
               <span className="sidebar-icon">♲</span>
@@ -1640,6 +1671,16 @@ const VaultBrowser = ({ user }) => {
               <div className="empty-folder"><div className="loading-spinner small"></div><p>Loading folder…</p></div>
             )}
 
+            {['home', 'instances'].includes(routeState.mode) && workspaceState.loading && (
+              <div className="empty-folder"><div className="loading-spinner small"></div><p>Loading workspace…</p></div>
+            )}
+
+            {['home', 'instances'].includes(routeState.mode) && workspaceState.error && (
+              <div className="empty-folder drive-folder-error">
+                <span className="empty-icon">⚠</span><p>{workspaceState.error}</p><button onClick={fetchWorkspaceRoot}>Retry</button>
+              </div>
+            )}
+
             {routeState.mode === 'trash' && trashState.loading && (
               <div className="empty-folder"><div className="loading-spinner small"></div><p>Loading Trash…</p></div>
             )}
@@ -1655,10 +1696,10 @@ const VaultBrowser = ({ user }) => {
               </div>
             )}
 
-            {!(routeState.mode === 'trash' ? trashState.loading : driveState.loading) && !(routeState.mode === 'trash' ? trashState.error : driveState.error) && folderEntries.length === 0 && fileList.length === 0 && (
+            {!projectionLoading && !projectionError && folderEntries.length === 0 && fileList.length === 0 && (
               <div className="empty-folder">
                 <span className="empty-icon">📭</span>
-                <p>{routeState.mode === 'trash' ? 'Trash is empty' : 'This folder is empty'}</p>
+                <p>{routeState.mode === 'trash' ? 'Trash is empty' : routeState.mode === 'instances' ? 'No instances are available' : 'This folder is empty'}</p>
               </div>
             )}
           </div>

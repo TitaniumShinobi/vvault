@@ -47,6 +47,19 @@ def test_workspace_routes_derive_owner_and_lane_server_side():
     assert "parentNodeId: nodeId || 'root', workspaceRef" in browser
 
 
+def test_plain_instances_route_is_a_workspace_projection_not_a_legacy_folder():
+    browser = Path("src/components/VaultBrowser.js").read_text()
+
+    assert "mode: 'instances'" in browser
+    assert "['home', 'instances'].includes(routeState.mode)" in browser
+    assert "fetchWorkspaceRoot" in browser
+    assert "semanticKind === 'instances_root'" in browser
+    assert "childrenPreview" in browser
+    assert "sourceScope" in browser
+    assert "No instances are available" in browser
+    assert "routeState.mode === 'instances' ? 'No instances are available' : 'This folder is empty'" in browser
+
+
 def test_workspace_projection_queries_are_owner_scoped():
     source = Path("vvault/server/chatty_body_service.py").read_text()
     helper = source.split("def list_constructs_for_vvault_workspace", 1)[1].split(
