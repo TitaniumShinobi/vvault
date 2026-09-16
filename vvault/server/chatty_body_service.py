@@ -371,23 +371,34 @@ def body_missing(route: str, *, reason: str | None = None) -> BodyResult:
     )
 
 
-def list_constructs() -> BodyResult:
+def list_constructs(user_id: str) -> BodyResult:
     route = "/api/chatty/constructs"
+    owner_id = str(user_id or "").strip()
+    if not owner_id:
+        return _blocked(
+            route,
+            reason="A canonical VVAULT owner binding is required",
+            missing_fields=[],
+            missing_tables=[],
+        )
     try:
         rows = _rows(
             """
             SELECT id, filename, object_key, storage_path, construct_id, metadata,
                    content_type, created_at, sha256
             FROM vault_files
-            WHERE nullif(btrim(coalesce(construct_id, '')), '') IS NOT NULL
-               OR lower(
-                    coalesce(storage_path, '') || ' ' ||
-                    coalesce(object_key, '') || ' ' ||
-                    coalesce(filename, '')
-                  ) LIKE %s
+            WHERE user_id = %s
+              AND (
+                    nullif(btrim(coalesce(construct_id, '')), '') IS NOT NULL
+                    OR lower(
+                        coalesce(storage_path, '') || ' ' ||
+                        coalesce(object_key, '') || ' ' ||
+                        coalesce(filename, '')
+                    ) LIKE %s
+              )
             ORDER BY created_at ASC
             """,
-            ("%instances/%",),
+            (owner_id, "%instances/%"),
         )
     except Exception as exc:
         return _blocked(
@@ -401,16 +412,35 @@ def list_constructs() -> BodyResult:
         callsign = _construct_from_file(row)
         if not callsign:
             continue
+        path = str(
+            row.get("storage_path") or row.get("object_key") or row.get("filename") or ""
+        ).lower()
+        is_avatar = bool(re.search(
+            rf"(?:^|/)instances/{re.escape(callsign)}/identity/avatar\.(?:png|jpe?g|webp|gif|avif)(?:$|[ #])",
+            path,
+        ))
         created = row.get("created_at")
         created_text = created.isoformat() if hasattr(created, "isoformat") else created
         current = seen.get(callsign)
         if current and (current.get("created_at") or "") >= (created_text or ""):
+            if is_avatar and row.get("sha256") and not current.get("avatar_sha256"):
+                current["avatar_exists"] = True
+                current["avatar_sha256"] = str(row["sha256"])
             continue
         seen[callsign] = {
             "construct_id": callsign,
             "name": display_name(callsign),
             "filename": f"chat_with_{callsign}.md",
             "created_at": created_text,
+            "avatar_exists": (
+                (is_avatar and bool(row.get("sha256")))
+                or bool(current and current.get("avatar_exists"))
+            ),
+            "avatar_sha256": (
+                str(row["sha256"])
+                if is_avatar and row.get("sha256")
+                else (current or {}).get("avatar_sha256")
+            ),
             "body_source": "ovvaults.vault_files",
         }
     constructs = sorted(seen.values(), key=lambda item: item["construct_id"])
