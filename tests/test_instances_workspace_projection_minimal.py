@@ -37,7 +37,8 @@ def test_workspace_root_projects_duplicate_lanes_as_one_canonical_instance():
 
     instances = result["children"][1]["childrenPreview"]
     assert [item["nodeId"] for item in instances] == ["instance:zen-001"]
-    assert [item["name"] for item in instances] == ["Zen"]
+    assert [item["name"] for item in instances] == ["zen-001"]
+    assert [item["displayName"] for item in instances] == ["Zen"]
     assert instances[0]["logicalPath"] == "instances/zen-001"
     assert instances[0]["sourceRelyingPartyId"] == "vvault"
 
@@ -57,9 +58,9 @@ def test_workspace_root_keeps_distinct_callsigns_and_construct_id_fallback():
         (item["nodeId"], item["name"], item["logicalPath"])
         for item in result["children"][1]["childrenPreview"]
     ] == [
-        ("instance:arbiter-001", "Arbiter", "instances/arbiter-001"),
-        ("instance:arbiter-002", "Arbiter", "instances/arbiter-002"),
-        ("instance:clean-001", "CleanGPT", "instances/clean-001"),
+        ("instance:arbiter-001", "arbiter-001", "instances/arbiter-001"),
+        ("instance:arbiter-002", "arbiter-002", "instances/arbiter-002"),
+        ("instance:clean-001", "clean-001", "instances/clean-001"),
     ]
 
 

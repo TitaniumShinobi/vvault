@@ -296,7 +296,11 @@ class VaultDriveRepository:
             construct_items.append({
                 "nodeId": f"instance:{callsign}",
                 "nodeType": "folder",
-                "name": str(primary.get("displayName") or primary.get("name") or callsign),
+                # The instances filesystem is addressed and labeled by its stable
+                # callsign.  An authored name is descriptive metadata, never the
+                # folder identity shown at this level.
+                "name": callsign,
+                "displayName": str(primary.get("displayName") or primary.get("name") or callsign),
                 "logicalPath": f"instances/{callsign}",
                 "constructId": callsign,
                 "semanticKind": "instance_root",
