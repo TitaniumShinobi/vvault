@@ -277,12 +277,28 @@ class VaultDriveRepository:
             if cached and time.monotonic() - cached[0] <= self.CACHE_TTL_SECONDS:
                 return json.loads(json.dumps({**cached[1], "cacheState": "fresh"}))
 
+        callsign_count: dict[str, int] = {}
+        for item in constructs:
+            callsign = str(item.get("callsign") or item.get("construct_id") or "").strip()
+            if callsign:
+                callsign_count[callsign] = callsign_count.get(callsign, 0) + 1
+
         construct_items = sorted(
             (
                 {
-                    "nodeId": f"instance:{str(item.get('callsign') or item.get('construct_id'))}",
+                    "nodeId": (
+                        f"instance:{str(item.get('sourceRelyingPartyId') or 'vvault')}:"
+                        f"{str(item.get('callsign') or item.get('construct_id'))}"
+                    ),
                     "nodeType": "folder",
-                    "name": str(item.get("displayName") or item.get("name") or item.get("callsign")),
+                    "name": (
+                        f"{str(item.get('displayName') or item.get('name') or item.get('callsign'))}"
+                        f" ({str(item.get('sourceRelyingPartyId') or 'vvault')})"
+                        if callsign_count.get(
+                            str(item.get("callsign") or item.get("construct_id") or ""), 0
+                        ) > 1
+                        else str(item.get("displayName") or item.get("name") or item.get("callsign"))
+                    ),
                     "logicalPath": f"instances/{str(item.get('callsign') or item.get('construct_id'))}",
                     "constructId": str(item.get("callsign") or item.get("construct_id")),
                     "semanticKind": "instance_root",

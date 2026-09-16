@@ -26,6 +26,28 @@ def test_workspace_root_has_only_contracted_roots_and_retains_lane_provenance():
     assert "system" not in str(result).lower()
 
 
+def test_workspace_root_lane_qualifies_duplicate_construct_cards():
+    result = VaultDriveRepository().workspace_root(
+        owner_user_id="owner-a",
+        constructs=[
+            {"callsign": "zen-001", "displayName": "Zen", "sourceRelyingPartyId": lane}
+            for lane in ("chatty", "chatty-cli", "vvault")
+        ],
+    )
+
+    instances = result["children"][1]["childrenPreview"]
+    assert [item["nodeId"] for item in instances] == [
+        "instance:chatty:zen-001",
+        "instance:chatty-cli:zen-001",
+        "instance:vvault:zen-001",
+    ]
+    assert [item["name"] for item in instances] == [
+        "Zen (chatty)",
+        "Zen (chatty-cli)",
+        "Zen (vvault)",
+    ]
+
+
 def test_workspace_routes_derive_owner_and_lane_server_side():
     source = Path("vvault/server/vvault_web_server.py").read_text()
 
