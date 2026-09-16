@@ -1,0 +1,38 @@
+name: Audit VVAULT Host Checkout (Read Only)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Audit host checkout without mutation
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          script: |
+            set -eu
+            repo=/opt/vvault-public
+            cd "$repo"
+            printf 'BRANCH\n'
+            git branch --show-current
+            printf 'HEAD\n'
+            git rev-parse HEAD
+            printf 'ORIGIN_PRODUCTION\n'
+            git rev-parse origin/production
+            printf 'STATUS\n'
+            git status --short
+            printf 'DIRTY_PATH_COUNT\n'
+            git status --porcelain --untracked-files=normal | wc -l
+            printf 'TRACKED_NAME_STATUS\n'
+            git diff --name-status
+            printf 'TRACKED_STAT\n'
+            git diff --stat
+            printf 'UNTRACKED\n'
+            git ls-files --others --exclude-standard
+            printf 'HEAD_ORIGIN_RELATION\n'
+            git rev-list --left-right --count HEAD...origin/production
