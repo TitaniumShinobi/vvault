@@ -277,41 +277,35 @@ class VaultDriveRepository:
             if cached and time.monotonic() - cached[0] <= self.CACHE_TTL_SECONDS:
                 return json.loads(json.dumps({**cached[1], "cacheState": "fresh"}))
 
-        callsign_count: dict[str, int] = {}
+        lane_priority = {"vvault": 0, "chatty": 1, "chatty-cli": 2}
+        constructs_by_callsign: dict[str, list[dict[str, Any]]] = {}
         for item in constructs:
             callsign = str(item.get("callsign") or item.get("construct_id") or "").strip()
             if callsign:
-                callsign_count[callsign] = callsign_count.get(callsign, 0) + 1
+                constructs_by_callsign.setdefault(callsign, []).append(item)
 
-        construct_items = sorted(
-            (
-                {
-                    "nodeId": (
-                        f"instance:{str(item.get('sourceRelyingPartyId') or 'vvault')}:"
-                        f"{str(item.get('callsign') or item.get('construct_id'))}"
-                    ),
-                    "nodeType": "folder",
-                    "name": (
-                        f"{str(item.get('displayName') or item.get('name') or item.get('callsign'))}"
-                        f" ({str(item.get('sourceRelyingPartyId') or 'vvault')})"
-                        if callsign_count.get(
-                            str(item.get("callsign") or item.get("construct_id") or ""), 0
-                        ) > 1
-                        else str(item.get("displayName") or item.get("name") or item.get("callsign"))
-                    ),
-                    "logicalPath": f"instances/{str(item.get('callsign') or item.get('construct_id'))}",
-                    "constructId": str(item.get("callsign") or item.get("construct_id")),
-                    "semanticKind": "instance_root",
-                    "protected": True,
-                    "source": "owner_construct_projection",
-                    "sourceRelyingPartyId": str(item.get("sourceRelyingPartyId") or "vvault"),
-                    "workspaceRef": str(item.get("workspaceRef") or ""),
-                }
-                for item in constructs
-                if str(item.get("callsign") or item.get("construct_id") or "").strip()
-            ),
-            key=lambda item: (item["name"].casefold(), item["constructId"]),
-        )
+        construct_items: list[dict[str, Any]] = []
+        for callsign, lane_items in constructs_by_callsign.items():
+            primary = min(
+                lane_items,
+                key=lambda item: (
+                    lane_priority.get(str(item.get("sourceRelyingPartyId") or ""), 99),
+                    str(item.get("sourceRelyingPartyId") or ""),
+                ),
+            )
+            construct_items.append({
+                "nodeId": f"instance:{callsign}",
+                "nodeType": "folder",
+                "name": str(primary.get("displayName") or primary.get("name") or callsign),
+                "logicalPath": f"instances/{callsign}",
+                "constructId": callsign,
+                "semanticKind": "instance_root",
+                "protected": True,
+                "source": "owner_construct_projection",
+                "sourceRelyingPartyId": str(primary.get("sourceRelyingPartyId") or "vvault"),
+                "workspaceRef": str(primary.get("workspaceRef") or ""),
+            })
+        construct_items.sort(key=lambda item: (item["name"].casefold(), item["constructId"]))
 
         def root_node(name: str, semantic_kind: str, *, protected: bool = True) -> dict[str, Any]:
             return {

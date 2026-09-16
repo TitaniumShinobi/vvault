@@ -26,7 +26,7 @@ def test_workspace_root_has_only_contracted_roots_and_retains_lane_provenance():
     assert "system" not in str(result).lower()
 
 
-def test_workspace_root_lane_qualifies_duplicate_construct_cards():
+def test_workspace_root_projects_duplicate_lanes_as_one_canonical_instance():
     result = VaultDriveRepository().workspace_root(
         owner_user_id="owner-a",
         constructs=[
@@ -36,15 +36,30 @@ def test_workspace_root_lane_qualifies_duplicate_construct_cards():
     )
 
     instances = result["children"][1]["childrenPreview"]
-    assert [item["nodeId"] for item in instances] == [
-        "instance:chatty:zen-001",
-        "instance:chatty-cli:zen-001",
-        "instance:vvault:zen-001",
-    ]
-    assert [item["name"] for item in instances] == [
-        "Zen (chatty)",
-        "Zen (chatty-cli)",
-        "Zen (vvault)",
+    assert [item["nodeId"] for item in instances] == ["instance:zen-001"]
+    assert [item["name"] for item in instances] == ["Zen"]
+    assert instances[0]["logicalPath"] == "instances/zen-001"
+    assert instances[0]["sourceRelyingPartyId"] == "vvault"
+
+
+def test_workspace_root_keeps_distinct_callsigns_and_construct_id_fallback():
+    result = VaultDriveRepository().workspace_root(
+        owner_user_id="owner-b",
+        constructs=[
+            {"callsign": "arbiter-001", "displayName": "Arbiter", "sourceRelyingPartyId": "chatty"},
+            {"callsign": "arbiter-002", "displayName": "Arbiter", "sourceRelyingPartyId": "vvault"},
+            {"construct_id": "clean-001", "displayName": "CleanGPT", "sourceRelyingPartyId": "chatty"},
+            {"displayName": "No canonical ID", "sourceRelyingPartyId": "vvault"},
+        ],
+    )
+
+    assert [
+        (item["nodeId"], item["name"], item["logicalPath"])
+        for item in result["children"][1]["childrenPreview"]
+    ] == [
+        ("instance:arbiter-001", "Arbiter", "instances/arbiter-001"),
+        ("instance:arbiter-002", "Arbiter", "instances/arbiter-002"),
+        ("instance:clean-001", "CleanGPT", "instances/clean-001"),
     ]
 
 
