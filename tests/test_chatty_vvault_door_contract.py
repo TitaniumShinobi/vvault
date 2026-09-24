@@ -293,5 +293,6 @@ def test_oauth_callback_origin_cannot_be_overridden_by_request_headers(monkeypat
     )
 
     assert response.status_code == 302
-    assert captured["redirect_uri"] == "http://127.0.0.1:8000/api/auth/google/callback"
+    # OAuth returns through the browser-facing VVAULT proxy, never its private backend.
+    assert captured["redirect_uri"] == "http://localhost:7784/api/auth/google/callback"
     assert parse_qs(urlparse(response.headers["Location"]).query)["response_type"] == ["code"]
