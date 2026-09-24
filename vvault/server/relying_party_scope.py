@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 
-_ALLOWED = frozenset({"chatty", "chatty-cli", "vvault"})
+_ALLOWED = frozenset({"chatty", "chatty-cli", "vvault", "grid"})
 _scope: ContextVar[str] = ContextVar("vvault_relying_party_id", default="vvault")
 
 
