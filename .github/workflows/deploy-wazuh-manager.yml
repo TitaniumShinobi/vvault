@@ -1,0 +1,81 @@
+name: Deploy manager-only Wazuh
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: vvault-wazuh-manager
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read-only VVAULT host preflight
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          script: |
+            set -eu
+            test "$(dpkg --print-architecture)" = amd64
+            test "$(df -Pk /var | awk 'NR==2 {print $4}')" -ge 5242880
+            id vvault >/dev/null
+            systemctl is-active vvault-backend.service >/dev/null
+            sudo -n true
+            if ss -ltn | grep -Eq '(^|[[:space:]])(0\.0\.0\.0|\[::\]):55000([[:space:]]|$)'; then
+              echo 'port 55000 is already publicly bound' >&2
+              exit 1
+            fi
+            curl --fail --silent --show-error http://127.0.0.1:8000/api/ready >/dev/null
+
+  install:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WAZUH_API_BOOTSTRAP_USER: ${{ secrets.WAZUH_API_BOOTSTRAP_USER }}
+      WAZUH_API_BOOTSTRAP_PASSWORD: ${{ secrets.WAZUH_API_BOOTSTRAP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate required bootstrap credentials
+        run: |
+          test -n "${WAZUH_API_BOOTSTRAP_USER}"
+          test -n "${WAZUH_API_BOOTSTRAP_PASSWORD}"
+      - name: Stage bounded installer
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          source: scripts/install-wazuh-manager.sh
+          target: /var/tmp/vvault-wazuh-deploy-${{ github.run_id }}
+      - name: Install and verify manager-only topology
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          WAZUH_API_BOOTSTRAP_USER: ${{ secrets.WAZUH_API_BOOTSTRAP_USER }}
+          WAZUH_API_BOOTSTRAP_PASSWORD: ${{ secrets.WAZUH_API_BOOTSTRAP_PASSWORD }}
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          envs: WAZUH_API_BOOTSTRAP_USER,WAZUH_API_BOOTSTRAP_PASSWORD
+          command_timeout: 25m
+          script: |
+            set -eu
+            stage=/var/tmp/vvault-wazuh-deploy-${{ github.run_id }}
+            trap 'rm -rf "${stage}"' EXIT
+            umask 077
+            {
+              printf 'WAZUH_API_BOOTSTRAP_USER=%q\n' "${WAZUH_API_BOOTSTRAP_USER}"
+              printf 'WAZUH_API_BOOTSTRAP_PASSWORD=%q\n' "${WAZUH_API_BOOTSTRAP_PASSWORD}"
+              printf 'VVAULT_WAZUH_AGENT_MANAGER=%q\n' 'vvault.thewreck.org'
+              printf 'VVAULT_SERVICE_USER=%q\n' 'vvault'
+            } > "${stage}/install.env"
+            sudo -n /bin/bash -c "set -a; source '${stage}/install.env'; set +a; /bin/bash '${stage}/scripts/install-wazuh-manager.sh'"
+            sudo -n test ! -e /usr/share/wazuh-indexer
+            sudo -n test ! -e /usr/share/wazuh-dashboard
+            sudo -n test ! -e /etc/filebeat
+            curl --fail --silent --show-error http://127.0.0.1:8000/api/ready >/dev/null

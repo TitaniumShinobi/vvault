@@ -6341,13 +6341,25 @@ def append_cleanhouse_files_evidence():
 @require_cleanhouse_files_auth
 def get_cleanhouse_wazuh_events():
     """Read the manager-local Wazuh FIM stream through VVAULT auth."""
-    _owner_user_id, _callsign, error = _cleanhouse_files_owner_context()
+    owner_user_id, callsign, error = _cleanhouse_files_owner_context()
     if error:
         return error
     try:
+        agent_name = str(os.environ.get("VVAULT_WAZUH_AGENT_NAME") or callsign)
+        enrollment = VAULT_FILE_REPOSITORY.get_cleanhouse_wazuh_enrollment_receipt(
+            user_id=str(owner_user_id), callsign=str(callsign), agent_name=agent_name
+        )
+        if not enrollment:
+            raise cleanhouse_files_evidence.WazuhEvidenceUnavailable("Wazuh agent is not enrolled")
+        attestation = cleanhouse_files_evidence.manager_attestation(
+            agent_id=str(enrollment.get("agent_id") or "")
+        )
         result = cleanhouse_files_evidence.read_wazuh_alerts(
             after=str(request.args.get("after") or ""),
             limit=int(request.args.get("limit") or 100),
+            agent_id=str(enrollment.get("agent_id") or ""),
+            monitored_scope=str(enrollment.get("monitored_scope") or ""),
+            manager_attestation=attestation,
         )
         response = jsonify({"success": True, **result})
         response.headers["Cache-Control"] = "no-store"
@@ -6362,13 +6374,21 @@ def get_cleanhouse_wazuh_events():
 @require_cleanhouse_files_auth
 def get_cleanhouse_wazuh_inventory():
     """Proxy the enrolled agent's FIM inventory from the local manager API."""
-    _owner_user_id, _callsign, error = _cleanhouse_files_owner_context()
+    owner_user_id, callsign, error = _cleanhouse_files_owner_context()
     if error:
         return error
     try:
+        agent_name = str(os.environ.get("VVAULT_WAZUH_AGENT_NAME") or callsign)
+        enrollment = VAULT_FILE_REPOSITORY.get_cleanhouse_wazuh_enrollment_receipt(
+            user_id=str(owner_user_id), callsign=str(callsign), agent_name=agent_name
+        )
+        if not enrollment:
+            raise cleanhouse_files_evidence.WazuhEvidenceUnavailable("Wazuh agent is not enrolled")
         result = cleanhouse_files_evidence.query_wazuh_inventory(
             offset=int(request.args.get("offset") or 0),
             limit=int(request.args.get("limit") or 500),
+            agent_id=str(enrollment.get("agent_id") or ""),
+            monitored_scope=str(enrollment.get("monitored_scope") or ""),
         )
         response = jsonify({"success": True, **result})
         response.headers["Cache-Control"] = "no-store"
@@ -6383,7 +6403,7 @@ def get_cleanhouse_wazuh_inventory():
 @require_cleanhouse_files_auth
 def get_cleanhouse_wazuh_status():
     """Expose bounded manager evidence readiness without Wazuh credentials."""
-    _owner_user_id, _callsign, error = _cleanhouse_files_owner_context()
+    owner_user_id, callsign, error = _cleanhouse_files_owner_context()
     if error:
         return error
     alerts_path = Path(
@@ -6391,24 +6411,98 @@ def get_cleanhouse_wazuh_status():
         or cleanhouse_files_evidence.DEFAULT_ALERTS_PATH
     )
     alerts_ready = alerts_path.is_file() and os.access(alerts_path, os.R_OK)
-    inventory_configured = bool(
-        os.environ.get("VVAULT_WAZUH_AGENT_ID")
-        and os.environ.get("VVAULT_WAZUH_MANAGER_TOKEN")
+    agent_name = str(os.environ.get("VVAULT_WAZUH_AGENT_NAME") or callsign)
+    enrollment = VAULT_FILE_REPOSITORY.get_cleanhouse_wazuh_enrollment_receipt(
+        user_id=str(owner_user_id), callsign=str(callsign), agent_name=agent_name
     )
-    state = "live" if alerts_ready and inventory_configured else (
-        "warming" if alerts_ready else "unavailable"
-    )
+    attestation = {}
+    if enrollment:
+        try:
+            attestation = cleanhouse_files_evidence.manager_attestation(
+                agent_id=str(enrollment.get("agent_id") or "")
+            )
+        except cleanhouse_files_evidence.WazuhEvidenceUnavailable:
+            attestation = {}
+    inventory_configured = bool(enrollment and attestation.get("api_authenticated"))
+    evidence_authenticated = bool(alerts_ready and inventory_configured and attestation.get("manager_active"))
+    state = "live" if evidence_authenticated else ("warming" if alerts_ready or enrollment else "unavailable")
     response = jsonify({
         "success": True,
         "provider": "wazuh_manager",
         "state": state,
         "alerts_ready": alerts_ready,
         "inventory_configured": inventory_configured,
-        "evidence_authenticated": alerts_ready,
+        "evidence_authenticated": evidence_authenticated,
+        "agent_id": str((enrollment or {}).get("agent_id") or ""),
+        "monitored_scope": str((enrollment or {}).get("monitored_scope") or ""),
+        "manager": str(attestation.get("manager") or (enrollment or {}).get("manager") or ""),
+        "manager_version": str(attestation.get("manager_version") or ""),
         "storage_owner": VAULT_FILE_OWNER,
     })
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@app.route('/api/cleanhouse/files/wazuh/enroll', methods=['POST'])
+@require_cleanhouse_files_auth
+def enroll_cleanhouse_wazuh_agent():
+    """Create/reuse the owner agent and return its key exactly once per call."""
+    owner_user_id, callsign, error = _cleanhouse_files_owner_context()
+    if error:
+        return error
+    payload = request.get_json(silent=True)
+    try:
+        if not isinstance(payload, dict):
+            raise cleanhouse_files_evidence.CleanHouseEvidenceError("Wazuh enrollment body is required")
+        requested_instance = cleanhouse_files_evidence.validate_instance_id(
+            payload.get("instance_id") or callsign
+        )
+        if requested_instance != callsign:
+            raise cleanhouse_files_evidence.CleanHouseEvidenceError("Wazuh enrollment instance mismatch")
+        agent_name = cleanhouse_files_evidence.validate_agent_name(
+            payload.get("agent_name") or callsign
+        )
+        configured_agent_name = str(os.environ.get("VVAULT_WAZUH_AGENT_NAME") or callsign)
+        if agent_name != configured_agent_name:
+            raise cleanhouse_files_evidence.CleanHouseEvidenceError("Wazuh agent name is not permitted")
+        monitored_scope = cleanhouse_files_evidence.validate_monitored_scope(payload.get("monitored_scope"))
+        configured_manager = str(os.environ.get("VVAULT_WAZUH_AGENT_MANAGER") or "").strip()
+        requested_manager = str(payload.get("manager") or "").strip()
+        if not configured_manager or requested_manager != configured_manager:
+            raise cleanhouse_files_evidence.CleanHouseEvidenceError("Wazuh manager does not match deployment configuration")
+        enrolled = cleanhouse_files_evidence.create_or_reuse_agent(agent_name=agent_name)
+        key_fingerprint = hashlib.sha256(enrolled["client_key"].encode("utf-8")).hexdigest()
+        receipt = VAULT_FILE_REPOSITORY.append_cleanhouse_wazuh_enrollment_receipt(
+            user_id=str(owner_user_id),
+            callsign=str(callsign),
+            agent_id=enrolled["agent_id"],
+            agent_name=agent_name,
+            manager=configured_manager,
+            monitored_scope=monitored_scope,
+            key_fingerprint=key_fingerprint,
+        )
+        response = jsonify({
+            "success": True,
+            "schema": cleanhouse_files_evidence.ENROLLMENT_SCHEMA,
+            "provider": "wazuh_manager",
+            "evidence_authenticated": True,
+            "agent_id": enrolled["agent_id"],
+            "agent_name": agent_name,
+            "manager": configured_manager,
+            "monitored_scope": monitored_scope,
+            "key_fingerprint": key_fingerprint,
+            "receipt_id": receipt["receipt_id"],
+            "client_key": enrolled["client_key"],
+        })
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+    except cleanhouse_files_evidence.CleanHouseEvidenceError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 409
+    except cleanhouse_files_evidence.WazuhEvidenceUnavailable as exc:
+        return jsonify({"success": False, "error": str(exc), "state": "unavailable"}), 503
 
 
 def _service_credential_payload_from_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:

@@ -787,6 +787,117 @@ class VVaultFileRepository:
             conn.commit()
         return receipt
 
+    def append_cleanhouse_wazuh_enrollment_receipt(
+        self,
+        *,
+        user_id: str,
+        callsign: str,
+        agent_id: str,
+        agent_name: str,
+        manager: str,
+        monitored_scope: str,
+        key_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Append one idempotent receipt without retaining the agent key."""
+        if not all((user_id, callsign, agent_id, agent_name, manager, monitored_scope)):
+            raise ValueError("CleanHouse Wazuh enrollment receipt is incomplete")
+        if len(key_fingerprint) != 64 or any(character not in "0123456789abcdef" for character in key_fingerprint):
+            raise ValueError("CleanHouse Wazuh enrollment key fingerprint is invalid")
+        identity = hashlib.sha256(
+            f"{user_id}:{callsign}:{agent_name}".encode("utf-8")
+        ).hexdigest()
+        receipt_id = f"cleanhouse-wazuh-enrollment:{identity}"
+        path = f"instances/{callsign}/evidence/cleanhouse/wazuh-enrollments/{identity}.json"
+        now = _utc_now_iso()
+        receipt = {
+            "schema": "ovvaults.cleanhouse.wazuh_enrollment.receipt.v1",
+            "receipt_id": receipt_id,
+            "owner_user_id": user_id,
+            "instance_id": callsign,
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "manager": manager,
+            "monitored_scope": monitored_scope,
+            "key_fingerprint": key_fingerprint,
+            "secret_material_stored": False,
+            "created_at": now,
+            "storage_owner": FILE_OWNER,
+        }
+        content = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        content_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        object_key = f"users/{user_id}/{path}"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO vault_files (
+                        user_id, bucket, object_key, filename, content_type,
+                        size_bytes, sha256, created_at, content, metadata,
+                        construct_id, storage_path, file_type, is_system, updated_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, 'application/json', %s, %s, %s,
+                        %s, %s::jsonb, %s, %s, 'cleanhouse_wazuh_enrollment_receipt', false, %s
+                    )
+                    ON CONFLICT (bucket, object_key) DO NOTHING
+                    RETURNING id::text AS id
+                    """,
+                    (
+                        user_id, DEFAULT_BUCKET, object_key, path,
+                        len(content.encode("utf-8")), content_sha, now, content,
+                        json.dumps({
+                            "artifact_id": "life.cleanhouse.files.wazuh-enrollment-receipt",
+                            "schema": receipt["schema"],
+                            "append_only": True,
+                            "secret_material_stored": False,
+                        }),
+                        callsign, path, now,
+                    ),
+                )
+                inserted = cur.fetchone()
+                if not inserted:
+                    cur.execute(
+                        "SELECT content, sha256 FROM vault_files WHERE bucket = %s AND object_key = %s FOR SHARE",
+                        (DEFAULT_BUCKET, object_key),
+                    )
+                    existing = cur.fetchone()
+                    try:
+                        existing_receipt = json.loads(str((existing or {}).get("content") or ""))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        existing_receipt = None
+                    identity_fields = (
+                        "receipt_id", "owner_user_id", "instance_id", "agent_id",
+                        "agent_name", "manager", "monitored_scope", "key_fingerprint",
+                    )
+                    if not isinstance(existing_receipt, dict) or any(
+                        existing_receipt.get(field) != receipt.get(field)
+                        for field in identity_fields
+                    ):
+                        raise ValueError("CleanHouse Wazuh enrollment receipt collision")
+                    receipt = existing_receipt
+            conn.commit()
+        return receipt
+
+    def get_cleanhouse_wazuh_enrollment_receipt(
+        self,
+        *,
+        user_id: str,
+        callsign: str,
+        agent_name: str,
+    ) -> dict[str, Any] | None:
+        identity = hashlib.sha256(
+            f"{user_id}:{callsign}:{agent_name}".encode("utf-8")
+        ).hexdigest()
+        path = f"instances/{callsign}/evidence/cleanhouse/wazuh-enrollments/{identity}.json"
+        row = self.find_by_path(construct_id=callsign, user_id=user_id, filename=path)
+        if not row or not isinstance(row.get("content"), str):
+            return None
+        try:
+            receipt = json.loads(row["content"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return receipt if isinstance(receipt, dict) else None
+
     def load_text(self, row: dict[str, Any] | None) -> str:
         if not row:
             return ""

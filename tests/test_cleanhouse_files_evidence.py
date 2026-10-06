@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import urllib.error
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -12,6 +13,9 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from vvault.server import cleanhouse_files_evidence as evidence
 from vvault.server import vvault_file_repository
 from vvault.server import vvault_web_server as server
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _body():
@@ -29,7 +33,7 @@ def _body():
 
 def _auth_headers(batch_id=None):
     headers = {
-        "X-Chatty-Key": "test-service-token",
+        "X-CleanHouse-Key": "chf_v1_dedicated-test-credential-value-that-is-long-enough",
         "X-Chatty-User": "devon@example.com",
         "X-CleanHouse-Instance": "zen-001",
     }
@@ -57,23 +61,95 @@ def test_manager_alert_feed_is_fim_only_and_replays_from_durable_cursor():
             {
                 "id": "fim-1",
                 "timestamp": "2026-08-22T00:00:01Z",
-                "data": {"syscheck": {"event": "modified", "path": "/scope/file.txt"}},
+                "agent": {"id": "001", "name": "zen-001"},
+                "data": {"syscheck": {"event": "modified", "path": "/Users/test/scope/file.txt"}},
             },
             {
                 "id": "fim-2",
                 "timestamp": "2026-08-22T00:00:02Z",
-                "data": {"syscheck": {"event": "deleted", "path": "/scope/old.txt"}},
+                "agent": {"id": "001", "name": "zen-001"},
+                "data": {"syscheck": {"event": "deleted", "path": "/Users/test/scope/old.txt"}},
             },
         ]
         path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
-        first = evidence.read_wazuh_alerts(alerts_path=path, limit=1)
+        attestation = {"manager_active": True, "api_authenticated": True, "agent_id": "001"}
+        first = evidence.read_wazuh_alerts(
+            alerts_path=path, limit=1, agent_id="001", monitored_scope="/Users/test/scope",
+            manager_attestation=attestation,
+        )
         second = evidence.read_wazuh_alerts(
             alerts_path=path,
             after=first["items"][0]["_vvault_cursor"],
             limit=10,
+            agent_id="001",
+            monitored_scope="/Users/test/scope",
+            manager_attestation=attestation,
         )
     assert [item["_id"] for item in first["items"]] == ["fim-1"]
     assert [item["_id"] for item in second["items"]] == ["fim-2"]
+
+
+def test_manager_jwt_is_refreshed_once_after_401():
+    calls = []
+    evidence._WAZUH_TOKEN_CACHE.update({"token": "", "expires_at": 0.0})
+
+    def transport(request):
+        calls.append((request.method, request.full_url, request.headers.get("Authorization")))
+        if request.full_url.endswith("/security/user/authenticate"):
+            token = "stale" if sum("authenticate" in call[1] for call in calls) == 1 else "fresh"
+            return {"data": {"token": token}}
+        if request.headers.get("Authorization") == "Bearer stale":
+            raise urllib.error.HTTPError(request.full_url, 401, "expired", {}, None)
+        return {"data": {"affected_items": [{"name": "manager"}]}}
+
+    with patch.dict(evidence.os.environ, {
+        "VVAULT_WAZUH_MANAGER_USERNAME": "cleanhouse-ingest",
+        "VVAULT_WAZUH_MANAGER_PASSWORD": "secret",
+    }):
+        payload = evidence.manager_api_request("/manager/info", transport=transport)
+
+    assert payload["data"]["affected_items"][0]["name"] == "manager"
+    assert sum("authenticate" in call[1] for call in calls) == 2
+    assert calls[-1][2] == "Bearer fresh"
+
+
+def test_manager_installer_is_pinned_manager_only_and_keeps_api_on_loopback():
+    script = (REPO_ROOT / "scripts" / "install-wazuh-manager.sh").read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "deploy-wazuh-manager.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "wazuh-manager_4.14.7-1_amd64.deb" in script
+    assert "f54a48683683fea476b133646c6a2ad884c3d61d0f7d85bf8b0602e127e0e14a6976fc5cf5962cc47de2794fdd0e2abe2f195de1d7a7b9c69da4b79c09a970f7" in script
+    assert "host: ['127.0.0.1']" in script
+    assert "wazuh-indexer wazuh-dashboard filebeat" in script
+    assert "docker-ce" not in script
+    assert "apt-get install -y \"${stage}/${PACKAGE}\"" in script
+    assert "wazuh:wazuh" not in script
+    assert "workflow_dispatch:" in workflow
+    assert "VVAULT_DEPLOY_KEY" in workflow
+    assert "WAZUH_API_BOOTSTRAP_PASSWORD" in workflow
+
+
+def test_rotated_alert_stream_reports_gap_and_filters_agent_and_scope():
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "alerts.json"
+        records = [
+            {"id": "other", "agent": {"id": "999"}, "data": {"syscheck": {"path": "/Users/test/scope/no"}}},
+            {"id": "outside", "agent": {"id": "001"}, "data": {"syscheck": {"path": "/Users/test/other/no"}}},
+            {"id": "accepted", "agent": {"id": "001"}, "data": {"syscheck": {"path": "/Users/test/scope/yes"}}},
+        ]
+        path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        result = evidence.read_wazuh_alerts(
+            alerts_path=path,
+            after="wazuh-jsonl.v1:1:2:3",
+            agent_id="001",
+            monitored_scope="/Users/test/scope",
+            manager_attestation={"manager_active": True, "api_authenticated": True, "agent_id": "001"},
+        )
+
+    assert [item["_id"] for item in result["items"]] == ["accepted"]
+    assert result["gap_state"] == "rotation_or_replacement"
+    assert result["agent_id"] == "001"
 
 
 def test_evidence_route_uses_owner_scoped_repository_receipt():
@@ -84,7 +160,16 @@ def test_evidence_route_uses_owner_scoped_repository_receipt():
         "accepted_evidence_ids": [payload["events"][0]["evidence_id"]],
     }
     with (
-        patch.dict(server.os.environ, {"VVAULT_SERVICE_TOKEN": "test-service-token"}),
+        patch.object(
+            server,
+            "db_get_user",
+            return_value={"id": "11111111-1111-4111-8111-111111111111", "email": "devon@example.com"},
+        ),
+        patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "verify_cleanhouse_files_credential",
+            return_value=True,
+        ),
         patch.object(
             server,
             "_cleanhouse_files_owner_context",
@@ -328,13 +413,107 @@ def test_repository_stores_only_pairing_hash_and_verifies_constant_time():
     ) is False
 
 
+def test_repository_enrollment_receipt_retry_is_idempotent_without_storing_key():
+    owner_id = "11111111-1111-4111-8111-111111111111"
+    fingerprint = "a" * 64
+    identity = hashlib.sha256(f"{owner_id}:zen-001:zen-001".encode()).hexdigest()
+    existing_receipt = {
+        "schema": "ovvaults.cleanhouse.wazuh_enrollment.receipt.v1",
+        "receipt_id": f"cleanhouse-wazuh-enrollment:{identity}",
+        "owner_user_id": owner_id,
+        "instance_id": "zen-001",
+        "agent_id": "001",
+        "agent_name": "zen-001",
+        "manager": "vvault.thewreck.org",
+        "monitored_scope": "/Users/devon/Documents/GitHub/cleanhouse",
+        "key_fingerprint": fingerprint,
+        "secret_material_stored": False,
+        "created_at": "2026-08-22T00:00:00+00:00",
+        "storage_owner": vvault_file_repository.FILE_OWNER,
+    }
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, _params):
+            normalized = " ".join(sql.split())
+            if normalized.startswith("INSERT INTO vault_files"):
+                self.row = None
+            elif normalized.startswith("SELECT content, sha256"):
+                content = json.dumps(existing_receipt, sort_keys=True, separators=(",", ":"))
+                self.row = {"content": content, "sha256": hashlib.sha256(content.encode()).hexdigest()}
+            else:
+                raise AssertionError(f"unexpected SQL: {normalized}")
+
+        def fetchone(self):
+            return self.row
+
+    class Connection:
+        def __init__(self):
+            self.cursor_instance = Cursor()
+            self.committed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return self.cursor_instance
+
+        def commit(self):
+            self.committed = True
+
+    repository = object.__new__(vvault_file_repository.VVaultFileRepository)
+    connection = Connection()
+    repository._connect = lambda: connection
+    result = repository.append_cleanhouse_wazuh_enrollment_receipt(
+        user_id=owner_id,
+        callsign="zen-001",
+        agent_id="001",
+        agent_name="zen-001",
+        manager="vvault.thewreck.org",
+        monitored_scope="/Users/devon/Documents/GitHub/cleanhouse",
+        key_fingerprint=fingerprint,
+    )
+
+    assert result == existing_receipt
+    assert result["secret_material_stored"] is False
+    assert "client_key" not in result
+    assert connection.committed is True
+
+
 def test_wazuh_routes_fail_honestly_when_manager_evidence_is_unavailable():
     with (
-        patch.dict(server.os.environ, {"VVAULT_SERVICE_TOKEN": "test-service-token"}),
+        patch.object(
+            server,
+            "db_get_user",
+            return_value={"id": "11111111-1111-4111-8111-111111111111", "email": "devon@example.com"},
+        ),
+        patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "verify_cleanhouse_files_credential",
+            return_value=True,
+        ),
         patch.object(
             server,
             "_cleanhouse_files_owner_context",
             return_value=("11111111-1111-4111-8111-111111111111", "zen-001", None),
+        ),
+        patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "get_cleanhouse_wazuh_enrollment_receipt",
+            return_value={"agent_id": "001", "monitored_scope": "/Users/test/scope"},
+        ),
+        patch.object(
+            server.cleanhouse_files_evidence,
+            "manager_attestation",
+            return_value={"manager_active": True, "api_authenticated": True, "agent_id": "001"},
         ),
         patch.object(
             server.cleanhouse_files_evidence,
@@ -347,6 +526,62 @@ def test_wazuh_routes_fail_honestly_when_manager_evidence_is_unavailable():
         )
     assert response.status_code == 503
     assert response.get_json()["state"] == "unavailable"
+
+
+def test_enrollment_route_is_owner_scoped_idempotent_and_never_persists_client_key():
+    owner_id = "11111111-1111-4111-8111-111111111111"
+    client_key = "base64-client-key"
+    fingerprint = hashlib.sha256(client_key.encode()).hexdigest()
+    receipt = {"receipt_id": "cleanhouse-wazuh-enrollment:receipt"}
+    with (
+        patch.dict(server.os.environ, {
+            "VVAULT_WAZUH_AGENT_MANAGER": "vvault.thewreck.org",
+            "VVAULT_WAZUH_AGENT_NAME": "zen-001",
+        }),
+        patch.object(
+            server,
+            "db_get_user",
+            return_value={"id": owner_id, "email": "devon@example.com"},
+        ),
+        patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "verify_cleanhouse_files_credential",
+            return_value=True,
+        ),
+        patch.object(
+            server,
+            "_cleanhouse_files_owner_context",
+            return_value=(owner_id, "zen-001", None),
+        ),
+        patch.object(
+            server.cleanhouse_files_evidence,
+            "create_or_reuse_agent",
+            return_value={"agent_id": "001", "agent_name": "zen-001", "client_key": client_key},
+        ),
+        patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "append_cleanhouse_wazuh_enrollment_receipt",
+            return_value=receipt,
+        ) as append,
+    ):
+        response = server.app.test_client().post(
+            "/api/cleanhouse/files/wazuh/enroll",
+            json={
+                "instance_id": "zen-001",
+                "agent_name": "zen-001",
+                "manager": "vvault.thewreck.org",
+                "monitored_scope": "/Users/devon/Documents/GitHub/cleanhouse",
+            },
+            headers=_auth_headers(),
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["client_key"] == client_key
+    assert payload["key_fingerprint"] == fingerprint
+    assert response.headers["Cache-Control"] == "no-store, max-age=0"
+    assert "client_key" not in append.call_args.kwargs
+    assert append.call_args.kwargs["key_fingerprint"] == fingerprint
 
 
 class _FakeCursor:
