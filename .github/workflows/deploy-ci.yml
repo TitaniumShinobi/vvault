@@ -43,18 +43,7 @@ jobs:
           key: ${{ secrets.VVAULT_DEPLOY_KEY }}
           envs: VVAULT_DEPLOY_MODE
           script: |
-            repo="$(readlink -f /opt/vvault-public)"
-            sudo -n git -c safe.directory="$repo" -C "$repo" fetch origin production:refs/remotes/origin/production
-            if [ -n "$(sudo -n git -c safe.directory="$repo" -C "$repo" status --porcelain --untracked-files=normal)" ]; then
-              echo "refusing deployment: host checkout is dirty"
-              exit 1
-            fi
-            # A clean tracked checkout may be reset safely.  This prevents a
-            # stale host-side deployment script from being executed after a
-            # successful fetch.
-            sudo -n git -c safe.directory="$repo" -C "$repo" checkout -B production origin/production
-            sudo -n git -c safe.directory="$repo" -C "$repo" reset --hard origin/production
-            exec sudo -n env VVAULT_DEPLOY_MODE="$VVAULT_DEPLOY_MODE" "$repo/scripts/deployment/droplet-deploy-vvault.sh"
+            exec env VVAULT_DEPLOY_MODE="$VVAULT_DEPLOY_MODE" /opt/deploy/trigger/deploy-trigger.sh vvault
 
   deploy-full:
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy_full'
@@ -110,15 +99,7 @@ jobs:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
             PY
-            repo="$(readlink -f /opt/vvault-public)"
-            sudo -n git -c safe.directory="$repo" -C "$repo" fetch origin production:refs/remotes/origin/production
-            if [ -n "$(sudo -n git -c safe.directory="$repo" -C "$repo" status --porcelain --untracked-files=normal)" ]; then
-              echo "refusing deployment: host checkout is dirty"
-              exit 1
-            fi
-            sudo -n git -c safe.directory="$repo" -C "$repo" checkout -B production origin/production
-            sudo -n git -c safe.directory="$repo" -C "$repo" reset --hard origin/production
-            exec sudo -n env VVAULT_DEPLOY_MODE=full "$repo/scripts/deployment/droplet-deploy-vvault.sh"
+            exec env VVAULT_DEPLOY_MODE=full /opt/deploy/trigger/deploy-trigger.sh vvault
 
   configure-oauth-transaction-key:
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'configure_oauth_transaction_key'
