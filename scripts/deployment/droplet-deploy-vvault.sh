@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-REPO="/opt/vvault-public"
+REPO="$(readlink -f /opt/vvault-public)"
 FRONTEND="/var/www/vvault"
 BACKUP_ROOT="/opt/deploy/backups"
 BRANCH="production"

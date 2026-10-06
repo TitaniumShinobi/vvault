@@ -146,6 +146,8 @@ def test_backend_only_deploy_does_not_require_database_secret_read_access():
 
 
 def test_deployment_uses_command_scoped_safe_directory_for_host_checkout():
+    assert 'REPO="$(readlink -f /opt/vvault-public)"' in DEPLOY
+    assert WORKFLOW.count('repo="$(readlink -f /opt/vvault-public)"') >= 2
     assert 'git -c safe.directory="$REPO" -C "$REPO" "$@"' in DEPLOY
     assert 'git config --global' not in DEPLOY
     assert 'safe.directory=\'*\'' not in DEPLOY
