@@ -22,6 +22,10 @@ MIGRATIONS_APPLIED=0
 
 log() { printf '[vvault-deploy] %s\n' "$*"; }
 
+git_repo() {
+  git -c safe.directory="$REPO" -C "$REPO" "$@"
+}
+
 resolve_runtime_env_file() {
   local candidate service_files
   # The service unit is authoritative when its EnvironmentFile has moved.  Do
@@ -44,11 +48,15 @@ resolve_runtime_env_file() {
 }
 
 verify_runtime_contract() {
+  local require_database_env="${1:-1}"
   local service_properties env_metadata
   service_properties="$(systemctl show "$SERVICE" -p LoadState -p User -p Group)"
   [[ "$service_properties" == *"LoadState=loaded"* ]] || { log "service unit is not loaded"; return 1; }
   [[ "$service_properties" == *"User=$EXPECTED_SERVICE_USER"* ]] || { log "service user contract mismatch"; return 1; }
   [[ "$service_properties" == *"Group=$EXPECTED_SERVICE_GROUP"* ]] || { log "service group contract mismatch"; return 1; }
+  if [[ "$require_database_env" != "1" ]]; then
+    return 0
+  fi
   if ! resolve_runtime_env_file; then
     # Values supplied directly through systemd Environment= are intentionally
     # not printed; the backup helper reads them in-process when necessary.
@@ -176,7 +184,7 @@ rollback() {
   fi
 
   if [[ -n "$OLD_REF" ]]; then
-    git -C "$REPO" checkout --detach "$OLD_REF" >/dev/null 2>&1 || true
+    git_repo checkout --detach "$OLD_REF" >/dev/null 2>&1 || true
   fi
 
   if (( RESTART_ATTEMPTED )); then
@@ -198,22 +206,27 @@ exec 9>"$LOCK_FILE"
 flock -n 9 || { log "another VVAULT deployment is already running"; exit 1; }
 
 cd "$REPO"
-[[ -z "$(git status --porcelain --untracked-files=normal)" ]] || {
+[[ -z "$(git_repo status --porcelain --untracked-files=normal)" ]] || {
   log "repository is dirty; refusing deployment"
   exit 1
 }
-verify_runtime_contract
 
 case "$DEPLOY_MODE" in
   full|backend-only) ;;
   *) log "unsupported deployment mode"; exit 1 ;;
 esac
 
-OLD_REF="$(git rev-parse HEAD)"
+if [[ "$DEPLOY_MODE" == "backend-only" ]]; then
+  verify_runtime_contract 0
+else
+  verify_runtime_contract 1
+fi
+
+OLD_REF="$(git_repo rev-parse HEAD)"
 log "fetching $BRANCH"
-git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
-git checkout -B "$BRANCH" "origin/$BRANCH"
-NEW_REF="$(git rev-parse HEAD)"
+git_repo fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
+git_repo checkout -B "$BRANCH" "origin/$BRANCH"
+NEW_REF="$(git_repo rev-parse HEAD)"
 
 if [[ "$DEPLOY_MODE" == "backend-only" ]]; then
   log "restarting backend from the tracked production checkout (frontend and database unchanged)"

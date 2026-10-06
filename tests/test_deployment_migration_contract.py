@@ -75,10 +75,10 @@ def test_migration_runner_resolves_database_configuration_from_systemd_without_p
 
 def test_github_deployment_executes_the_reviewed_repository_contract_not_a_host_trigger():
     assert "/opt/deploy/trigger/deploy-trigger.sh" not in WORKFLOW
-    assert 'git -C "$repo" fetch origin production:refs/remotes/origin/production' in WORKFLOW
-    assert 'git -C "$repo" checkout -B production origin/production' in WORKFLOW
-    assert 'git -C "$repo" status --porcelain --untracked-files=normal' in WORKFLOW
-    assert 'git -C "$repo" reset --hard origin/production' in WORKFLOW
+    assert 'git -c safe.directory="$repo" -C "$repo" fetch origin production:refs/remotes/origin/production' in WORKFLOW
+    assert 'git -c safe.directory="$repo" -C "$repo" checkout -B production origin/production' in WORKFLOW
+    assert 'git -c safe.directory="$repo" -C "$repo" status --porcelain --untracked-files=normal' in WORKFLOW
+    assert 'git -c safe.directory="$repo" -C "$repo" reset --hard origin/production' in WORKFLOW
     assert 'exec "$repo/scripts/deployment/droplet-deploy-vvault.sh"' in WORKFLOW
 
 
@@ -137,3 +137,15 @@ def test_deployment_resolves_a_service_environment_file_without_printing_values(
     assert 'runtime database configuration is missing from the service' in DEPLOY
     assert 'read_systemd_environment' in BACKUP_RECEIPTS
     assert 'stdout=subprocess.PIPE' in BACKUP_RECEIPTS
+
+
+def test_backend_only_deploy_does_not_require_database_secret_read_access():
+    assert 'verify_runtime_contract 0' in DEPLOY
+    assert 'verify_runtime_contract 1' in DEPLOY
+    assert 'if [[ "$require_database_env" != "1" ]]' in DEPLOY
+
+
+def test_deployment_uses_command_scoped_safe_directory_for_host_checkout():
+    assert 'git -c safe.directory="$REPO" -C "$REPO" "$@"' in DEPLOY
+    assert 'git config --global' not in DEPLOY
+    assert 'safe.directory=\'*\'' not in DEPLOY
