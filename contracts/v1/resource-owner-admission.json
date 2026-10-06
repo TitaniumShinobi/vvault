@@ -1,0 +1,17 @@
+{
+  "contract": "life.vvault.resource-owner-admission/v1",
+  "method": "POST",
+  "path": "/api/v1/resource/owner-admission/resolve",
+  "transport": "direct-mTLS",
+  "request": {
+    "fields": ["contract", "requestId", "issuer", "subject", "sessionId", "clientId", "applicationId", "audience", "capabilities", "issuedAt", "expiresAt"],
+    "maximumLifetimeSeconds": 30
+  },
+  "admittedResponse": {
+    "fields": ["contract", "requestId", "admitted", "issuer", "subject", "sessionId", "clientId", "applicationId", "audience", "ownerId", "capabilities", "policyVersion", "expiresAt"],
+    "maximumLifetimeSeconds": 60
+  },
+  "negativeDispositions": ["ACCOUNT_LINK_REQUIRED", "ENROLLMENT_REQUIRED", "REAUTH_REQUIRED"],
+  "privacy": "Negative decisions never include owner identity.",
+  "cache": "no-store"
+}

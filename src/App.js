@@ -177,7 +177,9 @@ function App() {
     // URL state controls presentation only; the component confirms the
     // server-side HttpOnly pending session before rendering a checkpoint.
     if (pendingSignup?.pending) return pendingSignup.signupRequired ? <CinematicLogin onLogin={handleLogin} pendingSignup /> : <CinematicLogin onLogin={handleLogin}><EnrollmentFlow requestedMode="enrollment" embedded /></CinematicLogin>;
-    if (authState.get('device_approval_required') === '1') return <EnrollmentFlow requestedMode="device" />;
+    // Device verification is not part of sign-in. Old callback URLs may still
+    // carry this presentation flag, so return them to the ordinary login UI.
+    if (authState.get('device_approval_required') === '1') return <CinematicLogin onLogin={handleLogin} />;
     if (authState.get('terms_update') === '1') return <EnrollmentFlow requestedMode="recertification" />;
     if (authState.get('identity_pending') === '1') return <CinematicLogin onLogin={handleLogin}><EnrollmentFlow requestedMode="enrollment" embedded /></CinematicLogin>;
     return <CinematicLogin onLogin={handleLogin} />;

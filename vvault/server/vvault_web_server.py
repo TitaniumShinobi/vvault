@@ -80,10 +80,14 @@ import chatty_body_service
 import vvault_auth_repository
 import vvault_file_repository
 from vvault.server import vvault_access_assertion
+from vvault.server import resource_authorization
+from vvault.server import resource_owner_admission
 from vvault.server.relying_party_scope import set_relying_party_id
 try:
     from vvault.server.relying_party_scope import current_relying_party_id
     from vvault.server.vault_drive_repository import VAULT_DRIVE_REPOSITORY
+    from vvault.server.resource_workspace_repository import RESOURCE_WORKSPACE_REPOSITORY
+    from vvault.server.resource_owner_admission_repository import RESOURCE_OWNER_ADMISSION_REPOSITORY
 except ImportError:  # pragma: no cover - direct script compatibility
     from relying_party_scope import current_relying_party_id
     from vault_drive_repository import VAULT_DRIVE_REPOSITORY
@@ -3258,7 +3262,7 @@ def get_current_user():
         state = str(session.get('account_state') or 'LEGACY')
         kind = str(session.get('enrollment_session_kind') or 'LEGACY')
         device_status = str(session.get('enrollment_device_status') or '')
-        if state == 'ACTIVE' and kind == 'NORMAL' and device_status == 'TRUSTED':
+        if state == 'ACTIVE' and kind == 'NORMAL' and device_status in {'', 'TRUSTED'}:
             return session, token
         # Existing sessions remain usable only during the explicitly staged
         # migration window. New pending/device sessions never reach data routes.
@@ -3919,6 +3923,16 @@ def readiness_check():
     """Readiness requires VVAULT-native body database health."""
     runtime_status = _get_vvault_runtime_status()
     door = _resolve_chatty_vvault_door()
+    resource_trust = resource_authorization.trust_readiness(
+        RESOURCE_WORKSPACE_REPOSITORY
+    )
+    owner_admission_trust = resource_owner_admission.trust_readiness(
+        RESOURCE_OWNER_ADMISSION_REPOSITORY
+    )
+    resource_trust["ownerAdmission"] = owner_admission_trust
+    resource_trust["ready"] = bool(
+        resource_trust.get("ready") and owner_admission_trust.get("ready")
+    )
     ready = bool(runtime_status["ready"] and door.get("ok"))
     return jsonify({
         "ready": ready,
@@ -3937,6 +3951,8 @@ def readiness_check():
         "transcript_owner": door.get("transcript_owner"),
         "transcript_compatibility_owner": door.get("transcript_compatibility_owner"),
         "door_contract": door,
+        "trustReadiness": resource_trust,
+        "resourceTrustReadiness": resource_trust,
     }), 200 if ready else 503
 
 def _current_vvault_user_id() -> tuple[str | None, tuple[Any, int] | None]:
@@ -4698,6 +4714,106 @@ def get_vault_drive_workspace_root():
         })
     except Exception as exc:
         return _vault_drive_error_response(exc)
+
+
+def _resource_error(error: resource_authorization.ResourceAuthorizationError):
+    return jsonify({
+        "success": False,
+        "errorCode": error.code,
+        "contract": resource_authorization.WIRE_CONTRACT,
+    }), error.http_status
+
+
+def _owner_admission_error(error: resource_owner_admission.OwnerAdmissionError):
+    response = jsonify({
+        "success": False,
+        "errorCode": error.code,
+        "contract": resource_owner_admission.CONTRACT,
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response, error.http_status
+
+
+@app.route('/api/v1/resource/owner-admission/resolve', methods=['POST'])
+def resolve_resource_owner_admission_v1():
+    """Resolve an explicit AUTH identity binding without creating any state."""
+    try:
+        workload_issuer = resource_owner_admission.authenticate_direct_mtls(request.environ)
+        payload = resource_owner_admission.validate_request(
+            request.get_json(silent=True), workload_issuer
+        )
+        result = resource_owner_admission.resolve(
+            payload, RESOURCE_OWNER_ADMISSION_REPOSITORY
+        )
+        response = jsonify(result)
+        response.headers["Cache-Control"] = "no-store"
+        return response, 200
+    except resource_owner_admission.OwnerAdmissionError as exc:
+        return _owner_admission_error(exc)
+
+
+@app.route('/api/v1/resource/workspace/resolve', methods=['POST'])
+def resolve_resource_workspace_v1():
+    """Resolve an existing opaque workspace from a signed resource assertion."""
+    selector_headers = (
+        "X-VVAULT-Owner", "X-VVAULT-Owner-Id", "X-Owner-Id",
+        "X-Relying-Party-Id", "X-Client-Id", "X-Application-Id",
+    )
+    body = request.get_json(silent=True)
+    if request.args or any(request.headers.get(name) for name in selector_headers):
+        return _resource_error(resource_authorization.ResourceAuthorizationError(
+            "UNTRUSTED_SELECTOR", 403
+        ))
+    if body not in (None, {}):
+        return _resource_error(resource_authorization.ResourceAuthorizationError(
+            "UNTRUSTED_SELECTOR", 403
+        ))
+    auth_header = str(request.headers.get("Authorization") or "")
+    assertion = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+    if not assertion:
+        return _resource_error(resource_authorization.ResourceAuthorizationError(
+            "RESOURCE_ASSERTION_REQUIRED", 401
+        ))
+    try:
+        verified = resource_authorization.verify_resource_assertion(assertion)
+        if resource_authorization.WORKSPACE_RESOLVE_CAPABILITY not in verified["capabilities"]:
+            raise resource_authorization.ResourceAuthorizationError(
+                "INSUFFICIENT_CAPABILITY", 403
+            )
+        resource_authorization.ResourceStatusClient.from_environment().validate(
+            assertion, verified
+        )
+        set_relying_party_id(verified["relyingPartyId"])
+        workspace = RESOURCE_WORKSPACE_REPOSITORY.resolve(
+            owner_user_id=verified["ownerUserId"],
+            client_id=verified["clientId"],
+            application_id=verified["applicationId"],
+        )
+        if workspace is None:
+            raise resource_authorization.ResourceAuthorizationError(
+                "WORKSPACE_NOT_PROVISIONED", 404
+            )
+        if workspace.get("lifecycleStatus") != "ACTIVE":
+            raise resource_authorization.ResourceAuthorizationError(
+                "WORKSPACE_NOT_ACTIVE", 403
+            )
+        return jsonify({
+            "success": True,
+            "contract": resource_authorization.WIRE_CONTRACT,
+            "workspace": {
+                "id": workspace["workspaceId"],
+                "lifecycleStatus": workspace["lifecycleStatus"],
+                "applicationId": workspace["applicationId"],
+                "capabilities": sorted(
+                    set(workspace["capabilities"]).intersection(verified["capabilities"])
+                ),
+            },
+        }), 200
+    except resource_authorization.ResourceAuthorizationError as exc:
+        return _resource_error(exc)
+    except Exception:
+        logger.exception("Resource workspace resolution failed closed")
+        return _resource_error(resource_authorization.ResourceTrustUnavailable())
 
 
 @app.route('/api/vault/drive/children')
@@ -10129,8 +10245,21 @@ def _start_enrollment_session(user: dict, frontend: str):
             response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
             response.set_cookie("vvault_session", normal_token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=30 * 24 * 60 * 60, path="/")
             return _set_device_cookie(response, device_secret)
-        args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=token_hash, expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
-        session = AUTH_REPOSITORY.issue_pending_device_session(**args)
+        # Provider/email verification is the sign-in boundary for an existing
+        # active owner. A new browser must not create a second passkey/recovery
+        # gate after identity and current legal receipts have been verified.
+        session = AUTH_REPOSITORY.issue_active_session(
+            user_id=user_id,
+            token_hash=_session_token_hash(normal_token),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            required_documents=_enrollment_documents(),
+        )
+        if not session:
+            raise RuntimeError("cannot issue active session")
+        response = redirect(f"{frontend.rstrip('/')}/")
+        response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
+        response.set_cookie("vvault_session", normal_token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=30 * 24 * 60 * 60, path="/")
+        return _set_device_cookie(response, device_secret)
     else:
         args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=token_hash, expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
         session = AUTH_REPOSITORY.create_pending_enrollment_session(**args) if state == "PENDING_ENROLLMENT" else AUTH_REPOSITORY.issue_pending_device_session(**args)

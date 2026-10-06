@@ -1,0 +1,28 @@
+[Unit]
+Description=VVAULT owner-admission direct-mTLS listener
+After=network-online.target vvault-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vvault
+Group=vvault
+WorkingDirectory=/opt/vvault-public
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/vvault/owner-admission.env
+ExecStart=/opt/vvault-public/venv/bin/python -m vvault.server.resource_owner_admission_host
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

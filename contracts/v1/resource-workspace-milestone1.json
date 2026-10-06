@@ -1,0 +1,38 @@
+{
+  "contract": "life.vvault.resource-workspace/v1",
+  "authContract": "life.auth.resource-authorization/v1",
+  "assertionType": "life-resource+jwt",
+  "signatureAlgorithm": "EdDSA",
+  "issuerConfiguration": "AUTH_RESOURCE_ISSUER",
+  "audience": "https://vvault.thewreck.org",
+  "registration": {
+    "clientId": "grid-windows",
+    "applicationId": "grid",
+    "relyingPartyId": "grid"
+  },
+  "capabilities": ["workspace:resolve"],
+  "resourceStatus": {
+    "method": "POST",
+    "path": "/api/auth/resource-status",
+    "authentication": "direct-mtls",
+    "positiveCache": false,
+    "requestFields": ["assertion"]
+  },
+  "workspaceResolution": {
+    "method": "POST",
+    "path": "/api/v1/resource/workspace/resolve",
+    "requestFields": [],
+    "responseFields": [
+      "success",
+      "contract",
+      "workspace.id",
+      "workspace.lifecycleStatus",
+      "workspace.applicationId",
+      "workspace.capabilities"
+    ],
+    "createsWorkspace": false,
+    "createsApplicationInstance": false
+  },
+  "requiredMigration": "0041_resource_workspace_milestone1",
+  "productionActivation": "disabled-until-provenance-gate"
+}
