@@ -3262,7 +3262,7 @@ def get_current_user():
         state = str(session.get('account_state') or 'LEGACY')
         kind = str(session.get('enrollment_session_kind') or 'LEGACY')
         device_status = str(session.get('enrollment_device_status') or '')
-        if state == 'ACTIVE' and kind == 'NORMAL' and device_status == 'TRUSTED':
+        if state == 'ACTIVE' and kind == 'NORMAL' and device_status in {'', 'TRUSTED'}:
             return session, token
         # Existing sessions remain usable only during the explicitly staged
         # migration window. New pending/device sessions never reach data routes.
@@ -10151,8 +10151,21 @@ def _start_enrollment_session(user: dict, frontend: str):
             response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
             response.set_cookie("vvault_session", normal_token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=30 * 24 * 60 * 60, path="/")
             return _set_device_cookie(response, device_secret)
-        args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=token_hash, expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
-        session = AUTH_REPOSITORY.issue_pending_device_session(**args)
+        # Provider/email verification is the sign-in boundary for an existing
+        # active owner. A new browser must not create a second passkey/recovery
+        # gate after identity and current legal receipts have been verified.
+        session = AUTH_REPOSITORY.issue_active_session(
+            user_id=user_id,
+            token_hash=_session_token_hash(normal_token),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            required_documents=_enrollment_documents(),
+        )
+        if not session:
+            raise RuntimeError("cannot issue active session")
+        response = redirect(f"{frontend.rstrip('/')}/")
+        response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"
+        response.set_cookie("vvault_session", normal_token, httponly=True, secure=_runtime_is_production(), samesite="Strict", max_age=30 * 24 * 60 * 60, path="/")
+        return _set_device_cookie(response, device_secret)
     else:
         args = dict(user_id=user_id, device_secret_digest=identity_crypto.keyed_digest(device_secret, _identity_hmac_key()), token_hash=token_hash, expires_at=datetime.now(timezone.utc) + timedelta(minutes=20), ip_hash=identity_crypto.keyed_digest(str(request.remote_addr or ""), _identity_hmac_key()), user_agent_hash=identity_crypto.keyed_digest(str(request.headers.get("User-Agent") or ""), _identity_hmac_key()), label=request.headers.get("User-Agent", "")[:120])
         session = AUTH_REPOSITORY.create_pending_enrollment_session(**args) if state == "PENDING_ENROLLMENT" else AUTH_REPOSITORY.issue_pending_device_session(**args)
