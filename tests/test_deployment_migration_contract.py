@@ -75,11 +75,11 @@ def test_migration_runner_resolves_database_configuration_from_systemd_without_p
 
 def test_github_deployment_executes_the_reviewed_repository_contract_not_a_host_trigger():
     assert "/opt/deploy/trigger/deploy-trigger.sh" not in WORKFLOW
-    assert 'git -c safe.directory="$repo" -C "$repo" fetch origin production:refs/remotes/origin/production' in WORKFLOW
-    assert 'git -c safe.directory="$repo" -C "$repo" checkout -B production origin/production' in WORKFLOW
-    assert 'git -c safe.directory="$repo" -C "$repo" status --porcelain --untracked-files=normal' in WORKFLOW
-    assert 'git -c safe.directory="$repo" -C "$repo" reset --hard origin/production' in WORKFLOW
-    assert 'exec "$repo/scripts/deployment/droplet-deploy-vvault.sh"' in WORKFLOW
+    assert 'sudo -n git -c safe.directory="$repo" -C "$repo" fetch origin production:refs/remotes/origin/production' in WORKFLOW
+    assert 'sudo -n git -c safe.directory="$repo" -C "$repo" checkout -B production origin/production' in WORKFLOW
+    assert 'sudo -n git -c safe.directory="$repo" -C "$repo" status --porcelain --untracked-files=normal' in WORKFLOW
+    assert 'sudo -n git -c safe.directory="$repo" -C "$repo" reset --hard origin/production' in WORKFLOW
+    assert 'exec sudo -n env VVAULT_DEPLOY_MODE=' in WORKFLOW
 
 
 def test_deployment_creates_private_verified_recovery_receipts_before_migration():
