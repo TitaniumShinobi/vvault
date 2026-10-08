@@ -74,6 +74,10 @@ jobs:
               -p User -p Group -p WorkingDirectory -p ExecStart -p EnvironmentFiles \
               -p Result -p ExecMainCode -p ExecMainStatus -p NRestarts
             namei -om "$repo/venv/bin/gunicorn" "$repo/vvault/server/vvault_web_server.py"
+            printf '%s\n' 'GUNICORN_ENTRYPOINT'
+            sed -n '1p' "$repo/venv/bin/gunicorn"
+            "$repo/venv/bin/gunicorn" --version || printf 'gunicorn_entrypoint_status=%s\n' "$?"
+            "$repo/venv/bin/python" -m gunicorn.app.wsgiapp --version
 
             log="$(mktemp)"
             pid=""
@@ -85,7 +89,7 @@ jobs:
               rm -f "$log"
             }
             trap cleanup EXIT
-            "$repo/venv/bin/gunicorn" \
+            "$repo/venv/bin/python" -m gunicorn.app.wsgiapp \
               --bind 127.0.0.1:18000 --workers 1 --timeout 20 \
               --access-logfile - --error-logfile - \
               vvault.server.vvault_web_server:app >"$log" 2>&1 &
