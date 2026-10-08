@@ -14,6 +14,7 @@ on:
         options:
           - deploy_backend
           - restart_backend
+          - diagnose_backend_import
           - deploy_full
           - configure_oauth_transaction_key
           - configure_email_delivery
@@ -49,6 +50,26 @@ jobs:
             fi
             sudo -n /usr/bin/systemctl status vvault-backend.service || true
             exit 1
+
+  diagnose-backend-import:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'diagnose_backend_import'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Diagnose the current approved backend import
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          script: |
+            set -eu
+            repo="$(readlink -f /opt/vvault-public)"
+            test -x "$repo/venv/bin/python"
+            printf 'runtime=%s\n' "$repo"
+            "$repo/venv/bin/python" --version
+            cd "$repo"
+            "$repo/venv/bin/python" -c 'import vvault.server.vvault_web_server; print("backend_import=ok")'
 
   deploy-backend:
     if: github.event_name == 'push' || inputs.operation == 'deploy_backend'
