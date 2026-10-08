@@ -88,6 +88,12 @@ jobs:
             else
               printf '%s\n' 'wrapper_readable=no'
             fi
+            printf '%s\n' 'DEPLOY_TRIGGER'
+            stat -c 'owner=%U group=%G mode=%a size=%s' /opt/deploy/trigger/deploy-trigger.sh
+            sed -n '1,260p' /opt/deploy/trigger/deploy-trigger.sh |
+              sed -E \
+                -e 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]+(:[^/@[:space:]]+)?@#\1[redacted]@#g' \
+                -e 's#^([A-Za-z_]*(KEY|TOKEN|PASSWORD|SECRET)[A-Za-z_]*=).*#\1[redacted]#I'
             printf '%s\n' 'GUNICORN_ENTRYPOINT'
             sed -n '1p' "$repo/venv/bin/gunicorn"
             "$repo/venv/bin/gunicorn" --version || printf 'gunicorn_entrypoint_status=%s\n' "$?"
