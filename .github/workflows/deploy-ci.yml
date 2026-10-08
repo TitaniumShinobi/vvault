@@ -47,7 +47,7 @@ jobs:
                 python3 -c 'import json,sys; assert json.load(sys.stdin).get("ready") is True'; then
               exit 0
             fi
-            sudo -n /usr/bin/systemctl status vvault-backend.service --no-pager --full || true
+            sudo -n /usr/bin/systemctl status vvault-backend.service || true
             exit 1
 
   deploy-backend:
