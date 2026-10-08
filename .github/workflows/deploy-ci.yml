@@ -70,6 +70,39 @@ jobs:
             "$repo/venv/bin/python" --version
             cd "$repo"
             "$repo/venv/bin/python" -c 'import vvault.server.vvault_web_server; print("backend_import=ok")'
+            systemctl show vvault-backend.service \
+              -p User -p Group -p WorkingDirectory -p ExecStart -p EnvironmentFiles \
+              -p Result -p ExecMainCode -p ExecMainStatus -p NRestarts
+            namei -om "$repo/venv/bin/gunicorn" "$repo/vvault/server/vvault_web_server.py"
+
+            log="$(mktemp)"
+            pid=""
+            cleanup() {
+              if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                kill "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+              fi
+              rm -f "$log"
+            }
+            trap cleanup EXIT
+            "$repo/venv/bin/gunicorn" \
+              --bind 127.0.0.1:18000 --workers 1 --timeout 20 \
+              --access-logfile - --error-logfile - \
+              vvault.server.vvault_web_server:app >"$log" 2>&1 &
+            pid="$!"
+            for attempt in $(seq 1 12); do
+              if curl --fail --silent --show-error http://127.0.0.1:18000/api/ready; then
+                printf '\nbackend_boot=ok\n'
+                exit 0
+              fi
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            printf '%s\n' 'BACKEND_BOOT_LOG'
+            sed -E 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]+(:[^/@[:space:]]+)?@#\1[redacted]@#g' "$log" | tail -n 120
+            wait "$pid" || status="$?"
+            printf 'backend_boot_status=%s\n' "${status:-0}"
+            exit 1
 
   deploy-backend:
     if: github.event_name == 'push' || inputs.operation == 'deploy_backend'
