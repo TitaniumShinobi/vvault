@@ -6184,7 +6184,15 @@ def require_cleanhouse_files_auth(f):
                 ip=request.headers.get("X-Forwarded-For", request.remote_addr),
             )
             return jsonify({"success": False, "error": "Unauthorized"}), 401
-        request.current_user = user
+        # PostgreSQL adapters may return UUID objects for ``users.id``. The
+        # canonical owner resolver accepts normalized UUID strings, so carry
+        # forward the owner identity already verified by the pairing record.
+        request.current_user = {
+            **user,
+            "id": user_id,
+            "user_id": user_id,
+            "auth_mode": "cleanhouse_files_pairing",
+        }
         request.current_token = None
         log_auth_decision(
             action="access_granted",
