@@ -47,13 +47,27 @@ jobs:
             if env VVAULT_DEPLOY_MODE="$VVAULT_DEPLOY_MODE" /opt/deploy/trigger/deploy-trigger.sh vvault; then
               exit 0
             fi
+            repo="$(readlink -f /opt/vvault-public)"
+            git_safe() { git -c safe.directory="$repo" -C "$repo" "$@"; }
+            printf '%s\n' 'DEPLOY_UNIT'
             systemctl show vvault-deploy.service \
-              -p ActiveState -p SubState -p Result -p ExecMainCode -p ExecMainStatus || true
-            journalctl -u vvault-deploy.service -n 80 --no-pager -o cat 2>/dev/null |
-              sed -E 's/([A-Z0-9_]*(TOKEN|SECRET|PASSWORD|KEY)[A-Z0-9_]*)=[^[:space:]]+/\1=[REDACTED]/g' || true
-            git -C /opt/vvault-public branch --show-current || true
-            git -C /opt/vvault-public rev-parse HEAD origin/production || true
-            git -C /opt/vvault-public status --short --untracked-files=no || true
+              -p ActiveState -p SubState -p Result -p ExecMainCode -p ExecMainStatus -p ExecStart || true
+            systemctl status vvault-deploy.service --no-pager --full || true
+            printf '%s\n' 'BACKEND_UNIT'
+            systemctl show vvault-backend.service -p LoadState -p User -p Group -p ActiveState -p SubState || true
+            printf '%s\n' 'CHECKOUT'
+            printf 'resolved=%s\n' "$repo"
+            stat -c 'owner=%U group=%G mode=%a' "$repo" || true
+            printf 'git_metadata_writable=%s\n' "$([ -w "$repo/.git" ] && printf yes || printf no)"
+            git_safe branch --show-current || true
+            git_safe rev-parse HEAD origin/production || true
+            git_safe status --short --untracked-files=normal || true
+            printf '%s\n' 'REMOTE_PREFLIGHT'
+            git_safe fetch --dry-run origin production || true
+            printf '%s\n' 'PRIVILEGE_PREFLIGHT'
+            sudo -n -l || true
+            printf '%s\n' 'READINESS'
+            curl --fail --silent --show-error http://127.0.0.1:8000/api/ready || true
             exit 1
 
   deploy-full:
