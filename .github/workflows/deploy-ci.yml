@@ -42,9 +42,13 @@ jobs:
           script: |
             set -eu
             sudo -n /usr/bin/systemctl restart vvault-backend.service
-            curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 2 \
-              http://127.0.0.1:8000/api/ready |
-              python3 -c 'import json,sys; assert json.load(sys.stdin).get("ready") is True'
+            if curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 2 \
+                http://127.0.0.1:8000/api/ready |
+                python3 -c 'import json,sys; assert json.load(sys.stdin).get("ready") is True'; then
+              exit 0
+            fi
+            sudo -n /usr/bin/systemctl status vvault-backend.service --no-pager --full || true
+            exit 1
 
   deploy-backend:
     if: github.event_name == 'push' || inputs.operation == 'deploy_backend'
