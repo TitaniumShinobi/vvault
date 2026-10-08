@@ -13,6 +13,7 @@ on:
         type: choice
         options:
           - deploy_backend
+          - restart_backend
           - deploy_full
           - configure_oauth_transaction_key
           - configure_email_delivery
@@ -27,6 +28,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  restart-backend:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'restart_backend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Restart the current approved backend release
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 165.245.136.194
+          username: deploy
+          key: ${{ secrets.VVAULT_DEPLOY_KEY }}
+          script: |
+            set -eu
+            sudo -n /usr/bin/systemctl restart vvault-backend.service
+            curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 2 \
+              http://127.0.0.1:8000/api/ready |
+              python3 -c 'import json,sys; assert json.load(sys.stdin).get("ready") is True'
+
   deploy-backend:
     if: github.event_name == 'push' || inputs.operation == 'deploy_backend'
     runs-on: ubuntu-latest
