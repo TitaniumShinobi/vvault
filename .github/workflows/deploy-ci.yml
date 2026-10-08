@@ -47,10 +47,13 @@ jobs:
             if env VVAULT_DEPLOY_MODE="$VVAULT_DEPLOY_MODE" /opt/deploy/trigger/deploy-trigger.sh vvault; then
               exit 0
             fi
-            sudo -n systemctl show vvault-deploy.service \
+            systemctl show vvault-deploy.service \
               -p ActiveState -p SubState -p Result -p ExecMainCode -p ExecMainStatus || true
-            sudo -n journalctl -u vvault-deploy.service -n 80 --no-pager -o cat 2>/dev/null |
+            journalctl -u vvault-deploy.service -n 80 --no-pager -o cat 2>/dev/null |
               sed -E 's/([A-Z0-9_]*(TOKEN|SECRET|PASSWORD|KEY)[A-Z0-9_]*)=[^[:space:]]+/\1=[REDACTED]/g' || true
+            git -C /opt/vvault-public branch --show-current || true
+            git -C /opt/vvault-public rev-parse HEAD origin/production || true
+            git -C /opt/vvault-public status --short --untracked-files=no || true
             exit 1
 
   deploy-full:
