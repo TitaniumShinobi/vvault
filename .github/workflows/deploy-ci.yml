@@ -74,6 +74,20 @@ jobs:
               -p User -p Group -p WorkingDirectory -p ExecStart -p EnvironmentFiles \
               -p Result -p ExecMainCode -p ExecMainStatus -p NRestarts
             namei -om "$repo/venv/bin/gunicorn" "$repo/vvault/server/vvault_web_server.py"
+            printf '%s\n' 'IMMUTABLE_DEPLOY_UNIT'
+            systemctl show vvault-deploy.service \
+              -p FragmentPath -p User -p Group -p WorkingDirectory -p ExecStart \
+              -p Result -p ExecMainCode -p ExecMainStatus
+            printf '%s\n' 'IMMUTABLE_DEPLOY_WRAPPER'
+            stat -c 'owner=%U group=%G mode=%a size=%s' /usr/local/libexec/vvault-immutable-deploy
+            if [ -r /usr/local/libexec/vvault-immutable-deploy ]; then
+              sed -n '1,280p' /usr/local/libexec/vvault-immutable-deploy |
+                sed -E \
+                  -e 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]+(:[^/@[:space:]]+)?@#\1[redacted]@#g' \
+                  -e 's#^([A-Za-z_]*(KEY|TOKEN|PASSWORD|SECRET)[A-Za-z_]*=).*#\1[redacted]#I'
+            else
+              printf '%s\n' 'wrapper_readable=no'
+            fi
             printf '%s\n' 'GUNICORN_ENTRYPOINT'
             sed -n '1p' "$repo/venv/bin/gunicorn"
             "$repo/venv/bin/gunicorn" --version || printf 'gunicorn_entrypoint_status=%s\n' "$?"
