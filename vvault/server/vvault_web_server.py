@@ -82,6 +82,7 @@ import vvault_file_repository
 from vvault.server import vvault_access_assertion
 from vvault.server import resource_authorization
 from vvault.server import resource_owner_admission
+from vvault.server import capacity_readiness
 from vvault.server.relying_party_scope import set_relying_party_id
 try:
     from vvault.server.relying_party_scope import current_relying_party_id
@@ -738,6 +739,10 @@ def _runtime_metadata() -> Dict[str, Any]:
 
 def _get_vvault_runtime_status() -> Dict[str, Any]:
     body_database = _body_database_dependency_status()
+    capacity = capacity_readiness.capacity_status(
+        os.environ.get("VVAULT_CAPACITY_MOUNT", "/"),
+        event_path=os.environ.get("VVAULT_CAPACITY_EVENT_FILE"),
+    )
     ready = bool(body_database.get("ready"))
     return {
         "ready": ready,
@@ -750,6 +755,7 @@ def _get_vvault_runtime_status() -> Dict[str, Any]:
         "body_database": body_database,
         "storage": _storage_dependency_metadata(),
         "auth": _auth_dependency_metadata(),
+        "capacity": capacity,
     }
 
 
@@ -3933,7 +3939,11 @@ def readiness_check():
     resource_trust["ready"] = bool(
         resource_trust.get("ready") and owner_admission_trust.get("ready")
     )
-    ready = bool(runtime_status["ready"] and door.get("ok"))
+    capacity = runtime_status.get("capacity") or capacity_readiness.capacity_status(
+        os.environ.get("VVAULT_CAPACITY_MOUNT", "/"),
+        event_path=os.environ.get("VVAULT_CAPACITY_EVENT_FILE"),
+    )
+    ready = bool(runtime_status["ready"] and door.get("ok") and not capacity["critical"])
     return jsonify({
         "ready": ready,
         "status": "ready" if ready else "not_ready",
@@ -3947,6 +3957,7 @@ def readiness_check():
         "body_database": runtime_status["body_database"],
         "storage": runtime_status["storage"],
         "auth": runtime_status["auth"],
+        "capacity": capacity,
         "storage_owner": door.get("storage_owner"),
         "transcript_owner": door.get("transcript_owner"),
         "transcript_compatibility_owner": door.get("transcript_compatibility_owner"),
@@ -10778,6 +10789,29 @@ def _identity_frontend_url() -> str:
 
 def _begin_identity_oauth(provider: str, purpose: str = "signin", current: dict | None = None):
     from flask import redirect
+    capacity = capacity_readiness.capacity_status(
+        os.environ.get("VVAULT_CAPACITY_MOUNT", "/"),
+        event_path=os.environ.get("VVAULT_CAPACITY_EVENT_FILE"),
+    )
+    if capacity["critical"]:
+        reference = f"CAP-{uuid4().hex[:12].upper()}"
+        payload = {
+            "success": False,
+            "error": "VVAULT is temporarily unavailable because storage capacity is critically low. Your account and Vault data remain protected.",
+            "error_code": "CAPACITY_DEGRADED",
+            "reference": reference,
+            "authentication_regression": False,
+        }
+        if "text/html" in str(request.headers.get("Accept") or ""):
+            return Response(
+                "<!doctype html><title>VVAULT temporarily unavailable</title>"
+                "<main><h1>VVAULT is temporarily unavailable</h1>"
+                "<p>Storage capacity is critically low. Your account and Vault data remain protected. "
+                f"Administrators have been notified. Reference: <code>{reference}</code></p></main>",
+                status=503,
+                content_type="text/html; charset=utf-8",
+            )
+        return jsonify(payload), 503
     failure_stage = "identity_transaction"
     try:
         from vvault.server import vvault_auth_crypto as identity_crypto

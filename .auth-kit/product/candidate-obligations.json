@@ -1,0 +1,20 @@
+{
+  "profile": "VVAULT_PRODUCTION_AUTH",
+  "candidates": [
+    {"id":"provider.entry","applicability":"TRUE","definition":{"requirement":"Supported provider entry routes initiate the configured provider flow without authenticating the request.","owner":"VVAULT"}},
+    {"id":"provider.callback","applicability":"TRUE","definition":{"requirement":"Provider callbacks validate provider identity and complete with an explicit browser outcome.","owner":"VVAULT"}},
+    {"id":"callback.state","applicability":"TRUE","definition":{"requirement":"OAuth state and request binding are validated and replay is rejected.","owner":"VVAULT"}},
+    {"id":"callback.failure_recovery","applicability":"TRUE","definition":{"requirement":"Cancellation, provider rejection, and recoverable callback failure produce explicit safe recovery outcomes.","owner":"VVAULT"}},
+    {"id":"identity.canonical","applicability":"TRUE","definition":{"requirement":"Authenticated identities resolve through canonical OVVAULTS identity records without duplicate creation.","owner":"VVAULT"}},
+    {"id":"session.issuance","applicability":"TRUE","definition":{"requirement":"A session is issued only after verified canonical identity resolution.","owner":"VVAULT"}},
+    {"id":"session.persistence","applicability":"TRUE","definition":{"requirement":"Valid sessions persist and remain bound to their canonical identity.","owner":"VVAULT"}},
+    {"id":"session.restoration","applicability":"TRUE","definition":{"requirement":"A valid persisted session restores after process or browser restart while revocation remains effective.","owner":"VVAULT"}},
+    {"id":"session.expiry","applicability":"TRUE","definition":{"requirement":"Expired, invalid, and revoked sessions are rejected with an explicit outcome.","owner":"VVAULT"}},
+    {"id":"session.logout","applicability":"TRUE","definition":{"requirement":"Logout invalidates the server session and clears client credentials.","owner":"VVAULT"}},
+    {"id":"ovvaults.connectivity","applicability":"TRUE","definition":{"database":"vvault_body_20260504t123219z","schema":"ovvaults","requirement":"Production authentication uses bounded canonical OVVAULTS connectivity.","owner":"VVAULT"}},
+    {"id":"schema.compatibility","applicability":"TRUE","definition":{"ledger":"ovvaults.enrollment_schema_migrations","requirement":"The serving release declares and verifies the exact compatible authentication schema.","owner":"VVAULT"}},
+    {"id":"migration.compatibility","applicability":"TRUE","definition":{"artifact":"vvault/migrations/0039_returning_owner_session_without_device_gate.up.sql","sha256":"a2fa93bae20a083e346fa68b49b82166d2b6ce7019099d9e6c3fd4948efc349a","requirement":"The release artifact and canonical ledger agree on migration identity and checksum.","owner":"VVAULT"}},
+    {"id":"runtime.independence","applicability":"TRUE","definition":{"requirement":"Normal VVAULT login and restored sessions do not require AUTH tooling or an AUTH verifier process at runtime.","owner":"VVAULT"}},
+    {"id":"returning_owner.no_device_gate","applicability":"TRUE","definition":{"requirement":"A returning canonical owner receives a session without a passkey, recovery-code, or device-approval gate.","owner":"VVAULT"}}
+  ]
+}

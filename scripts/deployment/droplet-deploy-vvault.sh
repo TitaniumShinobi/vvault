@@ -21,16 +21,38 @@ RESTART_ATTEMPTED=0
 MIGRATIONS_APPLIED=0
 SOURCE_CHANGED=0
 STAGING=""
+VERIFY_WORKTREE=""
 
 auth_gate() {
   local phase="$1" ref="$2"
-  [[ "${AUTH_RELEASE_GATE:-}" = /* && -f "$AUTH_RELEASE_GATE" && ! -L "$AUTH_RELEASE_GATE" ]] || { log "AUTH_RELEASE_GATE required"; return 1; }
-  [[ "${AUTH_RELEASE_GATE_SHA256:-}" =~ ^[a-f0-9]{64}$ ]] || return 1
-  [[ "$(sha256sum "$AUTH_RELEASE_GATE" | cut -d' ' -f1)" == "$AUTH_RELEASE_GATE_SHA256" ]] || return 1
-  bash "$AUTH_RELEASE_GATE" "$phase" "$ref"
+  local verify_root="$REPO"
+  if [[ "$phase" == "candidate" ]]; then
+    VERIFY_WORKTREE="$(mktemp -d /tmp/vvault-auth-verify.XXXXXXXX)"
+    git_repo worktree add --detach "$VERIFY_WORKTREE" "$ref" >/dev/null
+    verify_root="$VERIFY_WORKTREE"
+  fi
+  [[ -f "$verify_root/.auth-kit/ci.mjs" && ! -L "$verify_root/.auth-kit/ci.mjs" ]] || { log "VVAULT durability gate missing"; return 1; }
+  (cd "$verify_root" && AUTH_CONTRACT_CHECKPOINT="${VVAULT_AUTH_CONTRACT_CHECKPOINT:?required}" /usr/bin/node .auth-kit/ci.mjs verify)
+  if [[ -n "$VERIFY_WORKTREE" ]]; then
+    git_repo worktree remove --force "$VERIFY_WORKTREE"
+    VERIFY_WORKTREE=""
+  fi
+}
+
+capacity_gate() {
+  PYTHONPATH="$REPO" "$REPO/venv/bin/python" -c '
+from vvault.server.capacity_readiness import capacity_status
+import os, sys
+state=capacity_status(os.environ.get("VVAULT_CAPACITY_MOUNT", "/"), event_path=os.environ.get("VVAULT_CAPACITY_EVENT_FILE"))
+raise SystemExit(3 if state["deployment_blocked"] else 0)
+'
 }
 
 cleanup_stage() {
+  if [[ -n "$VERIFY_WORKTREE" ]]; then
+    git_repo worktree remove --force "$VERIFY_WORKTREE" >/dev/null 2>&1 || true
+    VERIFY_WORKTREE=""
+  fi
   if [[ -n "$STAGING" ]]; then
     [[ "$STAGING" == /tmp/vvault-auth-stage.* && -d "$STAGING" && ! -L "$STAGING" ]] || return 1
     rm -rf -- "$STAGING"
@@ -242,12 +264,14 @@ log "fetching $BRANCH"
 git_repo fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
 NEW_REF="$(git_repo rev-parse "origin/$BRANCH")"
 # Gate the immutable candidate tree before changing the serving checkout.
+capacity_gate
 auth_gate candidate "$NEW_REF"
 SOURCE_CHANGED=1
 git_repo checkout -B "$BRANCH" "$NEW_REF"
 
 if [[ "$DEPLOY_MODE" == "backend-only" ]]; then
   log "restarting backend from the tracked production checkout (frontend and database unchanged)"
+  capacity_gate
   auth_gate candidate "$NEW_REF"
   RESTART_ATTEMPTED=1
   sudo systemctl restart "$SERVICE"
@@ -278,12 +302,14 @@ cp -a "$FRONTEND"/. "$BACKUP"/
 STAGING="$(mktemp -d /tmp/vvault-auth-stage.XXXXXXXX)"
 cp -a "$REPO/dist"/. "$STAGING"/
 auth_gate candidate "$NEW_REF"
+capacity_gate
 log "publishing frontend"
 PUBLISHED=1
 rm -rf "${FRONTEND:?}"/*
 cp -R "$STAGING"/. "$FRONTEND"/
 
 auth_gate candidate "$NEW_REF"
+capacity_gate
 log "restarting $SERVICE"
 RESTART_ATTEMPTED=1
 sudo systemctl restart "$SERVICE"

@@ -15,6 +15,10 @@ def test_deploy_requires_exact_auth_compatibility_before_checkout_and_restart():
     assert DEPLOY.count('auth_gate serving "$NEW_REF"') == 2
     assert "schema compatibility verified; migrations require a separate approved operation" in DEPLOY
     assert "schema verified; no migrations applied" in DEPLOY
+    assert 'node .auth-kit/ci.mjs verify' in DEPLOY
+    assert 'VVAULT_AUTH_CONTRACT_CHECKPOINT' in DEPLOY
+    assert 'AUTH_RELEASE_GATE' not in DEPLOY
+    assert DEPLOY.count('capacity_gate') >= 5
 
 
 def test_production_pushes_restart_backend_only_until_a_full_deploy_is_explicit():

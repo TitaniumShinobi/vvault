@@ -1,0 +1,25 @@
+{
+  "contract": "life.auth.product-contract/1",
+  "productId": "vvault",
+  "state": "UNESTABLISHED",
+  "profile": "PRODUCT_LOCAL",
+  "inputs": {
+    "artifact": [
+      "vvault/server/vvault_web_server.py",
+      "vvault/server/vvault_auth_repository.py",
+      "vvault/server/capacity_readiness.py",
+      "vvault/migrations/0039_returning_owner_session_without_device_gate.up.sql",
+      "scripts/deployment/droplet-deploy-vvault.sh"
+    ],
+    "configuration": [
+      ".auth-kit/product/VVAULT_PRODUCTION_AUTH.json",
+      ".auth-kit/product/candidate-obligations.json",
+      ".auth-kit/product/evidence-state.json",
+      ".auth-kit/product/observer-mappings.json",
+      ".auth-kit/product/schema-contract.json"
+    ]
+  },
+  "provenanceDigest": "c52d3dd2a8d16f431561e91559073a182a9571dce82692130ca373a7e26f0272",
+  "head": null,
+  "sequence": 0
+}

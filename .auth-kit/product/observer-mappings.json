@@ -1,0 +1,17 @@
+{
+  "provider.entry": {"source":["vvault/server/vvault_web_server.py:_begin_identity_oauth","vvault/server/vvault_web_server.py:begin_canonical_oauth"],"tests":["tests/test_google_entry_compatibility.py"]},
+  "provider.callback": {"source":["vvault/server/vvault_web_server.py:complete_canonical_oauth"],"tests":["tests/test_google_entry_compatibility.py","tests/test_identity_directory_postgres.py"]},
+  "callback.state": {"source":["vvault/server/vvault_auth_crypto.py","vvault/server/vvault_auth_repository.py"],"tests":["tests/test_auth_crypto_transaction_key.py","tests/test_identity_directory_postgres.py"]},
+  "callback.failure_recovery": {"source":["vvault/server/vvault_web_server.py:complete_canonical_oauth"],"tests":["tests/test_google_entry_compatibility.py"]},
+  "identity.canonical": {"source":["vvault/server/vvault_auth_repository.py"],"tests":["tests/test_identity_directory_postgres.py"]},
+  "session.issuance": {"source":["vvault/server/vvault_auth_repository.py"],"tests":["tests/test_identity_directory_postgres.py"]},
+  "session.persistence": {"source":["vvault/server/vvault_auth_repository.py"],"tests":["tests/test_identity_directory_postgres.py"]},
+  "session.restoration": {"source":["vvault/server/vvault_web_server.py:verify_auth"],"tests":["tests/test_identity_directory_postgres.py"]},
+  "session.expiry": {"source":["vvault/server/vvault_auth_repository.py"],"tests":["tests/test_identity_directory_postgres.py"]},
+  "session.logout": {"source":["vvault/server/vvault_web_server.py:logout","vvault/server/vvault_web_server.py:logout_all_devices"],"tests":["tests/test_identity_directory_postgres.py"]},
+  "ovvaults.connectivity": {"source":["vvault/server/vvault_auth_repository.py","vvault/server/vvault_web_server.py:_body_database_dependency_status"],"tests":["tests/test_vvault_ready_body_database_contract.py"]},
+  "schema.compatibility": {"source":["scripts/deployment/droplet-deploy-vvault.sh","scripts/deployment/apply-vvault-enrollment-migrations.sh"],"tests":["tests/test_deployment_migration_contract.py"]},
+  "migration.compatibility": {"source":["vvault/migrations/0039_returning_owner_session_without_device_gate.up.sql"],"tests":["tests/test_deployment_migration_contract.py"]},
+  "runtime.independence": {"source":[".auth-kit/ci.mjs","scripts/deployment/droplet-deploy-vvault.sh"],"tests":[]},
+  "returning_owner.no_device_gate": {"source":["vvault/migrations/0039_returning_owner_session_without_device_gate.up.sql"],"tests":["tests/test_identity_directory_postgres.py"]}
+}
