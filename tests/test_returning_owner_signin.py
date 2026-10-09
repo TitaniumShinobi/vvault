@@ -7,6 +7,7 @@ from vvault.server import vvault_auth_repository as auth_repository
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP = (REPO_ROOT / "src" / "App.js").read_text(encoding="utf-8")
 SERVER = (REPO_ROOT / "vvault" / "server" / "vvault_web_server.py").read_text(encoding="utf-8")
+MIGRATION = (REPO_ROOT / "vvault" / "migrations" / "0039_returning_owner_session_without_device_gate.up.sql").read_text(encoding="utf-8")
 
 
 class _Cursor:
@@ -83,3 +84,9 @@ def test_frontend_and_callback_do_not_restore_the_device_gate():
     active_branch = SERVER.split('elif state == "ACTIVE":', 1)[1].split("else:", 1)[0]
     assert "issue_active_session" in active_branch
     assert "issue_pending_device_session" not in active_branch
+
+
+def test_database_allows_verified_active_owner_session_without_device_gate():
+    assert "NEW.enrollment_session_kind = 'NORMAL' AND NEW.enrollment_device_id IS NULL" in MIGRATION
+    assert "account_state_value <> 'ACTIVE'" in MIGRATION
+    assert "normal session requires active account" in MIGRATION
