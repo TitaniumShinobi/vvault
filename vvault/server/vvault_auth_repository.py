@@ -1044,6 +1044,77 @@ class VVaultAuthRepository:
             conn.commit()
         return True
 
+    def complete_provider_enrollment(
+        self, *, user_id: str, pending_session_id: str,
+        normal_token_hash: str, expires_at: datetime,
+        documents: Sequence[Mapping[str, str]], ip_hash: str | None = None,
+        user_agent_hash: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Activate a provider-verified owner after current legal consent.
+
+        Provider authentication is the identity ceremony.  Passkeys, recovery
+        codes, and browser-device approval are optional account features and
+        are deliberately not prerequisites for ordinary VVAULT signup.
+        """
+        receipts = {
+            (str(row.get("key") or ""), str(row.get("version") or ""), str(row.get("sha256") or ""))
+            for row in documents
+        }
+        if not normal_token_hash or not receipts or any(not all(receipt) for receipt in receipts):
+            raise ValueError("complete provider enrollment arguments are required")
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT sessions.enrollment_device_id FROM sessions
+                         JOIN users ON users.id=sessions.user_id
+                        WHERE sessions.id=%s AND sessions.user_id=%s
+                          AND sessions.revoked_at IS NULL AND sessions.expires_at > now()
+                          AND sessions.enrollment_session_kind='PENDING_ENROLLMENT'
+                          AND users.account_state='PENDING_ENROLLMENT'
+                        FOR UPDATE OF sessions, users""",
+                    (pending_session_id, user_id),
+                )
+                pending = _row_to_dict(cur.fetchone())
+                if not pending:
+                    conn.rollback(); return None
+                for key, version, sha256 in receipts:
+                    cur.execute(
+                        """INSERT INTO enrollment_consents
+                           (user_id, document_key, document_version, document_sha256, ip_hash, user_agent_hash)
+                           VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                        (user_id, key, version, sha256, ip_hash, user_agent_hash),
+                    )
+                cur.execute(
+                    "SELECT document_key, document_version, document_sha256 FROM enrollment_consents WHERE user_id=%s",
+                    (user_id,),
+                )
+                actual = {
+                    (str(row["document_key"]), str(row["document_version"]), str(row["document_sha256"]))
+                    for row in cur.fetchall()
+                }
+                if not receipts.issubset(actual):
+                    conn.rollback(); return None
+                cur.execute("UPDATE users SET account_state='ACTIVE', updated_at=now() WHERE id=%s", (user_id,))
+                device_id = pending.get("enrollment_device_id")
+                if device_id:
+                    cur.execute(
+                        """UPDATE enrollment_devices SET status='REVOKED', revoked_at=now()
+                            WHERE id=%s AND user_id=%s AND status='PENDING'""",
+                        (device_id, user_id),
+                    )
+                cur.execute("UPDATE sessions SET revoked_at=now() WHERE id=%s", (pending_session_id,))
+                cur.execute(
+                    """INSERT INTO sessions
+                       (user_id, token_hash, expires_at, enrollment_session_kind,
+                        enrollment_device_id, rotated_from_session_id)
+                       VALUES(%s,%s,%s,'NORMAL',NULL,%s)
+                       RETURNING id, user_id, expires_at, enrollment_session_kind, enrollment_device_id""",
+                    (user_id, normal_token_hash, expires_at, pending_session_id),
+                )
+                result = _row_to_dict(cur.fetchone())
+            conn.commit()
+        return result
+
     def complete_legacy_consent(
         self, *, user_id: str, pending_session_id: str, normal_token_hash: str,
         expires_at: datetime, documents: Sequence[Mapping[str, str]],

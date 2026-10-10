@@ -4,8 +4,6 @@ import { requestEnrollmentJson } from '../utils/enrollmentRequest.mjs';
 import { enrollmentCheckpoint } from '../utils/enrollmentContinuation.mjs';
 import { validatedPairedLaunch, reserveCompanionTab, launchVerifiedPair } from '../utils/pairedEnrollmentLaunch.mjs';
 
-const b64url = (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer)))
-  .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const decode = (value) => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4)), (c) => c.charCodeAt(0));
 
 const api = requestEnrollmentJson;
@@ -41,7 +39,6 @@ function RecoveryCode({ onRecovered, run, working }) {
 export default function EnrollmentFlow({ requestedMode = 'enrollment', embedded = false }) {
   const [status, setStatus] = useState(null);
   const [step, setStep] = useState('loading');
-  const [codes, setCodes] = useState([]);
   const [error, setError] = useState('');
   const [working, setWorking] = useState(false);
   const [transferCode, setTransferCode] = useState('');
@@ -93,14 +90,6 @@ export default function EnrollmentFlow({ requestedMode = 'enrollment', embedded 
   };
   const mode = status?.session_kind === 'PENDING_DEVICE' ? 'device' : status?.session_kind === 'LEGACY' ? 'recertification' : requestedMode;
 
-  const passkey = () => run(async () => {
-    const challenge = await api('/api/auth/enrollment/webauthn/challenge', { method: 'POST', body: '{}' });
-    const publicKey = challenge.publicKey; publicKey.challenge = decode(publicKey.challenge); publicKey.user.id = decode(publicKey.user.id);
-    const credential = await navigator.credentials.create({ publicKey }); const response = credential.response;
-    await api('/api/auth/enrollment/webauthn/register', { method: 'POST', body: JSON.stringify({ id: credential.id, rawId: b64url(credential.rawId), type: credential.type, response: { clientDataJSON: b64url(response.clientDataJSON), attestationObject: b64url(response.attestationObject), transports: response.getTransports?.() || [] } }) });
-    setStep('recovery');
-  });
-
   const assertPasskey = () => run(async () => {
     const challenge = await api('/api/auth/devices/webauthn/challenge', { method: 'POST', body: '{}' });
     const publicKey = challenge.publicKey; publicKey.challenge = decode(publicKey.challenge);
@@ -132,17 +121,11 @@ export default function EnrollmentFlow({ requestedMode = 'enrollment', embedded 
         window.location.assign('/?device_approval_required=1');
         return;
       }
-      if (result.requires_enrollment) {
-        setStep('passkey');
-        return;
-      }
+      if (result.enrollment_completed) return complete();
       if (mode === 'recertification' || result.legacy_continuity) return complete();
-      setStep('passkey');
+      throw new Error('Enrollment did not complete. Please retry.');
     })}>Accept all current documents</button><p className="lifecycle-note">Acceptance updates legal receipts only. It does not change your owner identity or Vault.</p></>}
-    {step === 'passkey' && <><p>Create a passkey for future sign-ins on your devices.</p><button disabled={working} onClick={passkey}>Create passkey</button></>}
-    {step === 'recovery' && <><p>Keep recovery codes offline. They are displayed once.</p><button disabled={working} onClick={() => run(async () => { const result = await api('/api/auth/enrollment/recovery-codes', { method: 'POST', body: '{}' }); setCodes(result.recovery_codes || []); setStep('activate'); })}>Generate recovery codes</button></>}
-    {codes.length > 0 && <pre aria-label="Recovery codes">{codes.join('\n')}</pre>}
-    {step === 'activate' && <><p>Trust this device to finish enrollment.</p><button disabled={working} onClick={activate}>Trust this device</button></>}
+    {step === 'activate' && <><p>Your verified identity and legal acceptance are ready.</p><button disabled={working} onClick={activate}>Finish signup</button></>}
     {step === 'finished' && <><p>Signup is complete. Your saved enrollment steps are intact.</p>{pairedLaunch ? <>
       <p>If the second tab did not open, use the link below. Each product checks your account before admitting you.</p>
       <a href={pairedLaunch.companionUrl} target="_blank" rel="noopener noreferrer">Open {pairedLaunch.companionProduct}</a>

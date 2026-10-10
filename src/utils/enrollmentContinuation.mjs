@@ -4,7 +4,5 @@ export function enrollmentCheckpoint(status) {
   if (!['PENDING_ENROLLMENT', 'LEGACY'].includes(status.session_kind) || typeof status.legal_receipts_current !== 'boolean') throw new Error('Enrollment returned an invalid status. Please retry.');
   if (!status.legal_receipts_current) return 'consent';
   if (status.session_kind === 'LEGACY') return 'consent';
-  if (typeof status.passkey_registered !== 'boolean' || typeof status.recovery_codes_ready !== 'boolean') throw new Error('Enrollment returned an incomplete status. Please retry.');
-  if (!status.passkey_registered) return 'passkey';
-  return status.recovery_codes_ready ? 'activate' : 'recovery';
+  return 'activate';
 }

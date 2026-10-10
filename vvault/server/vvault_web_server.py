@@ -10608,10 +10608,20 @@ def accept_canonical_enrollment_consents():
         return _set_device_cookie(response, device_secret)
     if pending.get("enrollment_session_kind") != "PENDING_ENROLLMENT":
         return jsonify({"success": False, "error": "Pending enrollment session required"}), 401
-    accepted = AUTH_REPOSITORY.record_enrollment_consents(user_id=str(pending["user_id"]), session_id=str(pending["session_id"]), documents=documents, ip_hash=request_ip_hash, user_agent_hash=request_user_agent_hash)
-    if not accepted:
+    normal_token = identity_crypto.opaque_token()
+    completed = AUTH_REPOSITORY.complete_provider_enrollment(
+        user_id=str(pending["user_id"]), pending_session_id=str(pending["session_id"]),
+        normal_token_hash=_session_token_hash(normal_token),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        documents=documents, ip_hash=request_ip_hash,
+        user_agent_hash=request_user_agent_hash,
+    )
+    if not completed:
         return jsonify({"success": False, "error": "Enrollment consent was denied"}), 403
-    return _enrollment_response({"success": True, "documents": documents})
+    return _enrollment_response(
+        {"success": True, "enrollment_completed": True, "account_state": "ACTIVE", "documents": documents},
+        normal_token=normal_token,
+    )
 
 
 @app.route('/api/auth/enrollment/webauthn/challenge', methods=['POST'])
@@ -10685,7 +10695,12 @@ def activate_canonical_enrollment():
     if not pending or pending.get("enrollment_session_kind") != "PENDING_ENROLLMENT":
         return jsonify({"success": False, "error": "Pending enrollment session required"}), 401
     token = secrets.token_urlsafe(32)
-    normal = AUTH_REPOSITORY.complete_enrollment(user_id=str(pending["user_id"]), pending_session_id=str(pending["session_id"]), device_id=str(pending["enrollment_device_id"]), normal_token_hash=_session_token_hash(token), expires_at=datetime.now(timezone.utc) + timedelta(days=30), required_documents=_enrollment_documents())
+    normal = AUTH_REPOSITORY.complete_provider_enrollment(
+        user_id=str(pending["user_id"]), pending_session_id=str(pending["session_id"]),
+        normal_token_hash=_session_token_hash(token),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        documents=_enrollment_documents(),
+    )
     if not normal:
         return jsonify({"success": False, "error": "Enrollment prerequisites are incomplete"}), 409
     return _enrollment_response({"success": True, "account_state": "ACTIVE"}, normal_token=token)
