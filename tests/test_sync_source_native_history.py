@@ -14,7 +14,7 @@ THREAD = "43e73643-dfd6-4958-90b1-8fd7e97c93c6"
 def _codex(path: Path, *, thread_source="user", zenith_binding=False):
     rows = [
         {"type": "session_meta", "payload": {"id": THREAD, "timestamp": "2026-01-01T00:00:00Z", "thread_source": thread_source, "source": "vscode"}},
-        {"timestamp": "2026-01-01T00:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": ("You are Zenith Vale Woodson the Systems Steward.\nUse `vvault/server/life_capsule_resolver.py` as the identity authority for Zenith of Codex." if zenith_binding else "ordinary contract")}] }},
+        {"timestamp": "2026-01-01T00:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": ("You are Zenith Vale Woodson the Systems Steward.\nUse `vvault/server/life_capsule_resolver.py` as the identity authority for Zenith of Codex." if zenith_binding else "ordinary contract")}], "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["agents_md.instructions"]}}, "metadata": {"client_authored": False}},
         {"timestamp": "2026-01-01T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "private"}]}},
         {"timestamp": "2026-01-01T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "reply"}]}},
     ]
