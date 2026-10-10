@@ -120,7 +120,7 @@ function App() {
       .then((response) => response.ok ? response.json() : null)
       .then(async (payload) => {
         if (payload?.user) { setUser(payload.user); return; }
-        const response=await fetch('/api/auth/paired-signup/resume',{credentials:'same-origin'});
+        const response=await fetch('/api/auth/enrollment/status',{credentials:'same-origin'});
         if (response.ok) setPendingSignup(await response.json());
       })
       .catch(() => setUser(null)).finally(() => setAuthChecked(true));
@@ -176,7 +176,7 @@ function App() {
     const authState = new URLSearchParams(window.location.search);
     // URL state controls presentation only; the component confirms the
     // server-side HttpOnly pending session before rendering a checkpoint.
-    if (pendingSignup?.pending) return pendingSignup.signupRequired ? <CinematicLogin onLogin={handleLogin} pendingSignup /> : <CinematicLogin onLogin={handleLogin}><EnrollmentFlow requestedMode="enrollment" embedded /></CinematicLogin>;
+    if (pendingSignup?.pending) return <CinematicLogin onLogin={handleLogin}><EnrollmentFlow requestedMode="enrollment" embedded /></CinematicLogin>;
     // Device verification is not part of sign-in. Old callback URLs may still
     // carry this presentation flag, so return them to the ordinary login UI.
     if (authState.get('device_approval_required') === '1') return <CinematicLogin onLogin={handleLogin} />;

@@ -76,6 +76,7 @@ def _vvault_runtime_status(*, ready=True):
                 "callback_route": "/api/auth/google/callback",
             },
         },
+        "capacity": {"status": "ready", "critical": False, "deployment_blocked": False, "warning": False, "authentication_regression": False},
     }
 
 
@@ -250,7 +251,9 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
         self.assertIn("body_database", payload)
 
     def test_vault_service_health_reports_vvault_native_dependencies(self):
-        with patch.object(server, "VVAULT_SERVICE_TOKEN", "svc-token"), patch.object(
+        with patch.dict(os.environ, {"VVAULT_SERVICE_TOKEN": "svc-token"}), patch.object(
+            server, "VVAULT_SERVICE_TOKEN", "svc-token"
+        ), patch.object(
             server, "_get_vvault_runtime_status", return_value=_vvault_runtime_status(ready=True)
         ):
             response = self.client.get("/api/vault/health")
@@ -266,19 +269,28 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
 
     def test_service_credentials_are_encrypted_local_system_files(self):
         stored_rows = []
+        owner_id = "7e34f6b8-e33a-48b5-8ddb-95b94d18e296"
 
         def _upsert(record):
             stored_rows.append(record)
             return {"action": "created", "id": "credential-row", "path": record["storage_path"]}
 
-        with patch.object(server, "VVAULT_SERVICE_TOKEN", "svc-token"), patch.object(
+        with patch.dict(os.environ, {"VVAULT_SERVICE_TOKEN": "svc-token"}), patch.object(
+            server, "VVAULT_SERVICE_TOKEN", "svc-token"
+        ), patch.object(
             server, "_body_database_dependency_status", return_value=_vvault_runtime_status(ready=True)["body_database"]
+        ), patch.object(
+            server, "db_get_user", return_value={"id": owner_id, "email": "owner@example.test"}
         ), patch.object(server.VAULT_FILE_REPOSITORY, "get_system_file", return_value=None), patch.object(
             server.VAULT_FILE_REPOSITORY, "upsert", side_effect=_upsert
         ):
             response = self.client.post(
                 "/api/vault/credentials",
-                headers={"Authorization": "Bearer svc-token"},
+                headers={
+                    "Authorization": "Bearer svc-token",
+                    "X-Chatty-Key": "svc-token",
+                    "X-Chatty-User": "owner@example.test",
+                },
                 json={"service": "ollama", "key": "api-key", "value": "raw-secret", "metadata": {"scope": "local"}},
             )
 
@@ -291,7 +303,7 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
         self.assertNotIn("raw-secret", stored_rows[0]["content"])
         self.assertIn("encrypted_value", stored_rows[0]["content"])
 
-    def test_local_credential_login_succeeds(self):
+    def test_local_credential_login_is_retired(self):
         with patch.object(server, "_auth_repository_ready", return_value=True), patch.object(
             server,
             "db_get_user",
@@ -308,12 +320,10 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
                 json={"email": "admin@vvault.com", "password": "admin123", "rememberMe": True},
             )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 410)
         payload = response.get_json()
-        self.assertTrue(payload["success"])
-        self.assertEqual(payload["user"]["email"], "admin@vvault.com")
-        self.assertTrue(payload["token"])
-        self.assertIn("expires_at", payload)
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["error"], "Password sign-in has been retired")
 
     def test_vault_files_use_local_repository(self):
         with patch.object(
@@ -338,8 +348,13 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
 
     def test_system_file_write_is_local_transaction(self):
         system_row = {"id": "system-file", "storage_path": "system/current.md", "content": "queued", "is_system": True}
+        owner_id = "7e34f6b8-e33a-48b5-8ddb-95b94d18e296"
 
-        with patch.object(server, "VVAULT_SERVICE_TOKEN", "svc-token"), patch.object(
+        with patch.dict(os.environ, {"VVAULT_SERVICE_TOKEN": "svc-token"}), patch.object(
+            server, "VVAULT_SERVICE_TOKEN", "svc-token"
+        ), patch.object(
+            server, "db_get_user", return_value={"id": owner_id, "email": "owner@example.test"}
+        ), patch.object(
             server.VAULT_FILE_REPOSITORY, "get_system_file", side_effect=[None, system_row]
         ), patch.object(
             server.VAULT_FILE_REPOSITORY,
@@ -348,7 +363,11 @@ class TestVvaultRuntimeCutoverRoutes(unittest.TestCase):
         ):
             response = self.client.post(
                 "/api/vault/system-files",
-                headers={"Authorization": "Bearer svc-token"},
+                headers={
+                    "Authorization": "Bearer svc-token",
+                    "X-Chatty-Key": "svc-token",
+                    "X-Chatty-User": "owner@example.test",
+                },
                 json={"storage_path": "system/current.md", "content": "queued"},
             )
 

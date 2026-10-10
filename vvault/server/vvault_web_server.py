@@ -602,6 +602,8 @@ _OAUTH_PLACEHOLDER_VALUES = {
     "YOUR_CLIENT_ID_HERE",
     "your-google-client-id",
     "your-google-client-secret",
+    "your-github-client-id",
+    "your-github-client-secret",
 }
 
 
@@ -611,6 +613,15 @@ def _google_oauth_ready() -> bool:
         and bool(GOOGLE_CLIENT_SECRET)
         and GOOGLE_CLIENT_ID not in _OAUTH_PLACEHOLDER_VALUES
         and GOOGLE_CLIENT_SECRET not in _OAUTH_PLACEHOLDER_VALUES
+    )
+
+
+def _github_oauth_ready() -> bool:
+    return (
+        bool(GITHUB_CLIENT_ID)
+        and bool(GITHUB_CLIENT_SECRET)
+        and GITHUB_CLIENT_ID not in _OAUTH_PLACEHOLDER_VALUES
+        and GITHUB_CLIENT_SECRET not in _OAUTH_PLACEHOLDER_VALUES
     )
 
 
@@ -10205,6 +10216,18 @@ def _start_enrollment_session(user: dict, frontend: str):
     device_secret = _device_secret_from_request() or identity_crypto.opaque_token()
     token = identity_crypto.opaque_token()
     state = str(user.get("account_state") or "")
+    existing_pending = _enrollment_session_from_request()
+    if (state == "PENDING_ENROLLMENT"
+            and existing_pending
+            and str(existing_pending.get("user_id") or "") == user_id
+            and existing_pending.get("enrollment_session_kind") == "PENDING_ENROLLMENT"):
+        # A provider retry or page reload must resume this owner's durable
+        # enrollment instead of creating another device/session or borrowing
+        # another account's browser state.
+        response = redirect(f"{frontend.rstrip('/')}/?identity_pending=1")
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return _set_device_cookie(response, device_secret)
     token_hash = _session_token_hash(token)
     if state == "LEGACY" and user.get("_legacy_continuity"):
         session = AUTH_REPOSITORY.create_legacy_consent_session(
@@ -10754,7 +10777,7 @@ def _identity_transaction_key() -> str:
 
 def _identity_provider_config(provider: str) -> dict[str, str]:
     if provider == "github":
-        if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        if not _github_oauth_ready():
             raise RuntimeError("GitHub identity provider is not configured")
         return {
             "authorization_endpoint": "https://github.com/login/oauth/authorize",
@@ -10785,6 +10808,37 @@ def _identity_callback_url(provider: str) -> str:
 def _identity_frontend_url() -> str:
     origin = str(request.headers.get("Origin") or "").rstrip("/")
     return origin if _allowed_redirect_base(origin) else _get_frontend_url()
+
+
+def _oauth_entry_intent() -> str:
+    """Return the product entry selected before leaving VVAULT.
+
+    Sign-in and signup share provider endpoints, but they do not share account
+    creation authority.  The intent is bound into the single-use OAuth state
+    rather than trusted from callback query parameters.
+    """
+    value = str(request.form.get("intent") or "SIGN_IN").strip().upper()
+    return "signup" if request.method == "POST" and value == "SIGN_UP" else "signin"
+
+
+def _new_oauth_state(identity_crypto, intent: str) -> str:
+    nonce = identity_crypto.opaque_token()
+    payload = f"{nonce}.{intent}"
+    signature = identity_crypto.keyed_digest(payload, _identity_hmac_key())
+    return f"{payload}.{signature}"
+
+
+def _oauth_state_intent(identity_crypto, state: str) -> str:
+    try:
+        nonce, intent, signature = state.split(".", 2)
+    except ValueError as exc:
+        raise ValueError("OAuth entry intent is invalid") from exc
+    if not nonce or intent not in {"signin", "signup"}:
+        raise ValueError("OAuth entry intent is invalid")
+    expected = identity_crypto.keyed_digest(f"{nonce}.{intent}", _identity_hmac_key())
+    if not hmac.compare_digest(signature, expected):
+        raise ValueError("OAuth entry intent is invalid")
+    return intent
 
 
 def _begin_identity_oauth(provider: str, purpose: str = "signin", current: dict | None = None):
@@ -10829,7 +10883,8 @@ def _begin_identity_oauth(provider: str, purpose: str = "signin", current: dict 
         if purpose != "signin" and not current.get("id"):
             return jsonify({"success": False, "error": "Authentication required"}), 401
         failure_stage = "transaction_protection"
-        state = identity_crypto.opaque_token()
+        entry_intent = _oauth_entry_intent() if purpose == "signin" else "signin"
+        state = _new_oauth_state(identity_crypto, entry_intent)
         verifier = identity_crypto.opaque_token(48)
         nonce = identity_crypto.opaque_token() if provider == "google" else None
         callback_url = _identity_callback_url(provider)
@@ -10962,24 +11017,37 @@ def complete_canonical_oauth(provider: str = "google"):
     except ImportError:
         import vvault_auth_crypto as identity_crypto
     code, state = str(request.args.get("code") or ""), str(request.args.get("state") or "")
-    if not code or not state or _rate_limit_key("auth"):
+    provider_error = str(request.args.get("error") or "")
+    if not state or _rate_limit_key("auth"):
+        if "text/html" in str(request.headers.get("Accept") or ""):
+            return redirect(f"{_get_frontend_url()}/?{urlencode({'oauth_error': 'authorization_rejected', 'oauth_retry': '1'})}")
         return jsonify({"success": False, "error": "OAuth authorization was rejected"}), 400
+    frontend = _get_frontend_url()
     try:
         transaction = AUTH_REPOSITORY.consume_oauth_transaction(identity_crypto.keyed_digest(state, _identity_hmac_key()))
         if not transaction or transaction.get("provider") != provider:
             raise ValueError("transaction invalid")
         if transaction.get("redirect_uri") != _identity_callback_url(provider):
             raise ValueError("callback mismatch")
-        subject, email, name, issuer = _verified_provider_claims(provider, code, transaction)
-        frontend = str(transaction.get("frontend_origin") or _get_frontend_url())
+        frontend = str(transaction.get("frontend_origin") or frontend)
         if not _allowed_redirect_base(frontend):
             frontend = _get_frontend_url()
+        if provider_error:
+            outcome = "access_denied" if provider_error == "access_denied" else "provider_rejected"
+            return redirect(f"{frontend}/?{urlencode({'oauth_error': outcome, 'oauth_retry': '1'})}")
+        if not code:
+            raise ValueError("authorization code missing")
+        entry_intent = _oauth_state_intent(identity_crypto, state)
+        subject, email, name, issuer = _verified_provider_claims(provider, code, transaction)
         if transaction["purpose"] == "signin":
             user, _created = AUTH_REPOSITORY.admit_verified_identity(
                 provider=provider, provider_subject=subject, verified_email=email,
                 name=name, issuer=issuer,
                 allow_legacy_compatibility=(provider == "google"),
+                allow_create=(entry_intent == "signup"),
             )
+            if not user:
+                return redirect(f"{frontend}/?signup_required=1")
             return _start_enrollment_session(user, frontend)
         if transaction["purpose"] == "reauth":
             if not AUTH_REPOSITORY.record_session_reauthentication(session_id=str(transaction["initiating_session_id"]), user_id=str(transaction["initiating_user_id"]), provider=provider):
@@ -10990,7 +11058,9 @@ def complete_canonical_oauth(provider: str = "google"):
         return redirect(f"{frontend}/?identity_linked=1")
     except Exception as exc:
         logger.warning("identity OAuth callback rejected: %s", type(exc).__name__)
-        return jsonify({"success": False, "error": "OAuth authorization was rejected"}), 400
+        if "text/html" in str(request.headers.get("Accept") or ""):
+            return redirect(f"{frontend}/?{urlencode({'oauth_error': 'authorization_rejected', 'oauth_retry': '1'})}")
+        return jsonify({"success": False, "error": "OAuth authorization was rejected", "retry": True}), 400
 
 
 def _magic_link_smtp_config() -> dict[str, Any] | None:
@@ -11121,6 +11191,7 @@ def request_email_magic_link():
 
 @app.route('/api/auth/email-magic-links/consume', methods=['POST'])
 def consume_email_magic_link():
+    from flask import redirect
     try:
         from vvault.server import vvault_auth_crypto as identity_crypto
     except ImportError:
@@ -11141,11 +11212,48 @@ def consume_email_magic_link():
             if not user:
                 return response, 400
         else:
-            user, _created = AUTH_REPOSITORY.admit_verified_identity(provider="email", provider_subject=email, verified_email=email, name=None)
+            user, _created = AUTH_REPOSITORY.admit_verified_identity(
+                provider="email", provider_subject=email, verified_email=email,
+                name=None, allow_create=False,
+            )
+            if not user:
+                return redirect(f"{_get_frontend_url()}/?signup_required=1")
         return _start_enrollment_session(user, str(challenge.get("redirect_uri") or _get_frontend_url()))
     except Exception as exc:
         logger.warning("magic-link consume rejected: %s", type(exc).__name__)
         return response, 400
+
+
+# Product-facing provider availability.  The login page uses this endpoint to
+# present only providers that are both configured and able to persist the
+# protected OAuth transaction in canonical OVVAULTS.
+@app.route('/api/auth/providers/<provider>/health', methods=['GET'])
+def identity_provider_health(provider: str):
+    provider = str(provider or "").strip().lower()
+    if provider not in {"google", "github"}:
+        return jsonify({"available": False, "provider": provider, "error": "Provider is not supported"}), 404
+    auth_ready, auth_state = _oauth_identity_authority_available()
+    try:
+        from vvault.server import vvault_auth_crypto as identity_crypto
+    except ImportError:
+        import vvault_auth_crypto as identity_crypto
+    transaction_key_ready = identity_crypto.valid_transaction_encryption_key(
+        str(os.environ.get("VVAULT_OAUTH_TRANSACTION_ENCRYPTION_KEY") or "").strip()
+    )
+    configured = _google_oauth_ready() if provider == "google" else _github_oauth_ready()
+    available = configured and auth_ready and transaction_key_ready
+    response = jsonify({
+        "available": available,
+        "configured": configured,
+        "provider": provider,
+        "callback_url": _identity_callback_url(provider),
+        "vvault_auth_ready": auth_ready,
+        "oauth_transaction_protection_ready": transaction_key_ready,
+        "source_database": auth_state.get("source_database"),
+        "error": None if available else "This provider is not currently available",
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200 if available else 503
 
 
 # Google OAuth Health Check

@@ -12,15 +12,26 @@ AUTH_REPOSITORY = (REPO_ROOT / "vvault" / "server" / "vvault_auth_repository.py"
 
 
 class TestFrontendEnrollmentContract(unittest.TestCase):
-    def test_identity_entry_offers_provider_and_magic_link_without_password(self):
-        self.assertIn("Continue with Google", LOGIN)
-        self.assertIn("Continue with GitHub", LOGIN)
-        self.assertIn("Email me a secure link", LOGIN)
+    def test_identity_entry_offers_only_health_verified_providers_and_email_link(self):
+        self.assertIn("handleOAuth('Google')", LOGIN)
+        self.assertIn("handleOAuth('GitHub')", LOGIN)
+        self.assertIn("/api/auth/providers/${provider}/health", LOGIN)
+        self.assertIn("enabledProviders.includes('google')", LOGIN)
+        self.assertIn("enabledProviders.includes('github')", LOGIN)
+        self.assertNotIn("handleOAuth('Microsoft')", LOGIN)
+        self.assertNotIn("handleOAuth('Apple')", LOGIN)
+        self.assertIn("Email me a secure sign-in link", LOGIN)
         self.assertNotIn('type="password"', LOGIN.lower())
 
-    def test_identity_entry_disables_magic_link_when_delivery_is_unavailable(self):
+    def test_identity_entry_disables_email_link_when_delivery_is_unavailable(self):
         self.assertIn("email-magic-links/health", LOGIN)
-        self.assertIn("Email links unavailable", LOGIN)
+        self.assertIn("Email sign-in is not configured", LOGIN)
+
+    def test_signup_and_signin_are_distinct_without_pre_auth_legal_claims(self):
+        self.assertIn("Object.entries({intent:'SIGN_UP'})", LOGIN)
+        self.assertNotIn("paired-signup", LOGIN)
+        self.assertNotIn("chattyAccepted", LOGIN)
+        self.assertIn("current enrollment documents", LOGIN)
 
     def test_enrollment_orders_consent_passkey_recovery_then_activation(self):
         for endpoint in (

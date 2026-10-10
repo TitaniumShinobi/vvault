@@ -124,7 +124,7 @@ def _configured_identity_database(*, psql: list[str], database_url: str, receipt
     migration = _run([str(MIGRATION_RUNNER)], env=runner_env, check=False)
     assert migration.returncode == 0, migration.stderr
     ledger = _run(psql + ["-tA"], input_text="SELECT version FROM ovvaults.enrollment_schema_migrations ORDER BY version;")
-    assert ledger.stdout.split() == ["0033", "0034", "0035", "0036"]
+    assert ledger.stdout.split() == ["0033", "0034", "0035", "0036", "0039"]
     yield database_url
 
 
@@ -154,6 +154,18 @@ def test_provider_subject_is_the_only_automatic_account_key(repository):
         provider="github", provider_subject="github-subject-b", verified_email="same@example.com", name="B",
     )
     assert second_created and second["id"] != first["id"]
+
+
+def test_signin_only_resolution_does_not_create_an_unknown_identity(repository):
+    user, created = repository.admit_verified_identity(
+        provider="google", provider_subject="unknown-signin-subject",
+        verified_email="unknown-signin@example.com", name="Unknown",
+        issuer="https://accounts.google.com", allow_create=False,
+    )
+    assert user is None and created is False
+    assert repository.get_external_identity(
+        provider="google", provider_subject="unknown-signin-subject",
+    ) is None
 
 
 def test_same_subject_race_creates_one_account(repository):
