@@ -33,19 +33,18 @@ class TestFrontendEnrollmentContract(unittest.TestCase):
         self.assertNotIn("chattyAccepted", LOGIN)
         self.assertIn("current enrollment documents", LOGIN)
 
-    def test_enrollment_orders_consent_passkey_recovery_then_activation(self):
+    def test_enrollment_requires_consent_then_activation_without_device_ceremony(self):
         for endpoint in (
             "/api/auth/enrollment/consents",
-            "/api/auth/enrollment/webauthn/challenge",
-            "/api/auth/enrollment/webauthn/register",
-            "/api/auth/enrollment/recovery-codes",
             "/api/auth/enrollment/activate",
         ):
             self.assertIn(endpoint, ENROLLMENT)
         self.assertIn("step === 'consent'", ENROLLMENT)
-        self.assertIn("step === 'passkey'", ENROLLMENT)
-        self.assertIn("step === 'recovery'", ENROLLMENT)
         self.assertIn("step === 'activate'", ENROLLMENT)
+        self.assertNotIn("Create a passkey", ENROLLMENT)
+        self.assertNotIn("Generate recovery codes", ENROLLMENT)
+        self.assertNotIn("Trust this device to finish enrollment", ENROLLMENT)
+        self.assertIn("result.enrollment_completed", ENROLLMENT)
 
     def test_enrollment_status_is_a_native_api_route(self):
         self.assertIn("@app.route('/api/auth/enrollment/status', methods=['GET'])", SERVER)

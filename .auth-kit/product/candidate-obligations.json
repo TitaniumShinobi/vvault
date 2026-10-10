@@ -16,6 +16,6 @@
     {"id":"migration.compatibility","applicability":"TRUE","definition":{"artifact":"vvault/migrations/0039_returning_owner_session_without_device_gate.up.sql","sha256":"a2fa93bae20a083e346fa68b49b82166d2b6ce7019099d9e6c3fd4948efc349a","requirement":"The release artifact and canonical ledger agree on migration identity and checksum.","owner":"VVAULT"}},
     {"id":"runtime.independence","applicability":"TRUE","definition":{"requirement":"Normal VVAULT login and restored sessions do not require AUTH tooling or an AUTH verifier process at runtime.","owner":"VVAULT"}},
     {"id":"returning_owner.no_device_gate","applicability":"TRUE","definition":{"requirement":"A returning canonical owner receives a session without a passkey, recovery-code, or device-approval gate.","owner":"VVAULT"}},
-    {"id":"new_user.enrollment","applicability":"TRUE","definition":{"requirement":"A newly verified canonical identity enters PENDING_ENROLLMENT and can activate only after the required consent, passkey, and recovery-code flow completes; activation rotates the pending session into a NORMAL canonical session.","owner":"VVAULT"}}
+    {"id":"new_user.enrollment","applicability":"TRUE","definition":{"requirement":"A newly verified canonical identity enters PENDING_ENROLLMENT and activates after accepting the current required legal documents; activation rotates the pending session into a NORMAL canonical session without requiring a passkey, recovery code, or device-approval ceremony.","owner":"VVAULT"}}
   ]
 }

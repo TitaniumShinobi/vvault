@@ -419,6 +419,47 @@ def test_0034_completes_enrollment_with_rotated_device_bound_session(repository)
     assert current and current["account_state"] == "ACTIVE" and current["device_status"] == "TRUSTED"
 
 
+def test_provider_signup_completes_after_legal_consent_without_device_credentials(repository):
+    user, created = repository.admit_verified_identity(
+        provider="google", provider_subject="modern-signup-subject",
+        verified_email="modern-signup@example.com", name="Modern Signup",
+        issuer="https://accounts.google.com",
+    )
+    assert created and user["account_state"] == "PENDING_ENROLLMENT"
+    pending = repository.create_pending_enrollment_session(
+        user_id=str(user["id"]), device_secret_digest="unused-pending-device",
+        token_hash="modern-pending-token",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        label="Test browser",
+    )
+    documents = [
+        {"key": "terms", "version": "current", "sha256": "terms-current"},
+        {"key": "privacy", "version": "current", "sha256": "privacy-current"},
+        {"key": "eeccd", "version": "current", "sha256": "eeccd-current"},
+    ]
+    normal = repository.complete_provider_enrollment(
+        user_id=str(user["id"]), pending_session_id=str(pending["id"]),
+        normal_token_hash="modern-normal-token",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        documents=documents,
+    )
+    assert normal and normal["enrollment_session_kind"] == "NORMAL"
+    assert normal["enrollment_device_id"] is None
+    assert repository.get_enrollment_session_by_hash("modern-pending-token") is None
+    current = repository.get_session_by_hash("modern-normal-token")
+    assert current and current["account_state"] == "ACTIVE"
+    with repository._connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS count FROM enrollment_consents WHERE user_id=%s", (user["id"],))
+            assert int(cur.fetchone()["count"]) == 3
+            cur.execute("SELECT count(*) AS count FROM enrollment_webauthn_credentials WHERE user_id=%s", (user["id"],))
+            assert int(cur.fetchone()["count"]) == 0
+            cur.execute("SELECT count(*) AS count FROM enrollment_recovery_codes WHERE user_id=%s", (user["id"],))
+            assert int(cur.fetchone()["count"]) == 0
+            cur.execute("SELECT status FROM enrollment_devices WHERE id=%s", (pending["enrollment_device_id"],))
+            assert cur.fetchone()["status"] == "REVOKED"
+
+
 def test_0034_pending_device_requires_approval_or_one_time_recovery(repository):
     user, _ = repository.admit_verified_identity(
         provider="github", provider_subject="active-owner-subject", verified_email="active@example.com", name="Active",
