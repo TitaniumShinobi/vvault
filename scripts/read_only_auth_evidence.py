@@ -10,7 +10,8 @@ import json
 from vvault.server import chatty_body_service as body
 
 
-MIGRATION = "0039_returning_owner_session_without_device_gate.up.sql"
+MIGRATION_VERSION = "0039"
+MIGRATION_ARTIFACT = "0039_returning_owner_session_without_device_gate.up.sql"
 DEVON_EMAIL = "dwoodson92@gmail.com"
 
 
@@ -53,7 +54,7 @@ with body._connect() as connection:
                   AND identity.revoked_at IS NULL) AS devon_active_identity_count
               FROM function_contract
             """,
-            (MIGRATION, DEVON_EMAIL, DEVON_EMAIL),
+            (MIGRATION_VERSION, DEVON_EMAIL, DEVON_EMAIL),
         )
         row = cursor.fetchone()
 
@@ -62,4 +63,6 @@ if hasattr(row, "keys"):
     evidence = dict(row)
 else:
     evidence = dict(zip((column.name for column in cursor.description), row))
+evidence["migration_artifact"] = MIGRATION_ARTIFACT
+evidence["migration_version"] = MIGRATION_VERSION
 print(json.dumps(evidence, sort_keys=True))
