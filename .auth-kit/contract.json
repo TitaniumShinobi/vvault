@@ -20,10 +20,11 @@
       ".auth-kit/product/candidate-obligations.json",
       ".auth-kit/product/evidence-state.json",
       ".auth-kit/product/observer-mappings.json",
+      ".auth-kit/product/prebaseline-release-gate.mjs",
       ".auth-kit/product/schema-contract.json"
     ]
   },
-  "provenanceDigest": "c52d3dd2a8d16f431561e91559073a182a9571dce82692130ca373a7e26f0272",
+  "provenanceDigest": "f323b1de42d146871ca951bd829499f4ecf9d610c6f60d7e4cee9cf0c7b42ba3",
   "head": null,
   "sequence": 0
 }

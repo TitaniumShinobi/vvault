@@ -32,7 +32,21 @@ auth_gate() {
     verify_root="$VERIFY_WORKTREE"
   fi
   [[ -f "$verify_root/.auth-kit/ci.mjs" && ! -L "$verify_root/.auth-kit/ci.mjs" ]] || { log "VVAULT durability gate missing"; return 1; }
-  (cd "$verify_root" && AUTH_CONTRACT_CHECKPOINT="${VVAULT_AUTH_CONTRACT_CHECKPOINT:?required}" /usr/bin/node .auth-kit/ci.mjs verify)
+  local contract_state
+  contract_state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["state"])' "$verify_root/.auth-kit/contract.json")"
+  if [[ "$contract_state" == "ESTABLISHED" ]]; then
+    (cd "$verify_root" && \
+      AUTH_CONTRACT_CHECKPOINT="${VVAULT_AUTH_CONTRACT_CHECKPOINT:?required}" \
+      VVAULT_AUTH_TEST_PYTHON="$REPO/venv/bin/python" \
+      /usr/bin/node .auth-kit/ci.mjs verify)
+  elif [[ "$contract_state" == "UNESTABLISHED" ]]; then
+    (cd "$verify_root" && \
+      VVAULT_AUTH_REQUIRE_GITHUB_CHECK=1 \
+      /usr/bin/node .auth-kit/ci.mjs verify)
+  else
+    log "invalid VVAULT auth contract state"
+    return 1
+  fi
   if [[ -n "$VERIFY_WORKTREE" ]]; then
     git_repo worktree remove --force "$VERIFY_WORKTREE"
     VERIFY_WORKTREE=""

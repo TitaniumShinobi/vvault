@@ -10,4 +10,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Provide disposable PostgreSQL test binaries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql
+          echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt pytest
       - run: node .auth-kit/ci.mjs verify
