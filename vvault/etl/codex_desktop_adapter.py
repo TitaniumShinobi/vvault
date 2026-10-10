@@ -143,7 +143,7 @@ def parse_segment_bytes(raw_bytes: bytes, *, source_name: str = "<memory>") -> S
         raise CodexSessionRejected("session timestamp is missing")
 
     messages: list[Message] = []
-    developer_texts: list[str] = []
+    binding_texts: list[str] = []
     for row in objects:
         if row.get("type") != "response_item":
             continue
@@ -151,10 +151,21 @@ def parse_segment_bytes(raw_bytes: bytes, *, source_name: str = "<memory>") -> S
         if not isinstance(payload, Mapping) or payload.get("type") != "message":
             continue
         role = payload.get("role")
-        if role == "developer":
+        passthrough = payload.get("internal_chat_message_metadata_passthrough")
+        content_kinds = passthrough.get("content_item_kinds", []) if isinstance(passthrough, Mapping) else []
+        row_metadata = row.get("metadata")
+        authoritative_instruction = (
+            role == "user"
+            and "agents_md.instructions" in content_kinds
+            and isinstance(row_metadata, Mapping)
+            and row_metadata.get("client_authored") is False
+        )
+        if authoritative_instruction:
             text = _message_text(payload)
             if text:
-                developer_texts.append(text)
+                binding_texts.append(text)
+            continue
+        if role == "developer":
             continue
         if role not in {"user", "assistant"}:
             continue
@@ -164,7 +175,7 @@ def parse_segment_bytes(raw_bytes: bytes, *, source_name: str = "<memory>") -> S
 
     binding_verified = any(
         all(marker in text for marker in ZENITH_BINDING_MARKERS)
-        for text in developer_texts
+        for text in binding_texts
     )
     return SessionSegment(
         thread_id=thread_id,
@@ -181,7 +192,7 @@ def parse_segment_bytes(raw_bytes: bytes, *, source_name: str = "<memory>") -> S
             "authoritativeConstructBinding": {
                 "constructId": "zen-001" if binding_verified else None,
                 "authority": "repository-agent-contract" if binding_verified else None,
-                "sourceRole": "developer" if binding_verified else None,
+                "sourceRole": "agents_md.instructions" if binding_verified else None,
                 "verified": binding_verified,
             },
         },
@@ -276,7 +287,7 @@ def build_thread_record(segments: Sequence[SessionSegment]) -> Mapping[str, Any]
                 "authoritativeConstructBinding": {
                     "constructId": "zen-001" if binding_verified else None,
                     "authority": "repository-agent-contract" if binding_verified else None,
-                    "sourceRole": "developer" if binding_verified else None,
+                    "sourceRole": "agents_md.instructions" if binding_verified else None,
                     "verified": binding_verified,
                 },
             },

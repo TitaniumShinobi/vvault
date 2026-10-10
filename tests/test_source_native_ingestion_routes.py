@@ -78,7 +78,7 @@ def test_source_native_route_assigns_only_proven_codex_history_to_zen(monkeypatc
             "subagentMarkerAbsent": True,
             "authoritativeConstructBinding": {
                 "constructId": "zen-001", "authority": "repository-agent-contract",
-                "sourceRole": "developer", "verified": True,
+                "sourceRole": "agents_md.instructions", "verified": True,
             },
         }},
     )

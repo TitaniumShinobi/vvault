@@ -28,7 +28,7 @@ def _segment(*, thread_source="user", source="vscode", timestamp="2026-01-01T00:
         )
     return [
         _line({"type": "session_meta", "payload": {"id": THREAD, "timestamp": timestamp, "thread_source": thread_source, "source": source}}),
-        _line({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": developer_text}]}}),
+        _line({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": developer_text}], "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["agents_md.instructions"]}}, "metadata": {"client_authored": False}}),
         _line({"timestamp": timestamp, "type": "response_item", "payload": {"type": "function_call", "name": "tool"}}),
         _line({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}),
         _line({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "reply"}]}}),
