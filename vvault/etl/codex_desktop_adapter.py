@@ -25,6 +25,10 @@ EXCLUDED_THREAD_SOURCES = {
     "subagent",
 }
 HUMAN_SURFACES = {"cli", "vscode"}
+ZENITH_BINDING_MARKERS = (
+    "You are Zenith Vale Woodson the Systems Steward.",
+    "Use `vvault/server/life_capsule_resolver.py` as the identity authority for Zenith of Codex.",
+)
 
 
 class CodexSessionRejected(ValueError):
@@ -139,6 +143,7 @@ def parse_segment_bytes(raw_bytes: bytes, *, source_name: str = "<memory>") -> S
         raise CodexSessionRejected("session timestamp is missing")
 
     messages: list[Message] = []
+    developer_texts: list[str] = []
     for row in objects:
         if row.get("type") != "response_item":
             continue
@@ -146,12 +151,21 @@ def parse_segment_bytes(raw_bytes: bytes, *, source_name: str = "<memory>") -> S
         if not isinstance(payload, Mapping) or payload.get("type") != "message":
             continue
         role = payload.get("role")
+        if role == "developer":
+            text = _message_text(payload)
+            if text:
+                developer_texts.append(text)
+            continue
         if role not in {"user", "assistant"}:
             continue
         text = _message_text(payload)
         if text:
             messages.append(Message(role, row.get("timestamp"), text))
 
+    binding_verified = any(
+        all(marker in text for marker in ZENITH_BINDING_MARKERS)
+        for text in developer_texts
+    )
     return SessionSegment(
         thread_id=thread_id,
         session_timestamp=session_timestamp,
@@ -164,6 +178,12 @@ def parse_segment_bytes(raw_bytes: bytes, *, source_name: str = "<memory>") -> S
             "sourceSurface": surface,
             "stableIdField": "session_meta.payload.id",
             "subagentMarkerAbsent": True,
+            "authoritativeConstructBinding": {
+                "constructId": "zen-001" if binding_verified else None,
+                "authority": "repository-agent-contract" if binding_verified else None,
+                "sourceRole": "developer" if binding_verified else None,
+                "verified": binding_verified,
+            },
         },
     )
 
@@ -226,6 +246,10 @@ def build_thread_record(segments: Sequence[SessionSegment]) -> Mapping[str, Any]
         default=ordered[-1].session_timestamp,
     )
     thread_id = ordered[0].thread_id
+    binding_verified = all(
+        segment.evidence["authoritativeConstructBinding"]["verified"] is True
+        for segment in ordered
+    )
     return {
         "envelope": {
             "contract": CONTRACT,
@@ -243,12 +267,18 @@ def build_thread_record(segments: Sequence[SessionSegment]) -> Mapping[str, Any]
             "eventSequenceSha256": event_hash,
             "historyStatus": "account-private-provider-history",
             "ownerScope": "canonical-owner",
-            "constructId": "zen-001",
-            "classification": "ACCOUNT_PRIVATE",
+            "constructId": "zen-001" if binding_verified else None,
+            "classification": "ACCOUNT_PRIVATE" if binding_verified else "LEGACY_UNCLASSIFIED",
             "classificationEvidence": {
                 "threadSource": "user",
                 "supportedCodexSurface": True,
                 "subagentMarkerAbsent": True,
+                "authoritativeConstructBinding": {
+                    "constructId": "zen-001" if binding_verified else None,
+                    "authority": "repository-agent-contract" if binding_verified else None,
+                    "sourceRole": "developer" if binding_verified else None,
+                    "verified": binding_verified,
+                },
             },
             "sourceSegmentNames": [Path(segment.path).name for segment in ordered],
         },

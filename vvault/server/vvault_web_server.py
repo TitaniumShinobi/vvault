@@ -7582,6 +7582,11 @@ def create_source_native_ingestion():
         and evidence.get("threadSource") == "user"
         and evidence.get("supportedCodexSurface") is True
         and evidence.get("subagentMarkerAbsent") is True
+        and isinstance(evidence.get("authoritativeConstructBinding"), dict)
+        and evidence["authoritativeConstructBinding"].get("constructId") == "zen-001"
+        and evidence["authoritativeConstructBinding"].get("authority") == "repository-agent-contract"
+        and evidence["authoritativeConstructBinding"].get("sourceRole") == "developer"
+        and evidence["authoritativeConstructBinding"].get("verified") is True
     )
     try:
         receipt = source_native_ingestion_service.SourceNativeIngestionService().ingest_and_project_vault_file(

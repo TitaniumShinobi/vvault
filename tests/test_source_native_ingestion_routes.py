@@ -76,6 +76,10 @@ def test_source_native_route_assigns_only_proven_codex_history_to_zen(monkeypatc
         sourceMetadata={"classificationEvidence": {
             "threadSource": "user", "supportedCodexSurface": True,
             "subagentMarkerAbsent": True,
+            "authoritativeConstructBinding": {
+                "constructId": "zen-001", "authority": "repository-agent-contract",
+                "sourceRole": "developer", "verified": True,
+            },
         }},
     )
     response = _client(monkeypatch).post("/api/vault/source-native-ingestions", json=payload)
@@ -83,6 +87,32 @@ def test_source_native_route_assigns_only_proven_codex_history_to_zen(monkeypatc
     assert captured["explicit_construct_evidence"] is True
     assert captured["construct_id"] == "zen-001"
     assert captured["file_type"] == "transcript"
+
+
+def test_source_native_route_does_not_promote_human_or_mentions_without_binding(monkeypatch):
+    captured = {}
+
+    class Service:
+        def ingest_and_project_vault_file(self, **kwargs):
+            captured.update(kwargs)
+            return {"operationId": "a" * 64, "result": "applied"}
+
+    monkeypatch.setattr(server.source_native_ingestion_service,
+                        "SourceNativeIngestionService", Service)
+    payload = _payload(
+        sourceCollection="codex-desktop-rollouts",
+        projectionContract="life.vvault.provider-transcript.codex-desktop/v1",
+        projectionContent="User mentioned Zenith and zen-001",
+        sourceMetadata={"classificationEvidence": {
+            "threadSource": "user", "supportedCodexSurface": True,
+            "subagentMarkerAbsent": True,
+        }},
+    )
+    response = _client(monkeypatch).post("/api/vault/source-native-ingestions", json=payload)
+    assert response.status_code == 201
+    assert captured["explicit_construct_evidence"] is False
+    assert captured["construct_id"] is None
+    assert captured["file_type"] == "document"
 
 
 def test_source_native_route_rejects_invalid_base64_without_calling_service(monkeypatch):
