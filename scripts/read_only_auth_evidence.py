@@ -47,14 +47,26 @@ with body._connect() as connection:
               ) AS sessions_trigger,
               (SELECT count(*) FROM ovvaults.users
                 WHERE lower(email) = %s) AS devon_user_count,
+              (SELECT jsonb_object_agg(state_counts.account_state, state_counts.owner_count)
+                 FROM (
+                   SELECT account_state, count(*) AS owner_count
+                     FROM ovvaults.users
+                    WHERE lower(email) = %s
+                    GROUP BY account_state
+                 ) AS state_counts) AS devon_user_state_counts,
               (SELECT count(*)
                  FROM ovvaults.external_identities AS identity
                  JOIN ovvaults.users AS owner ON owner.id = identity.user_id
                 WHERE lower(owner.email) = %s
-                  AND identity.revoked_at IS NULL) AS devon_active_identity_count
+                  AND identity.revoked_at IS NULL) AS devon_active_identity_count,
+              (SELECT count(DISTINCT identity.user_id)
+                 FROM ovvaults.external_identities AS identity
+                 JOIN ovvaults.users AS owner ON owner.id = identity.user_id
+                WHERE lower(owner.email) = %s
+                  AND identity.revoked_at IS NULL) AS devon_active_identity_owner_count
               FROM function_contract
             """,
-            (MIGRATION_VERSION, DEVON_EMAIL, DEVON_EMAIL),
+            (MIGRATION_VERSION, DEVON_EMAIL, DEVON_EMAIL, DEVON_EMAIL, DEVON_EMAIL),
         )
         row = cursor.fetchone()
 
