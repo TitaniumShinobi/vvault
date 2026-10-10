@@ -56,12 +56,12 @@ def identity_postgres():
             yield from _configured_identity_database(
                 psql=[binaries["psql"], "-X", "-v", "ON_ERROR_STOP=1", test_url],
                 database_url=test_url,
-                receipt_root=Path(tempfile.mkdtemp(prefix="vvault-identity-receipts-", dir="/private/tmp")),
+                receipt_root=Path(tempfile.mkdtemp(prefix="vvault-identity-receipts-")),
             )
         finally:
             _run(admin + ["-c", f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)'], check=False)
         return
-    root = Path(tempfile.mkdtemp(prefix="vvault-identity-pg-", dir="/private/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="vvault-identity-pg-"))
     data, socket = root / "data", root / "socket"
     socket.mkdir()
     port = 62000 + (os.getpid() % 1000)
