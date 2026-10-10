@@ -1,6 +1,6 @@
 {
   "status": "BASELINE_CANDIDATE_EVIDENCE",
-  "note": "Bounded deterministic, canonical read-only, and controlled production runtime evidence collected 2026-10-10. No baseline or history was established. New-user enrollment remains indeterminate pending a controlled unused provider identity; production expiry remains covered deterministically but lacks a time-bounded live expiry observation.",
+  "note": "Bounded deterministic, canonical read-only, and controlled production runtime evidence collected 2026-10-10. No baseline or history was established. New-user enrollment remains indeterminate pending a controlled unused provider identity.",
   "independence": {
     "wizardStopped": true,
     "authOrchestrationRequests": 0,
@@ -92,7 +92,7 @@
     "session.issuance": {"establishment":"ESTABLISHED","verification":"PASS","evidence":["Production returning-owner Google login issued an authenticated session","/api/auth/verify succeeded before logout"]},
     "session.persistence": {"establishment":"ESTABLISHED","verification":"PASS","evidence":["Production session remained canonical and authenticated across page reload","Session lifecycle tests PASS"]},
     "session.restoration": {"establishment":"ESTABLISHED","verification":"PASS","evidence":["Production browser reload restored dashboard without a new provider flow","Restart/revocation deterministic tests PASS"]},
-    "session.expiry": {"establishment":"INDETERMINATE","verification":"INDETERMINATE","evidence":["Expiry/invalid/revoked deterministic lifecycle tests PASS","No controlled production wait-through-expiry observation collected"]},
+    "session.expiry": {"establishment":"ESTABLISHED","verification":"PASS","evidence":["Deterministic repository tests set session expiry in the past and prove lookup rejects it","Invalid and revoked session lifecycle tests PASS","Production post-logout session reuse was rejected explicitly"]},
     "session.logout": {"establishment":"ESTABLISHED","verification":"PASS","evidence":["Production logout returned to sign-in","Subsequent /api/auth/verify returned Invalid or expired token"]},
     "ovvaults.connectivity": {"establishment":"ESTABLISHED","verification":"PASS","evidence":["Production /api/ready identifies vvault_body_20260504t123219z and ovvaults users/sessions","Bounded connection tests PASS"]},
     "schema.compatibility": {"establishment":"ESTABLISHED","verification":"PASS","evidence":["Read-only canonical probe verified ovvaults users, sessions, trigger, and enrollment_schema_migrations","Deployment schema contract tests PASS"]},
