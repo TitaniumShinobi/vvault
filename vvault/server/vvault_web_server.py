@@ -27,6 +27,7 @@ try:
 except ImportError:
     pass
 import re
+import binascii
 import logging
 import threading
 from contextlib import contextmanager
@@ -83,7 +84,8 @@ from vvault.server import vvault_access_assertion
 from vvault.server import resource_authorization
 from vvault.server import resource_owner_admission
 from vvault.server import capacity_readiness
-from vvault.server.relying_party_scope import set_relying_party_id
+from vvault.server import source_native_ingestion_service
+from vvault.server.relying_party_scope import set_authenticated_user_id, set_relying_party_id
 try:
     from vvault.server.relying_party_scope import current_relying_party_id
     from vvault.server.vault_drive_repository import VAULT_DRIVE_REPOSITORY
@@ -6206,7 +6208,15 @@ def require_cleanhouse_files_auth(f):
                 ip=request.headers.get("X-Forwarded-For", request.remote_addr),
             )
             return jsonify({"success": False, "error": "Unauthorized"}), 401
-        request.current_user = user
+        # PostgreSQL adapters may return UUID objects for ``users.id``. The
+        # canonical owner resolver accepts normalized UUID strings, so carry
+        # forward the owner identity already verified by the pairing record.
+        request.current_user = {
+            **user,
+            "id": user_id,
+            "user_id": user_id,
+            "auth_mode": "cleanhouse_files_pairing",
+        }
         request.current_token = None
         log_auth_decision(
             action="access_granted",
@@ -7523,6 +7533,115 @@ def get_chatty_transcript(construct_id):
     except Exception as e:
         logger.error(f"Error fetching chatty transcript: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/vault/source-native-ingestions', methods=['POST'])
+@require_chatty_auth
+def create_source_native_ingestion():
+    """Atomically preserve source bytes and one owner-scoped projection."""
+    owner_user_id = _get_authenticated_user_id()
+    if not owner_user_id:
+        return jsonify({"success": False, "error": "Owner-bound authentication is required",
+                        "errorCode": "SOURCE_INGESTION_OWNER_REQUIRED"}), 401
+    set_authenticated_user_id(owner_user_id)
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "JSON object required",
+                        "errorCode": "SOURCE_INGESTION_INVALID_REQUEST"}), 400
+    allowed = {"provider", "sourceKind", "sourceCollection", "stableSourceId",
+               "sourceLocator", "observedAt", "rawEnvelopeBase64", "projectionContent",
+               "projectionContract", "projectionVersion", "contentType", "sourceMetadata"}
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        return jsonify({"success": False, "error": "Unknown fields are not accepted",
+                        "errorCode": "SOURCE_INGESTION_UNKNOWN_FIELDS",
+                        "unknownFields": unknown}), 400
+    required = ("provider", "sourceKind", "sourceCollection", "rawEnvelopeBase64",
+                "projectionContent", "projectionContract", "projectionVersion")
+    missing = [key for key in required if not isinstance(data.get(key), str) or not data[key]]
+    if missing:
+        return jsonify({"success": False, "error": "Required fields are missing",
+                        "errorCode": "SOURCE_INGESTION_REQUIRED_FIELDS",
+                        "missingFields": missing}), 400
+    for key, limit in (("provider", 64), ("sourceKind", 64), ("sourceCollection", 512),
+                       ("stableSourceId", 1024), ("sourceLocator", 4096),
+                       ("projectionContract", 256), ("projectionVersion", 64),
+                       ("contentType", 256)):
+        value = data.get(key)
+        if value is not None and (not isinstance(value, str) or len(value.encode("utf-8")) > limit):
+            return jsonify({"success": False, "error": f"{key} exceeds its schema bound",
+                            "errorCode": "SOURCE_INGESTION_SCHEMA_INVALID"}), 400
+    encoded = data["rawEnvelopeBase64"]
+    if len(encoded) > 13_981_020:
+        return jsonify({"success": False, "error": "Raw envelope exceeds 10 MiB",
+                        "errorCode": "SOURCE_INGESTION_TOO_LARGE"}), 413
+    try:
+        raw_envelope = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError, binascii.Error):
+        return jsonify({"success": False, "error": "rawEnvelopeBase64 is invalid",
+                        "errorCode": "SOURCE_INGESTION_BASE64_INVALID"}), 400
+    projection_content = data["projectionContent"]
+    if max(len(raw_envelope), len(projection_content.encode("utf-8"))) > 10 * 1024 * 1024:
+        return jsonify({"success": False, "error": "Source ingestion exceeds 10 MiB",
+                        "errorCode": "SOURCE_INGESTION_TOO_LARGE"}), 413
+    metadata = data.get("sourceMetadata", {})
+    if not isinstance(metadata, dict):
+        return jsonify({"success": False, "error": "sourceMetadata must be an object",
+                        "errorCode": "SOURCE_INGESTION_SCHEMA_INVALID"}), 400
+    if len(json.dumps(metadata, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")) > 65_536:
+        return jsonify({"success": False, "error": "sourceMetadata exceeds 64 KiB",
+                        "errorCode": "SOURCE_INGESTION_TOO_LARGE"}), 413
+    current_user = getattr(request, "current_user", None) or {}
+    if current_user.get("auth_mode") == "legacy_chatty_service":
+        set_relying_party_id("chatty")
+    evidence = metadata.get("classificationEvidence")
+    proven_codex = bool(
+        data["provider"].strip().lower() == "codex"
+        and data["sourceKind"].strip().lower() == "jsonl"
+        and data["sourceCollection"] == "codex-desktop-rollouts"
+        and data["projectionContract"] == "life.vvault.provider-transcript.codex-desktop/v1"
+        and isinstance(evidence, dict)
+        and evidence.get("threadSource") == "user"
+        and evidence.get("supportedCodexSurface") is True
+        and evidence.get("subagentMarkerAbsent") is True
+        and isinstance(evidence.get("authoritativeConstructBinding"), dict)
+        and evidence["authoritativeConstructBinding"].get("constructId") == "zen-001"
+        and evidence["authoritativeConstructBinding"].get("authority") == "repository-agent-contract"
+        and evidence["authoritativeConstructBinding"].get("sourceRole") == "agents_md.instructions"
+        and evidence["authoritativeConstructBinding"].get("verified") is True
+    )
+    try:
+        receipt = source_native_ingestion_service.SourceNativeIngestionService().ingest_and_project_vault_file(
+            owner_user_id=owner_user_id, relying_party_id=current_relying_party_id(),
+            provider=data["provider"], source_kind=data["sourceKind"],
+            source_collection=data["sourceCollection"], raw_envelope=raw_envelope,
+            projection_content=projection_content,
+            actor=str(current_user.get("email") or owner_user_id),
+            stable_source_id=data.get("stableSourceId"), source_locator=data.get("sourceLocator"),
+            observed_at=data.get("observedAt"), source_metadata=metadata,
+            projection_contract=data["projectionContract"],
+            projection_version=data["projectionVersion"],
+            content_type=data.get("contentType") or "text/plain; charset=utf-8",
+            file_type="transcript" if proven_codex else "document",
+            explicit_construct_evidence=proven_codex,
+            construct_id="zen-001" if proven_codex else None,
+        )
+    except source_native_ingestion_service.SourceProjectionCollision as exc:
+        return jsonify({"success": False, "error": str(exc),
+                        "errorCode": "SOURCE_INGESTION_COLLISION"}), 409
+    except (TypeError, ValueError) as exc:
+        return jsonify({"success": False, "error": str(exc),
+                        "errorCode": "SOURCE_INGESTION_SCHEMA_INVALID"}), 400
+    except Exception as exc:
+        logger.error("SOURCE_NATIVE_INGESTION: %s", type(exc).__name__)
+        return jsonify({"success": False, "error": "Source ingestion failed",
+                        "errorCode": "SOURCE_INGESTION_UNAVAILABLE"}), 503
+    status = 200 if receipt.get("result") == "already_applied" else 201
+    return jsonify({"success": True, "canonical": True,
+                    "storageOwner": "ovvaults.vault_files",
+                    "sourceOwner": "ovvaults.source_native_artifacts",
+                    "receipt": receipt}), status
+
 
 @app.route('/api/chatty/transcript/<construct_id>', methods=['POST'])
 @require_chatty_auth

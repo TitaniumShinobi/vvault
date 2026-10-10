@@ -5,6 +5,7 @@ import urllib.error
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
@@ -383,6 +384,45 @@ def test_evidence_route_accepts_dedicated_cleanhouse_pairing_credential():
     assert response.status_code == 200
     assert response.get_json()["receipt_id"] == receipt["receipt_id"]
     assert verify.call_args.kwargs["user_id"] == owner_id
+
+
+def test_pairing_credential_normalizes_database_uuid_for_owner_scoped_wazuh_routes():
+    owner_id = "11111111-1111-4111-8111-111111111111"
+    with (
+        patch.object(
+            server,
+            "db_get_user",
+            return_value={"id": UUID(owner_id), "email": "devon@example.com"},
+        ),
+        patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "verify_cleanhouse_files_credential",
+            return_value=True,
+        ),
+        patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "list_construct_file_rows",
+            return_value=[{"id": "canonical-zen-001"}],
+        ),
+        patch.object(
+            server.VAULT_FILE_REPOSITORY,
+            "get_cleanhouse_wazuh_enrollment_receipt",
+            return_value=None,
+        ),
+    ):
+        response = server.app.test_client().get(
+            "/api/cleanhouse/files/wazuh/status",
+            headers={
+                "X-CleanHouse-Key": "chf_v1_dedicated-test-credential-value-that-is-long-enough",
+                "X-Chatty-User": "devon@example.com",
+                "X-CleanHouse-Instance": "zen-001",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["provider"] == "wazuh_manager"
+    assert payload["state"] == "unavailable"
 
 
 def test_repository_stores_only_pairing_hash_and_verifies_constant_time():

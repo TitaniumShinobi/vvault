@@ -81,7 +81,7 @@ def test_migration_runner_resolves_database_configuration_from_systemd_without_p
 
 def test_github_deployment_uses_the_installed_host_privilege_boundary():
     assert WORKFLOW.count("/opt/deploy/trigger/deploy-trigger.sh vvault") == 2
-    assert 'exec env VVAULT_DEPLOY_MODE="$VVAULT_DEPLOY_MODE"' in WORKFLOW
+    assert 'env VVAULT_DEPLOY_MODE="$VVAULT_DEPLOY_MODE" /opt/deploy/trigger/deploy-trigger.sh vvault' in WORKFLOW
     assert "exec env VVAULT_DEPLOY_MODE=full" in WORKFLOW
     assert "sudo -n git" not in WORKFLOW
 
