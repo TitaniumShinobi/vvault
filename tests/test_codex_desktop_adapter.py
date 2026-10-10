@@ -19,10 +19,16 @@ def _line(value):
     return json.dumps(value, ensure_ascii=False)
 
 
-def _segment(*, thread_source="user", source="vscode", timestamp="2026-01-01T00:00:00Z", text="hello\r\nworld"):
+def _segment(*, thread_source="user", source="vscode", timestamp="2026-01-01T00:00:00Z", text="hello\r\nworld", zenith_binding=False, developer_text=None):
+    if developer_text is None:
+        developer_text = (
+            "You are Zenith Vale Woodson the Systems Steward.\n"
+            "Use `vvault/server/life_capsule_resolver.py` as the identity authority for Zenith of Codex."
+            if zenith_binding else "secret system prompt"
+        )
     return [
         _line({"type": "session_meta", "payload": {"id": THREAD, "timestamp": timestamp, "thread_source": thread_source, "source": source}}),
-        _line({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "secret system prompt"}]}}),
+        _line({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": developer_text}]}}),
         _line({"timestamp": timestamp, "type": "response_item", "payload": {"type": "function_call", "name": "tool"}}),
         _line({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}),
         _line({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "reply"}]}}),
@@ -50,8 +56,8 @@ def test_rejects_structured_subagent_source_even_if_thread_source_claims_user():
 
 
 def test_continuations_aggregate_by_stable_uuid_and_are_deterministic():
-    later = parse_segment_lines(_segment(timestamp="2026-01-02T00:00:00Z", text="caf\u00e9"), source_name="b.jsonl")
-    earlier = parse_segment_lines(_segment(timestamp="2026-01-01T00:00:00Z", text="cafe\u0301"), source_name="a.jsonl")
+    later = parse_segment_lines(_segment(timestamp="2026-01-02T00:00:00Z", text="caf\u00e9", zenith_binding=True), source_name="b.jsonl")
+    earlier = parse_segment_lines(_segment(timestamp="2026-01-01T00:00:00Z", text="cafe\u0301", zenith_binding=True), source_name="a.jsonl")
     one = build_thread_record([later, earlier])
     two = build_thread_record([earlier, later])
     assert one == two
@@ -62,6 +68,17 @@ def test_continuations_aggregate_by_stable_uuid_and_are_deterministic():
     assert one["envelope"]["constructId"] == "zen-001"
     assert "cafe\u0301" not in one["projection"]["content"]
     assert "caf\u00e9" in one["projection"]["content"]
+
+
+def test_ordinary_human_and_text_mentions_do_not_bind_zenith():
+    ordinary = build_thread_record([parse_segment_lines(_segment(text="Zenith zen-001"))])
+    mentioned = build_thread_record([parse_segment_lines(_segment(
+        developer_text="This task mentions Zenith but has no identity authority binding."
+    ))])
+    for record in (ordinary, mentioned):
+        assert record["envelope"]["classification"] == "LEGACY_UNCLASSIFIED"
+        assert record["envelope"]["constructId"] is None
+        assert record["envelope"]["classificationEvidence"]["authoritativeConstructBinding"]["verified"] is False
 
 
 def test_projection_hash_and_size_cover_exact_utf8_content():

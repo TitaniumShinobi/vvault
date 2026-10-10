@@ -168,7 +168,10 @@ def run(
             "projection": record["projection"]["content"],
             "metadata": record["envelope"],
             "projection_contract": CODEX_PROJECTION_CONTRACT,
-            "explicit": True,
+            "explicit": bool(
+                record["envelope"]["classificationEvidence"]
+                ["authoritativeConstructBinding"]["verified"]
+            ),
         })
     for export, locator in generic_records:
         planned.append({
@@ -187,8 +190,8 @@ def run(
 
     result["candidateRecords"] = len(planned)
     result["acceptedRecords"] = len(planned)
-    result["codexAccountPrivateRecords"] = sum(item["kind"] == "codex" for item in planned)
-    result["legacyUnclassifiedRecords"] = sum(item["kind"] == "generic" for item in planned)
+    result["codexAccountPrivateRecords"] = sum(item["explicit"] for item in planned)
+    result["legacyUnclassifiedRecords"] = sum(not item["explicit"] for item in planned)
     if not args.apply:
         return result
 

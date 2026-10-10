@@ -11,9 +11,10 @@ OWNER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 THREAD = "43e73643-dfd6-4958-90b1-8fd7e97c93c6"
 
 
-def _codex(path: Path, *, thread_source="user"):
+def _codex(path: Path, *, thread_source="user", zenith_binding=False):
     rows = [
         {"type": "session_meta", "payload": {"id": THREAD, "timestamp": "2026-01-01T00:00:00Z", "thread_source": thread_source, "source": "vscode"}},
+        {"timestamp": "2026-01-01T00:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": ("You are Zenith Vale Woodson the Systems Steward.\nUse `vvault/server/life_capsule_resolver.py` as the identity authority for Zenith of Codex." if zenith_binding else "ordinary contract")}] }},
         {"timestamp": "2026-01-01T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "private"}]}},
         {"timestamp": "2026-01-01T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "reply"}]}},
     ]
@@ -47,7 +48,7 @@ def test_default_dry_run_is_count_only_and_never_constructs_service(tmp_path):
         "mode": "dry-run", "failurePolicy": "stop", "inputFiles": 2,
         "candidateRecords": 2, "acceptedRecords": 2, "appliedRecords": 0,
         "alreadyAppliedRecords": 0, "rejectedRecords": 0, "failedRecords": 0,
-        "codexAccountPrivateRecords": 1, "legacyUnclassifiedRecords": 1,
+        "codexAccountPrivateRecords": 0, "legacyUnclassifiedRecords": 2,
         "stopped": False,
     }
     assert "private" not in json.dumps(result)
@@ -68,14 +69,28 @@ def test_apply_installs_scope_and_projects_codex_and_generic_conservatively(tmp_
     assert scope == [("rp", "vvault"), ("owner", OWNER)]
     assert result["appliedRecords"] == 2
     codex_call, generic_call = calls
-    assert codex_call["explicit_construct_evidence"] is True
-    assert codex_call["construct_id"] == "zen-001"
+    assert codex_call["explicit_construct_evidence"] is False
+    assert codex_call["construct_id"] is None
     assert codex_call["stable_source_id"] == THREAD
     assert codex_call["source_locator"] == '["root-01/rollout.jsonl"]'
     assert generic_call["explicit_construct_evidence"] is False
     assert generic_call["construct_id"] is None
     assert generic_call["source_locator"] == "root-01/note.txt"
     assert str(tmp_path) not in json.dumps(generic_call["source_metadata"])
+
+
+def test_apply_promotes_only_authoritative_zenith_binding(tmp_path, monkeypatch):
+    codex = tmp_path / "rollout.jsonl"
+    _codex(codex, zenith_binding=True)
+    calls = []
+    monkeypatch.setattr(subject, "set_relying_party_id", lambda _value: None)
+    monkeypatch.setattr(subject, "set_authenticated_user_id", lambda _value: None)
+    result = subject.run(_args(tmp_path, codex=[codex], apply=True),
+                         service_factory=lambda: FakeService(calls))
+    assert result["codexAccountPrivateRecords"] == 1
+    assert result["legacyUnclassifiedRecords"] == 0
+    assert calls[0]["explicit_construct_evidence"] is True
+    assert calls[0]["construct_id"] == "zen-001"
 
 
 def test_outside_root_fails_closed_without_service(tmp_path):
