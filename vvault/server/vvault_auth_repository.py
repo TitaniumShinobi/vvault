@@ -302,6 +302,7 @@ class VVaultAuthRepository:
         self, *, provider: str, provider_subject: str, verified_email: str,
         name: str | None, issuer: str | None = None,
         allow_legacy_compatibility: bool = False,
+        allow_create: bool = True,
     ) -> tuple[dict[str, Any], bool]:
         """Find a durable identity or atomically create one pending account.
 
@@ -450,6 +451,12 @@ class VVaultAuthRepository:
                     if len(candidates) > 1:
                         conn.rollback()
                         raise ValueError("legacy owner match is ambiguous")
+                if not allow_create:
+                    # Sign-in is not account creation.  A verified provider
+                    # subject that is not already canonical remains unknown
+                    # until the person deliberately uses the signup entry.
+                    conn.rollback()
+                    return None, False
                 cur.execute(
                     """INSERT INTO users (email, password_hash, name, role, auth_provider, account_state, updated_at)
                        VALUES (%s, %s, %s, 'user', %s, 'PENDING_ENROLLMENT', now())

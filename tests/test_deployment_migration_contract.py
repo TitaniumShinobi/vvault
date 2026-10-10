@@ -8,12 +8,17 @@ WORKFLOW = (ROOT / ".github/workflows/deploy-ci.yml").read_text(encoding="utf-8"
 BACKUP_RECEIPTS = (ROOT / "scripts/deployment/create-vvault-enrollment-backup-receipts.py").read_text(encoding="utf-8")
 
 
-def test_deploy_applies_enrollment_migrations_before_restart_and_refuses_automatic_rollback():
-    assert "apply-vvault-enrollment-migrations.sh" in DEPLOY
-    assert DEPLOY.index("apply-vvault-enrollment-migrations.sh") < DEPLOY.index('log "restarting $SERVICE"')
-    assert "MIGRATIONS_APPLIED=1" in DEPLOY
-    assert "automatic code rollback is prohibited" in DEPLOY
-    assert "forward-only" in DEPLOY
+def test_deploy_requires_exact_auth_compatibility_before_checkout_and_restart():
+    assert "apply-vvault-enrollment-migrations.sh" not in DEPLOY
+    assert DEPLOY.index('auth_gate candidate "$NEW_REF"') < DEPLOY.index('git_repo checkout -B "$BRANCH" "$NEW_REF"')
+    assert DEPLOY.count('auth_gate candidate "$NEW_REF"') >= 3
+    assert DEPLOY.count('auth_gate serving "$NEW_REF"') == 2
+    assert "schema compatibility verified; migrations require a separate approved operation" in DEPLOY
+    assert "schema verified; no migrations applied" in DEPLOY
+    assert 'node .auth-kit/ci.mjs verify' in DEPLOY
+    assert 'VVAULT_AUTH_CONTRACT_CHECKPOINT' in DEPLOY
+    assert 'AUTH_RELEASE_GATE' not in DEPLOY
+    assert DEPLOY.count('capacity_gate') >= 5
 
 
 def test_production_pushes_restart_backend_only_until_a_full_deploy_is_explicit():
@@ -46,6 +51,7 @@ def test_migration_runner_requires_verified_backup_receipts_and_uses_checksum_le
         "0033_identity_directory.up.sql",
         "0034_enrollment_session_hardening.up.sql",
         "0035_chatty_pairing_intents.up.sql",
+        "0039_returning_owner_session_without_device_gate.up.sql",
         "forward_only_restore_verified_backup_required",
     ):
         assert required in RUNNER
@@ -75,14 +81,14 @@ def test_migration_runner_resolves_database_configuration_from_systemd_without_p
 
 def test_github_deployment_uses_the_installed_host_privilege_boundary():
     assert WORKFLOW.count("/opt/deploy/trigger/deploy-trigger.sh vvault") == 2
-    assert 'exec env VVAULT_DEPLOY_MODE="$VVAULT_DEPLOY_MODE"' in WORKFLOW
+    assert 'env VVAULT_DEPLOY_MODE="$VVAULT_DEPLOY_MODE" /opt/deploy/trigger/deploy-trigger.sh vvault' in WORKFLOW
     assert "exec env VVAULT_DEPLOY_MODE=full" in WORKFLOW
     assert "sudo -n git" not in WORKFLOW
 
 
-def test_deployment_creates_private_verified_recovery_receipts_before_migration():
+def test_full_deployment_creates_private_verified_recovery_receipts_before_build():
     assert "create-vvault-enrollment-backup-receipts.py" in DEPLOY
-    assert DEPLOY.index("prepare_enrollment_recovery_receipts") < DEPLOY.index("apply-vvault-enrollment-migrations.sh")
+    assert DEPLOY.index("prepare_enrollment_recovery_receipts") < DEPLOY.index("npm ci --ignore-scripts")
 
 
 def test_frontend_restore_is_explicit_snapshot_only_and_never_runs_migrations():
@@ -137,10 +143,12 @@ def test_deployment_resolves_a_service_environment_file_without_printing_values(
     assert 'stdout=subprocess.PIPE' in BACKUP_RECEIPTS
 
 
-def test_backend_only_deploy_does_not_require_database_secret_read_access():
-    assert 'verify_runtime_contract 0' in DEPLOY
+def test_backend_only_deploy_requires_canonical_database_contract_and_auth_gate():
+    assert 'verify_runtime_contract 0' not in DEPLOY
     assert 'verify_runtime_contract 1' in DEPLOY
-    assert 'if [[ "$require_database_env" != "1" ]]' in DEPLOY
+    backend = DEPLOY.split('if [[ "$DEPLOY_MODE" == "backend-only" ]]', 1)[1].split("fi", 1)[0]
+    assert 'auth_gate candidate "$NEW_REF"' in backend
+    assert 'auth_gate serving "$NEW_REF"' in backend
 
 
 def test_deployment_uses_command_scoped_safe_directory_for_host_checkout():

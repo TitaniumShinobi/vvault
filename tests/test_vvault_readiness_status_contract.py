@@ -15,6 +15,7 @@ def _runtime_status(*, ready: bool):
         "body_database": {"ready": ready, "schema": "ovvaults"},
         "storage": {},
         "auth": {},
+        "capacity": {"status": "ready", "critical": False, "deployment_blocked": False, "warning": False, "authentication_regression": False},
     }
 
 
@@ -26,7 +27,9 @@ def test_runtime_status_exposes_stable_ovvaults_authority_fields():
     }
     with patch.object(server, "_body_database_dependency_status", return_value=body_status), patch.object(
         server, "_storage_dependency_metadata", return_value={}
-    ), patch.object(server, "_auth_dependency_metadata", return_value={}):
+    ), patch.object(server, "_auth_dependency_metadata", return_value={}), patch.object(
+        server.capacity_readiness, "capacity_status", return_value={"status": "ready", "critical": False}
+    ):
         status = server._get_vvault_runtime_status()
 
     assert status["authority"] == "vvault_body"

@@ -19,6 +19,61 @@ BACKUP=""
 PUBLISHED=0
 RESTART_ATTEMPTED=0
 MIGRATIONS_APPLIED=0
+SOURCE_CHANGED=0
+STAGING=""
+VERIFY_WORKTREE=""
+
+auth_gate() {
+  local phase="$1" ref="$2"
+  local verify_root="$REPO"
+  if [[ "$phase" == "candidate" ]]; then
+    VERIFY_WORKTREE="$(mktemp -d /tmp/vvault-auth-verify.XXXXXXXX)"
+    git_repo worktree add --detach "$VERIFY_WORKTREE" "$ref" >/dev/null
+    verify_root="$VERIFY_WORKTREE"
+  fi
+  [[ -f "$verify_root/.auth-kit/ci.mjs" && ! -L "$verify_root/.auth-kit/ci.mjs" ]] || { log "VVAULT durability gate missing"; return 1; }
+  local contract_state
+  contract_state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["state"])' "$verify_root/.auth-kit/contract.json")"
+  if [[ "$contract_state" == "ESTABLISHED" ]]; then
+    (cd "$verify_root" && \
+      AUTH_CONTRACT_CHECKPOINT="${VVAULT_AUTH_CONTRACT_CHECKPOINT:?required}" \
+      VVAULT_AUTH_TEST_PYTHON="$REPO/venv/bin/python" \
+      /usr/bin/node .auth-kit/ci.mjs verify)
+  elif [[ "$contract_state" == "UNESTABLISHED" ]]; then
+    (cd "$verify_root" && \
+      VVAULT_AUTH_REQUIRE_GITHUB_CHECK=1 \
+      /usr/bin/node .auth-kit/ci.mjs verify)
+  else
+    log "invalid VVAULT auth contract state"
+    return 1
+  fi
+  if [[ -n "$VERIFY_WORKTREE" ]]; then
+    git_repo worktree remove --force "$VERIFY_WORKTREE"
+    VERIFY_WORKTREE=""
+  fi
+}
+
+capacity_gate() {
+  PYTHONPATH="$REPO" "$REPO/venv/bin/python" -c '
+from vvault.server.capacity_readiness import capacity_status
+import os, sys
+state=capacity_status(os.environ.get("VVAULT_CAPACITY_MOUNT", "/"), event_path=os.environ.get("VVAULT_CAPACITY_EVENT_FILE"))
+raise SystemExit(3 if state["deployment_blocked"] else 0)
+'
+}
+
+cleanup_stage() {
+  if [[ -n "$VERIFY_WORKTREE" ]]; then
+    git_repo worktree remove --force "$VERIFY_WORKTREE" >/dev/null 2>&1 || true
+    VERIFY_WORKTREE=""
+  fi
+  if [[ -n "$STAGING" ]]; then
+    [[ "$STAGING" == /tmp/vvault-auth-stage.* && -d "$STAGING" && ! -L "$STAGING" ]] || return 1
+    rm -rf -- "$STAGING"
+    STAGING=""
+  fi
+}
+trap cleanup_stage EXIT
 
 log() { printf '[vvault-deploy] %s\n' "$*"; }
 
@@ -183,7 +238,7 @@ rollback() {
     cp -R "$BACKUP"/. "$FRONTEND"/
   fi
 
-  if [[ -n "$OLD_REF" ]]; then
+  if (( SOURCE_CHANGED )) && [[ -n "$OLD_REF" ]]; then
     git_repo checkout --detach "$OLD_REF" >/dev/null 2>&1 || true
   fi
 
@@ -216,24 +271,27 @@ case "$DEPLOY_MODE" in
   *) log "unsupported deployment mode"; exit 1 ;;
 esac
 
-if [[ "$DEPLOY_MODE" == "backend-only" ]]; then
-  verify_runtime_contract 0
-else
-  verify_runtime_contract 1
-fi
+verify_runtime_contract 1
 
 OLD_REF="$(git_repo rev-parse HEAD)"
 log "fetching $BRANCH"
 git_repo fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
-git_repo checkout -B "$BRANCH" "origin/$BRANCH"
-NEW_REF="$(git_repo rev-parse HEAD)"
+NEW_REF="$(git_repo rev-parse "origin/$BRANCH")"
+# Gate the immutable candidate tree before changing the serving checkout.
+capacity_gate
+auth_gate candidate "$NEW_REF"
+SOURCE_CHANGED=1
+git_repo checkout -B "$BRANCH" "$NEW_REF"
 
 if [[ "$DEPLOY_MODE" == "backend-only" ]]; then
   log "restarting backend from the tracked production checkout (frontend and database unchanged)"
+  capacity_gate
+  auth_gate candidate "$NEW_REF"
   RESTART_ATTEMPTED=1
   sudo systemctl restart "$SERVICE"
   log "verifying canonical readiness"
   verify_readiness
+  auth_gate serving "$NEW_REF"
   trap - ERR INT TERM
   log "backend-only deployment successful: $OLD_REF -> $NEW_REF"
   exit 0
@@ -242,10 +300,7 @@ fi
 log "creating verified database and object-storage recovery receipts"
 ensure_backup_tools
 prepare_enrollment_recovery_receipts
-log "validating backup receipts and applying enrollment migrations"
-VVAULT_DEPLOY_REF="$NEW_REF" \
-  "$REPO/scripts/deployment/apply-vvault-enrollment-migrations.sh"
-MIGRATIONS_APPLIED=1
+log "schema compatibility verified; migrations require a separate approved operation"
 
 log "installing locked frontend dependencies"
 npm ci --ignore-scripts
@@ -258,17 +313,25 @@ log "backing up the current frontend to $BACKUP"
 mkdir -p "$BACKUP"
 cp -a "$FRONTEND"/. "$BACKUP"/
 
+STAGING="$(mktemp -d /tmp/vvault-auth-stage.XXXXXXXX)"
+cp -a "$REPO/dist"/. "$STAGING"/
+auth_gate candidate "$NEW_REF"
+capacity_gate
 log "publishing frontend"
-rm -rf "${FRONTEND:?}"/*
-cp -R "$REPO/dist"/. "$FRONTEND"/
 PUBLISHED=1
+rm -rf "${FRONTEND:?}"/*
+cp -R "$STAGING"/. "$FRONTEND"/
 
+auth_gate candidate "$NEW_REF"
+capacity_gate
 log "restarting $SERVICE"
 RESTART_ATTEMPTED=1
 sudo systemctl restart "$SERVICE"
 
 log "verifying canonical readiness"
 verify_readiness
+auth_gate serving "$NEW_REF"
+cleanup_stage
 
 trap - ERR INT TERM
-log "deployment successful: $OLD_REF -> $NEW_REF (database migrations are forward-only)"
+log "deployment successful: $OLD_REF -> $NEW_REF (schema verified; no migrations applied)"

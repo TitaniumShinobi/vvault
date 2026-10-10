@@ -16,12 +16,13 @@ OBJECT_BACKUP_RECEIPT_ID="${VVAULT_OBJECT_STORAGE_BACKUP_RECEIPT_ID:-}"
 DEPLOY_REF="${VVAULT_DEPLOY_REF:-unknown}"
 DRY_RUN="${VVAULT_MIGRATION_DRY_RUN:-0}"
 
-readonly -a VERSIONS=(0033 0034 0035 0036)
+readonly -a VERSIONS=(0033 0034 0035 0036 0039)
 readonly -a FILES=(
   0033_identity_directory.up.sql
   0034_enrollment_session_hardening.up.sql
   0035_chatty_pairing_intents.up.sql
   0036_device_verification_transfer.up.sql
+  0039_returning_owner_session_without_device_gate.up.sql
 )
 
 log() { printf '[vvault-migrations] %s\n' "$*" >&2; }
@@ -67,7 +68,7 @@ for index in "${!VERSIONS[@]}"; do
 done
 
 if [[ "$DRY_RUN" == "1" ]]; then
-  log "dry run passed: verified backup receipts and checked migration files 0033-0036"
+  log "dry run passed: verified backup receipts and checked migration files 0033-0039"
   exit 0
 fi
 
@@ -184,7 +185,7 @@ trap 'rm -f "$sql_file" "$connection_service"' EXIT
   printf '%s\n' 'COMMIT;'
 } >"$sql_file"
 
-log "applying forward-only enrollment migrations 0033-0036"
+log "applying forward-only enrollment migrations 0033-0039"
 # Keep the connection string out of command-line arguments and all receipts.
 PGSERVICEFILE="$connection_service" PGSERVICE="vvault_enrollment_migrations" \
   psql --no-psqlrc -X -v ON_ERROR_STOP=1 -f "$sql_file" >/dev/null
@@ -205,7 +206,7 @@ payload = {
     "deploy_ref": deploy_ref,
     "migrations": [
         {"version": version, "sha256": checksum}
-        for version, checksum in zip(("0033", "0034", "0035", "0036"), checksums)
+        for version, checksum in zip(("0033", "0034", "0035", "0036", "0039"), checksums)
     ],
     "backup_receipts": {
         "database_backup_id": database_backup_id,

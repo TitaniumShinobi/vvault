@@ -25,6 +25,7 @@ def _runtime_status(*, ready: bool):
         "body_database": body_database,
         "storage": {},
         "auth": {},
+        "capacity": {"status": "ready", "critical": False, "deployment_blocked": False, "warning": False, "authentication_regression": False},
     }
 
 

@@ -7,6 +7,7 @@ import re
 import json
 import hashlib
 import base64
+import threading
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -23,6 +24,54 @@ CONTENT_MISSING_FIELDS = [
 
 BODY_SCHEMA = "ovvaults"
 PLACEHOLDER_TRANSCRIPT_CONTENT = "not_exported_in_phase_1_3"
+
+
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(str(os.environ.get(name) or default))
+    except ValueError:
+        value = default
+    return min(max(value, minimum), maximum)
+
+
+BODY_DATABASE_CONNECT_TIMEOUT_SECONDS = _bounded_int_env("VVAULT_BODY_DB_CONNECT_TIMEOUT_SECONDS", 3, 1, 10)
+BODY_DATABASE_STATEMENT_TIMEOUT_MS = _bounded_int_env("VVAULT_BODY_DB_STATEMENT_TIMEOUT_MS", 5000, 100, 30000)
+BODY_DATABASE_ACQUIRE_TIMEOUT_SECONDS = _bounded_int_env("VVAULT_BODY_DB_ACQUIRE_TIMEOUT_SECONDS", 3, 1, 10)
+BODY_DATABASE_MAX_CONNECTIONS = _bounded_int_env("VVAULT_BODY_DB_MAX_CONNECTIONS", 10, 1, 32)
+_BODY_DATABASE_CONNECTION_GATE = threading.BoundedSemaphore(BODY_DATABASE_MAX_CONNECTIONS)
+
+
+class _BoundedConnection:
+    """Release the process-local connection slot whenever psycopg closes."""
+
+    def __init__(self, connection):
+        self._connection = connection
+        self._released = False
+
+    def _release(self) -> None:
+        if not self._released:
+            self._released = True
+            _BODY_DATABASE_CONNECTION_GATE.release()
+
+    def __enter__(self):
+        self._connection.__enter__()
+        return self._connection
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            return self._connection.__exit__(exc_type, exc, traceback)
+        finally:
+            self._release()
+
+    def close(self):
+        try:
+            return self._connection.close()
+        finally:
+            self._release()
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
 @dataclass(frozen=True)
 class BodyResult:
     status: str
@@ -63,19 +112,39 @@ def _connect():
     import psycopg
     from psycopg.rows import dict_row
 
-    conn = psycopg.connect(url, row_factory=dict_row)
+    acquired = _BODY_DATABASE_CONNECTION_GATE.acquire(timeout=BODY_DATABASE_ACQUIRE_TIMEOUT_SECONDS)
+    if not acquired:
+        raise TimeoutError("VVAULT body database connection limit reached")
+    try:
+        raw_connection = psycopg.connect(
+            url,
+            row_factory=dict_row,
+            connect_timeout=BODY_DATABASE_CONNECT_TIMEOUT_SECONDS,
+            options=(
+                f"-c statement_timeout={BODY_DATABASE_STATEMENT_TIMEOUT_MS} "
+                f"-c lock_timeout={BODY_DATABASE_STATEMENT_TIMEOUT_MS}"
+            ),
+        )
+    except Exception:
+        _BODY_DATABASE_CONNECTION_GATE.release()
+        raise
+    conn = _BoundedConnection(raw_connection)
     # The database policy is the enforcement boundary.  Scope comes from the
     # server-verified assertion/session context, never request input.
     try:
         from .relying_party_scope import configure_connection
     except ImportError:
         from relying_party_scope import configure_connection
-    with conn.cursor() as cur:
-        # Parameters are used for values; schema names here are a fixed module
-        # constant.  Using SET avoids treating "ovvaults,public" as one quoted
-        # schema when the server applies connection options.
-        cur.execute(f"SET search_path TO {BODY_SCHEMA}, public")
-        configure_connection(cur)
+    try:
+        with conn.cursor() as cur:
+            # Parameters are used for values; schema names here are a fixed module
+            # constant.  Using SET avoids treating "ovvaults,public" as one quoted
+            # schema when the server applies connection options.
+            cur.execute(f"SET search_path TO {BODY_SCHEMA}, public")
+            configure_connection(cur)
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 

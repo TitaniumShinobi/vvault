@@ -532,7 +532,7 @@ const VaultBrowser = ({ user }) => {
     setUploadState({ active: true, progress: `Uploading ${fileList.length} file(s) (${sizeMB} MB)...`, result: null });
 
     try {
-      const response = await fetch('/api/vault/knowledge-files/upload', {
+      const response = await authFetch('/api/vault/knowledge-files/upload', {
         method: 'POST',
         credentials: 'same-origin',
         body: formData,

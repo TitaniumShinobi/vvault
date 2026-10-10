@@ -1,0 +1,12 @@
+{
+  "database": "vvault_body_20260504t123219z",
+  "schema": "ovvaults",
+  "ledger": "ovvaults.enrollment_schema_migrations",
+  "requiredMigrations": [
+    {
+      "id": "0039_returning_owner_session_without_device_gate.up.sql",
+      "path": "vvault/migrations/0039_returning_owner_session_without_device_gate.up.sql",
+      "sha256": "a2fa93bae20a083e346fa68b49b82166d2b6ce7019099d9e6c3fd4948efc349a"
+    }
+  ]
+}
