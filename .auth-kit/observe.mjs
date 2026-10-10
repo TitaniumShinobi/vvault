@@ -11,10 +11,20 @@ for(const key of profile.requiredChecks){const split=key.lastIndexOf('/');const 
 const capabilities={};
 for(const contract of CAPABILITIES){
   const checks=required.get(contract.id);
-  capabilities[contract.id]=checks?{applicability:'TRUE',implementation:'INDETERMINATE',evidence:['.auth-kit/product/evidence-state.json'],checks:Object.fromEntries(checks.filter(id=>evidenceState.genericChecks?.[`${contract.id}/${id}`]==='PASS').map(id=>[id,true]))}:{applicability:'FALSE',reason:'Outside VVAULT_PRODUCTION_AUTH'};
+  if(!checks){capabilities[contract.id]={applicability:'FALSE',reason:'Outside VVAULT_PRODUCTION_AUTH'};continue;}
+  const observedChecks=Object.fromEntries(checks.filter(id=>evidenceState.genericChecks?.[`${contract.id}/${id}`]==='PASS').map(id=>[id,true]));
+  const evidence=Array.isArray(evidenceState.genericEvidence?.[contract.id])?evidenceState.genericEvidence[contract.id]:[];
+  capabilities[contract.id]={applicability:'TRUE',implementation:checks.every(id=>observedChecks[id]===true)&&evidence.length?'ESTABLISHED':'INDETERMINATE',evidence,checks:observedChecks};
 }
 const productCandidates=matrix.candidates.map(candidate=>{
   const evidence=evidenceState.candidates?.[candidate.id]||{};
   return {...candidate,observerMapping:mappings[candidate.id]||null,establishment:evidence.establishment||'INDETERMINATE',verification:evidence.verification||'INDETERMINATE',evidence:Array.isArray(evidence.evidence)?evidence.evidence:[]};
 });
-console.log(JSON.stringify({binding,adapter:{schemaVersion:1,authenticationRole:'IDENTITY_AUTHORITY',productId:binding.productId,revision:binding.revision,productProfile:{id:profile.id,requiredChecks:profile.requiredChecks},productCandidates,capabilities},independence:{wizardStopped:false,authOrchestrationRequests:null,runtimePassed:false,evidence:[]}}));
+const independenceEvidence=evidenceState.independence||{};
+const independence={
+  wizardStopped:independenceEvidence.wizardStopped===true,
+  authOrchestrationRequests:Number.isInteger(independenceEvidence.authOrchestrationRequests)?independenceEvidence.authOrchestrationRequests:null,
+  runtimePassed:independenceEvidence.runtimePassed===true,
+  evidence:Array.isArray(independenceEvidence.evidence)?independenceEvidence.evidence:[],
+};
+console.log(JSON.stringify({binding,adapter:{schemaVersion:1,authenticationRole:'IDENTITY_AUTHORITY',productId:binding.productId,revision:binding.revision,productProfile:{id:profile.id,requiredChecks:profile.requiredChecks},productCandidates,capabilities},independence}));
