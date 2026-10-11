@@ -408,6 +408,7 @@ def _affected_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def manager_attestation(
     *,
     agent_id: str | None = None,
+    require_connected: bool = True,
     transport: Callable[[urllib.request.Request], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     expected_agent_id = str(agent_id or os.environ.get("VVAULT_WAZUH_AGENT_ID") or "").strip()
@@ -430,6 +431,9 @@ def manager_attestation(
     matching = next((item for item in agents if str(item.get("id") or "") == expected_agent_id), None)
     if not manager_active or matching is None:
         raise WazuhEvidenceUnavailable("Wazuh manager or enrolled agent is unavailable")
+    agent_status = str(matching.get("status") or "").strip().lower()
+    if require_connected and agent_status != "active":
+        raise WazuhEvidenceUnavailable("Wazuh enrolled agent is not connected")
     info_payload = manager_api_request("/manager/info", transport=transport)
     info_items = _affected_items(info_payload)
     info = info_items[0] if info_items else {}
@@ -438,7 +442,8 @@ def manager_attestation(
         "api_authenticated": True,
         "agent_id": expected_agent_id,
         "agent_name": str(matching.get("name") or ""),
-        "agent_status": str(matching.get("status") or ""),
+        "agent_status": agent_status,
+        "agent_connected": agent_status == "active",
         "manager": str(info.get("name") or "wazuh-manager"),
         "manager_version": str(info.get("version") or ""),
     }

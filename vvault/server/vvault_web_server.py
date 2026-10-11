@@ -6567,12 +6567,19 @@ def get_cleanhouse_wazuh_status():
     if enrollment:
         try:
             attestation = cleanhouse_files_evidence.manager_attestation(
-                agent_id=str(enrollment.get("agent_id") or "")
+                agent_id=str(enrollment.get("agent_id") or ""),
+                require_connected=False,
             )
         except cleanhouse_files_evidence.WazuhEvidenceUnavailable:
             attestation = {}
     inventory_configured = bool(enrollment and attestation.get("api_authenticated"))
-    evidence_authenticated = bool(alerts_ready and inventory_configured and attestation.get("manager_active"))
+    agent_connected = bool(attestation.get("agent_connected"))
+    evidence_authenticated = bool(
+        alerts_ready
+        and inventory_configured
+        and attestation.get("manager_active")
+        and agent_connected
+    )
     state = "live" if evidence_authenticated else ("warming" if alerts_ready or enrollment else "unavailable")
     response = jsonify({
         "success": True,
@@ -6582,6 +6589,8 @@ def get_cleanhouse_wazuh_status():
         "inventory_configured": inventory_configured,
         "evidence_authenticated": evidence_authenticated,
         "agent_id": str((enrollment or {}).get("agent_id") or ""),
+        "agent_status": str(attestation.get("agent_status") or ""),
+        "agent_connected": agent_connected,
         "monitored_scope": str((enrollment or {}).get("monitored_scope") or ""),
         "manager": str(attestation.get("manager") or (enrollment or {}).get("manager") or ""),
         "manager_version": str(attestation.get("manager_version") or ""),
