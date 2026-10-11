@@ -7,9 +7,8 @@ PACKAGE_URL="https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-manager/${PACK
 PACKAGE_SHA512="f54a48683683fea476b133646c6a2ad884c3d61d0f7d85bf8b0602e127e0e14a6976fc5cf5962cc47de2794fdd0e2abe2f195de1d7a7b9c69da4b79c09a970f7"
 SERVICE_USER="${VVAULT_SERVICE_USER:-vvault}"
 ENV_FILE="${VVAULT_WAZUH_ENV_FILE:-/etc/vvault/wazuh.env}"
+ADMIN_ENV_FILE="${VVAULT_WAZUH_ADMIN_ENV_FILE:-/etc/vvault/wazuh-admin.env}"
 AGENT_MANAGER="${VVAULT_WAZUH_AGENT_MANAGER:?VVAULT_WAZUH_AGENT_MANAGER is required}"
-BOOTSTRAP_USER="${WAZUH_API_BOOTSTRAP_USER:?WAZUH_API_BOOTSTRAP_USER is required}"
-BOOTSTRAP_PASSWORD="${WAZUH_API_BOOTSTRAP_PASSWORD:?WAZUH_API_BOOTSTRAP_PASSWORD is required}"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "manager installation requires root" >&2
@@ -62,6 +61,14 @@ for tag, value in (('jsonout_output', 'yes'), ('alerts_log', 'yes')):
     if node is None:
         node = ET.SubElement(global_node, tag)
     node.text = value
+auth_node = root.find('auth')
+if auth_node is None:
+    auth_node = ET.SubElement(root, 'auth')
+for tag, value in (('disabled', 'yes'), ('remote_enrollment', 'no')):
+    node = auth_node.find(tag)
+    if node is None:
+        node = ET.SubElement(auth_node, tag)
+    node.text = value
 ET.indent(root, space='  ')
 temporary = path.with_suffix('.conf.vvault-new')
 ET.ElementTree(root).write(temporary, encoding='utf-8', xml_declaration=True)
@@ -77,34 +84,74 @@ else
 fi
 systemctl enable --now wazuh-manager
 
-bootstrap_curl_config="${stage}/bootstrap.curl"
-BOOTSTRAP_USER="${BOOTSTRAP_USER}" BOOTSTRAP_PASSWORD="${BOOTSTRAP_PASSWORD}" \
-  python3 - "${bootstrap_curl_config}" <<'PY'
+install -d -m 0700 -o root -g root "$(dirname "${ADMIN_ENV_FILE}")"
+if [[ ! -e "${ADMIN_ENV_FILE}" ]]; then
+  umask 077
+  admin_password="$(python3 -c 'import secrets; print("Wz1!" + secrets.token_urlsafe(32))')"
+  wui_password="$(python3 -c 'import secrets; print("Wz1!" + secrets.token_urlsafe(32))')"
+  {
+    printf 'WAZUH_API_ADMIN_USER=wazuh\n'
+    printf 'WAZUH_API_ADMIN_PASSWORD=%s\n' "${admin_password}"
+    printf 'WAZUH_API_WUI_PASSWORD=%s\n' "${wui_password}"
+  } > "${ADMIN_ENV_FILE}"
+  chmod 0600 "${ADMIN_ENV_FILE}"
+fi
+
+read_secret() {
+  local key="$1" value
+  value="$(sed -n "s/^${key}=//p" "${ADMIN_ENV_FILE}" | tail -n 1)"
+  [[ -n "${value}" ]] || {
+    echo "root-owned Wazuh administrator state is incomplete" >&2
+    return 1
+  }
+  printf '%s' "${value}"
+}
+
+admin_user="$(read_secret WAZUH_API_ADMIN_USER)"
+admin_password="$(read_secret WAZUH_API_ADMIN_PASSWORD)"
+wui_password="$(read_secret WAZUH_API_WUI_PASSWORD)"
+
+authenticate() {
+  local username="$1" password="$2" curl_config="$3"
+  USERNAME="${username}" PASSWORD="${password}" python3 - "${curl_config}" <<'PY'
 import base64
 import os
 import sys
 from pathlib import Path
 
 encoded = base64.b64encode(
-    f'{os.environ["BOOTSTRAP_USER"]}:{os.environ["BOOTSTRAP_PASSWORD"]}'.encode('utf-8')
+    f'{os.environ["USERNAME"]}:{os.environ["PASSWORD"]}'.encode('utf-8')
 ).decode('ascii')
 Path(sys.argv[1]).write_text(f'header = "Authorization: Basic {encoded}"\n', encoding='utf-8')
 PY
-chmod 0600 "${bootstrap_curl_config}"
-bootstrap_token="$(curl --fail --silent --show-error --cacert /var/ossec/api/configuration/ssl/server.crt \
-  --config "${bootstrap_curl_config}" \
-  --request POST https://127.0.0.1:55000/security/user/authenticate | \
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["token"])')"
+  chmod 0600 "${curl_config}"
+  curl --fail --silent --show-error --cacert /var/ossec/api/configuration/ssl/server.crt \
+    --config "${curl_config}" \
+    --request POST https://127.0.0.1:55000/security/user/authenticate | \
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["token"])'
+}
+
+bootstrap_curl_config="${stage}/bootstrap.curl"
+if ! bootstrap_token="$(authenticate "${admin_user}" "${admin_password}" "${bootstrap_curl_config}")"; then
+  bootstrap_token="$(authenticate wazuh wazuh "${bootstrap_curl_config}")" || {
+    echo "Wazuh API administrator authentication failed" >&2
+    exit 1
+  }
+fi
 api_curl_config="${stage}/api.curl"
 printf 'header = "Authorization: Bearer %s"\n' "${bootstrap_token}" > "${api_curl_config}"
 chmod 0600 "${api_curl_config}"
 
 api_call() {
-  local method="$1" path="$2" body="${3:-}"
+  local method="$1" path="$2" body="${3:-}" body_file=""
   if [[ -n "${body}" ]]; then
+    body_file="$(mktemp "${stage}/api-body.XXXXXX")"
+    printf '%s' "${body}" > "${body_file}"
+    chmod 0600 "${body_file}"
     curl --fail --silent --show-error --cacert /var/ossec/api/configuration/ssl/server.crt \
       --config "${api_curl_config}" -H 'Content-Type: application/json' \
-      -X "${method}" -d "${body}" "https://127.0.0.1:55000${path}"
+      -X "${method}" --data-binary "@${body_file}" "https://127.0.0.1:55000${path}"
+    rm -f -- "${body_file}"
   else
     curl --fail --silent --show-error --cacert /var/ossec/api/configuration/ssl/server.crt \
       --config "${api_curl_config}" -X "${method}" \
@@ -151,6 +198,18 @@ user_has_role="$(api_call GET "/security/users?user_ids=${user_id}" | ROLE_ID="$
 if [[ "${user_has_role}" != "yes" ]]; then
   api_call POST "/security/users/${user_id}/roles?role_ids=${role_id}" >/dev/null
 fi
+
+users_payload="$(api_call GET '/security/users?limit=500')"
+wui_user_id="$(printf '%s' "${users_payload}" | python3 -c \
+  'import json,sys; print(next((str(x["id"]) for x in json.load(sys.stdin)["data"]["affected_items"] if x.get("username")=="wazuh-wui"), ""))')"
+admin_user_id="$(printf '%s' "${users_payload}" | ADMIN_USER="${admin_user}" python3 -c \
+  'import json,os,sys; name=os.environ["ADMIN_USER"]; print(next((str(x["id"]) for x in json.load(sys.stdin)["data"]["affected_items"] if x.get("username")==name), ""))')"
+[[ -n "${wui_user_id}" && -n "${admin_user_id}" ]] || {
+  echo "Wazuh API default administrator identities are unavailable" >&2
+  exit 1
+}
+api_call PUT "/security/users/${wui_user_id}" "{\"password\":\"${wui_password}\"}" >/dev/null
+api_call PUT "/security/users/${admin_user_id}" "{\"password\":\"${admin_password}\"}" >/dev/null
 
 install -d -m 0750 -o root -g "${SERVICE_USER}" "$(dirname "${ENV_FILE}")"
 umask 027
