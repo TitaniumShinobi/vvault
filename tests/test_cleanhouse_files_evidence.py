@@ -122,6 +122,46 @@ def test_manager_alert_feed_accepts_native_top_level_syscheck_payload():
     assert result["items"][0]["_source"]["syscheck"]["event"] == "added"
 
 
+def test_inventory_preserves_source_pagination_after_scope_filtering():
+    def transport(request):
+        if request.full_url.endswith("/security/user/authenticate"):
+            return {"data": {"token": "fresh"}}
+        if request.full_url.endswith("/manager/status"):
+            return {"data": {"affected_items": [{"wazuh-remoted": "running"}]}}
+        if "/agents?" in request.full_url:
+            return {"data": {"affected_items": [{
+                "id": "001", "name": "zen-001", "status": "active",
+            }]}}
+        if request.full_url.endswith("/manager/info"):
+            return {"data": {"affected_items": [{"name": "manager", "version": "v4.14.7"}]}}
+        if "/syscheck/001?" in request.full_url:
+            return {"data": {
+                "affected_items": [
+                    {"id": 1, "file": "/Users/test/outside"},
+                    {"id": 2, "file": "/Users/test/scope/inside"},
+                ],
+                "total_affected_items": 5,
+            }}
+        raise AssertionError(request.full_url)
+
+    evidence._WAZUH_TOKEN_CACHE.update({"token": "cached", "expires_at": 10**12})
+    result = evidence.query_wazuh_inventory(
+        offset=0,
+        limit=2,
+        agent_id="001",
+        monitored_scope="/Users/test/scope",
+        transport=transport,
+    )
+    data = result["data"]
+
+    assert [item["file"] for item in data["affected_items"]] == ["/Users/test/scope/inside"]
+    assert data["source_total_affected_items"] == 5
+    assert data["source_page_count"] == 2
+    assert data["filtered_page_count"] == 1
+    assert data["next_offset"] == 2
+    assert data["complete"] is False
+
+
 def test_manager_jwt_is_refreshed_once_after_401():
     calls = []
     evidence._WAZUH_TOKEN_CACHE.update({"token": "", "expires_at": 0.0})

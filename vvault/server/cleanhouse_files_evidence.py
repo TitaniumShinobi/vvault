@@ -522,12 +522,26 @@ def query_wazuh_inventory(
     affected = data.get("affected_items") if isinstance(data, dict) else []
     if isinstance(affected, list):
         data = dict(data)
-        data["affected_items"] = [
+        source_page_count = len(affected)
+        source_total = int(data.get("total_affected_items") or source_page_count)
+        filtered = [
             {**item, "agent_id": agent_id}
             for item in affected
             if isinstance(item, dict) and _path_within_scope(str(item.get("file") or item.get("path") or ""), scope)
         ]
-        data["total_affected_items"] = len(data["affected_items"])
+        next_offset = min(source_total, max(0, int(offset)) + source_page_count)
+        data.update({
+            "affected_items": filtered,
+            # Keep the upstream total for compatibility and expose explicit
+            # source-page metadata so a client cannot mistake a filtered page
+            # for the end of the authoritative manager inventory.
+            "total_affected_items": source_total,
+            "source_total_affected_items": source_total,
+            "source_page_count": source_page_count,
+            "filtered_page_count": len(filtered),
+            "next_offset": next_offset,
+            "complete": next_offset >= source_total or source_page_count == 0,
+        })
     return {
         "schema": INVENTORY_SCHEMA,
         "provider": "wazuh_manager",
