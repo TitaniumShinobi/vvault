@@ -86,26 +86,44 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 path = Path('/var/ossec/etc/ossec.conf')
-root = ET.parse(path).getroot()
-global_node = root.find('global')
+source = path.read_text(encoding='utf-8')
+leading = source.lstrip()
+xml_declaration = ''
+if leading.startswith('<?xml'):
+    declaration_end = leading.find('?>')
+    if declaration_end < 0:
+        raise SystemExit('invalid XML declaration in ossec.conf')
+    xml_declaration = leading[:declaration_end + 2]
+    source = leading[declaration_end + 2:]
+
+parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True, insert_pis=True))
+document = ET.fromstring(f'<vvault_document>{source}</vvault_document>', parser=parser)
+configs = [node for node in document if node.tag == 'ossec_config']
+if not configs:
+    raise SystemExit('ossec.conf contains no ossec_config section')
+
+global_node = next((node.find('global') for node in configs if node.find('global') is not None), None)
 if global_node is None:
-    global_node = ET.SubElement(root, 'global')
+    global_node = ET.SubElement(configs[0], 'global')
 for tag, value in (('jsonout_output', 'yes'), ('alerts_log', 'yes')):
     node = global_node.find(tag)
     if node is None:
         node = ET.SubElement(global_node, tag)
     node.text = value
-auth_node = root.find('auth')
+auth_node = next((node.find('auth') for node in configs if node.find('auth') is not None), None)
 if auth_node is None:
-    auth_node = ET.SubElement(root, 'auth')
+    auth_node = ET.SubElement(configs[0], 'auth')
 for tag, value in (('disabled', 'yes'), ('remote_enrollment', 'no')):
     node = auth_node.find(tag)
     if node is None:
         node = ET.SubElement(auth_node, tag)
     node.text = value
-ET.indent(root, space='  ')
+ET.indent(document, space='  ')
 temporary = path.with_suffix('.conf.vvault-new')
-ET.ElementTree(root).write(temporary, encoding='utf-8', xml_declaration=True)
+serialized = '\n'.join(ET.tostring(node, encoding='unicode') for node in document)
+if xml_declaration:
+    serialized = f'{xml_declaration}\n{serialized}'
+temporary.write_text(f'{serialized}\n', encoding='utf-8')
 temporary.chmod(0o640)
 temporary.replace(path)
 PY

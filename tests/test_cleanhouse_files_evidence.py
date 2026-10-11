@@ -1,7 +1,9 @@
 import base64
 import hashlib
 import json
+import subprocess
 import urllib.error
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -149,6 +151,44 @@ def test_manager_installer_is_pinned_manager_only_and_keeps_api_on_loopback():
     assert "workflow_dispatch:" in workflow
     assert "branches:\n      - production" in workflow
     assert "VVAULT_DEPLOY_KEY" in workflow
+
+
+def test_manager_installer_updates_multi_root_wazuh_configuration():
+    script = (REPO_ROOT / "scripts" / "install-wazuh-manager.sh").read_text(encoding="utf-8")
+    configuration = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "ossec.conf"
+        path.write_text(
+            """<!-- preserved -->
+<ossec_config>
+  <global><jsonout_output>no</jsonout_output></global>
+</ossec_config>
+<ossec_config>
+  <auth><disabled>no</disabled></auth>
+</ossec_config>
+""",
+            encoding="utf-8",
+        )
+        configuration = configuration.replace(
+            "Path('/var/ossec/etc/ossec.conf')",
+            f"Path({str(path)!r})",
+            1,
+        )
+        subprocess.run(["python3", "-c", configuration], check=True)
+        updated = path.read_text(encoding="utf-8")
+
+    document = ET.fromstring(
+        f"<document>{updated}</document>",
+        parser=ET.XMLParser(target=ET.TreeBuilder(insert_comments=True, insert_pis=True)),
+    )
+    configs = [node for node in document if node.tag == "ossec_config"]
+    assert len(configs) == 2
+    assert configs[0].findtext("global/jsonout_output") == "yes"
+    assert configs[0].findtext("global/alerts_log") == "yes"
+    assert configs[1].findtext("auth/disabled") == "yes"
+    assert configs[1].findtext("auth/remote_enrollment") == "no"
+    assert "preserved" in updated
 
 
 def test_rotated_alert_stream_reports_gap_and_filters_agent_and_scope():
