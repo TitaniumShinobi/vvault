@@ -230,12 +230,14 @@ if [[ "${#existing[@]}" -eq 0 ]]; then
     python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["affected_items"][0]["id"])')"
 else
   user_id="${existing[0]}"
-  if [[ ! -r "${ENV_FILE}" ]]; then
-    echo "existing cleanhouse-ingest user has no recoverable root-owned VVAULT credential" >&2
-    exit 1
+  ingest_password=""
+  if [[ -r "${ENV_FILE}" ]]; then
+    ingest_password="$(sed -n 's/^VVAULT_WAZUH_MANAGER_PASSWORD=//p' "${ENV_FILE}" | tail -n 1)"
   fi
-  ingest_password="$(sed -n 's/^VVAULT_WAZUH_MANAGER_PASSWORD=//p' "${ENV_FILE}" | tail -n 1)"
-  [[ -n "${ingest_password}" ]]
+  if [[ -z "${ingest_password}" ]]; then
+    ingest_password="$(python3 -c 'import secrets; print("Ch1!" + secrets.token_urlsafe(32))')"
+    api_call PUT "/security/users/${user_id}" "{\"password\":\"${ingest_password}\"}" >/dev/null
+  fi
 fi
 policy_id="$(api_call GET '/security/policies?limit=500' | python3 -c \
   'import json,sys; print(next((str(x["id"]) for x in json.load(sys.stdin)["data"]["affected_items"] if x.get("name")=="cleanhouse-evidence"), ""))')"
