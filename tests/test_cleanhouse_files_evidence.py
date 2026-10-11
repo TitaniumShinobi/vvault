@@ -92,6 +92,36 @@ def test_manager_alert_feed_is_fim_only_and_replays_from_durable_cursor():
     assert [item["_id"] for item in second["items"]] == ["fim-2"]
 
 
+def test_manager_alert_feed_accepts_native_top_level_syscheck_payload():
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "alerts.json"
+        record = {
+            "id": "native-fim-1",
+            "timestamp": "2026-10-11T11:35:49Z",
+            "agent": {"id": "001", "name": "zen-001"},
+            "syscheck": {
+                "event": "added",
+                "path": "/Users/test/scope/smoke.txt",
+                "sha256_after": "a" * 64,
+            },
+        }
+        path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        result = evidence.read_wazuh_alerts(
+            alerts_path=path,
+            agent_id="001",
+            monitored_scope="/Users/test/scope",
+            manager_attestation={
+                "manager_active": True,
+                "api_authenticated": True,
+                "agent_id": "001",
+            },
+        )
+
+    assert [item["_id"] for item in result["items"]] == ["native-fim-1"]
+    assert result["items"][0]["_source"]["syscheck"]["event"] == "added"
+
+
 def test_manager_jwt_is_refreshed_once_after_401():
     calls = []
     evidence._WAZUH_TOKEN_CACHE.update({"token": "", "expires_at": 0.0})
