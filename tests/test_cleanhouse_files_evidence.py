@@ -168,6 +168,7 @@ def test_manager_installer_updates_multi_root_wazuh_configuration():
 </ossec_config>
 <ossec_config>
   <auth><disabled>no</disabled></auth>
+  <cluster><key></key></cluster>
 </ossec_config>
 """,
             encoding="utf-8",
@@ -193,6 +194,8 @@ def test_manager_installer_updates_multi_root_wazuh_configuration():
     assert "preserved" in updated
     assert "\n  </ossec_config>" not in updated
     assert updated.count("\n</ossec_config>") == 2
+    assert "<key></key>" in updated
+    assert "<key />" not in updated
 
 
 def test_rotated_alert_stream_reports_gap_and_filters_agent_and_scope():

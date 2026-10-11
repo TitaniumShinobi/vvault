@@ -121,7 +121,10 @@ for tag, value in (('disabled', 'yes'), ('remote_enrollment', 'no')):
 for config in configs:
     ET.indent(config, space='  ')
 temporary = path.with_suffix('.conf.vvault-new')
-serialized = '\n'.join(ET.tostring(node, encoding='unicode') for node in document)
+serialized = '\n'.join(
+    ET.tostring(node, encoding='unicode', short_empty_elements=False)
+    for node in document
+)
 if xml_declaration:
     serialized = f'{xml_declaration}\n{serialized}'
 temporary.write_text(f'{serialized}\n', encoding='utf-8')
