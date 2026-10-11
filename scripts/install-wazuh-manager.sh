@@ -330,5 +330,16 @@ if ss -ltn | grep -Eq '(^|[[:space:]])(0\.0\.0\.0|\[::\]):55000([[:space:]]|$)';
   echo "Wazuh API is exposed beyond loopback" >&2
   exit 1
 fi
-curl --fail --silent --show-error http://127.0.0.1:8000/api/ready >/dev/null
+vvault_ready=0
+for _ in $(seq 1 30); do
+  if curl --fail --silent --show-error http://127.0.0.1:8000/api/ready >/dev/null 2>&1; then
+    vvault_ready=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${vvault_ready}" -ne 1 ]]; then
+  echo "VVAULT did not become ready after Wazuh configuration" >&2
+  exit 1
+fi
 echo "manager-only Wazuh ${VERSION} installed and VVAULT restarted"

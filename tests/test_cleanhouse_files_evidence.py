@@ -161,6 +161,8 @@ def test_manager_installer_is_pinned_manager_only_and_keeps_api_on_loopback():
     assert "existing cleanhouse-ingest user has no recoverable" not in script
     assert script.index("iptables -I OUTPUT 1") < script.index("apt-get install")
     assert script.index("remove_api_guard", script.index("api_call PUT \"/security/users/${admin_user_id}")) < script.index("install -d -m 0750")
+    assert "for _ in $(seq 1 30)" in script
+    assert "VVAULT did not become ready after Wazuh configuration" in script
     assert "/bin/bash \"${PRIVATE_INSTALLER}\"" in wrapper
     installer_sha256 = hashlib.sha256(script.encode("utf-8")).hexdigest()
     assert f'EXPECTED_SHA256="{installer_sha256}"' in wrapper
