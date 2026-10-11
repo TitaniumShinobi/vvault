@@ -130,6 +130,8 @@ def test_manager_installer_is_pinned_manager_only_and_keeps_api_on_loopback():
     assert "wazuh-manager_4.14.7-1_amd64.deb" in script
     assert "f54a48683683fea476b133646c6a2ad884c3d61d0f7d85bf8b0602e127e0e14a6976fc5cf5962cc47de2794fdd0e2abe2f195de1d7a7b9c69da4b79c09a970f7" in script
     assert "host: ['127.0.0.1']" in script
+    assert "--resolve localhost:55000:127.0.0.1" in script
+    assert "https://127.0.0.1:55000" not in script
     assert "wazuh-indexer wazuh-dashboard filebeat" in script
     assert "docker-ce" not in script
     assert "apt-get install -y \"${stage}/${PACKAGE}\"" in script
@@ -189,6 +191,8 @@ def test_manager_installer_updates_multi_root_wazuh_configuration():
     assert configs[1].findtext("auth/disabled") == "yes"
     assert configs[1].findtext("auth/remote_enrollment") == "no"
     assert "preserved" in updated
+    assert "\n  </ossec_config>" not in updated
+    assert updated.count("\n</ossec_config>") == 2
 
 
 def test_rotated_alert_stream_reports_gap_and_filters_agent_and_scope():
