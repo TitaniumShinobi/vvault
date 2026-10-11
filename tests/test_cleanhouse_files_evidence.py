@@ -145,6 +145,14 @@ def test_manager_installer_is_pinned_manager_only_and_keeps_api_on_loopback():
     assert "iptables -I OUTPUT 1 -p tcp -d 127.0.0.1 --dport 55000" in script
     assert "ADMIN_CREDENTIALS_ROTATED=1" in script
     assert "systemctl stop wazuh-manager" in script
+    assert "less than 5 GiB is free under /var after bounded Wazuh recovery" in script
+    assert "-name 'vd_*.tar' -o -name 'vd_*.tar.xz'" in script
+    assert script.index("find /var/ossec/tmp -maxdepth 1") < script.index(
+        "less than 5 GiB is free under /var after bounded Wazuh recovery"
+    )
+    assert script.index('if [[ "${MANAGER_INSTALLED}" -eq 0 ]]') < script.index(
+        'curl --fail --silent --show-error --location'
+    )
     assert "chown root:wazuh /var/ossec/etc/ossec.conf" in script
     assert script.index("chown root:wazuh /var/ossec/etc/ossec.conf") < script.index(
         "systemctl enable --now wazuh-manager"
@@ -159,6 +167,7 @@ def test_manager_installer_is_pinned_manager_only_and_keeps_api_on_loopback():
     assert "workflow_dispatch:" in workflow
     assert "branches:\n      - production" in workflow
     assert "VVAULT_DEPLOY_KEY" in workflow
+    assert "dpkg-query -W -f='${Version}' wazuh-manager | grep -qx '4.14.7-1'" in workflow
 
 
 def test_manager_installer_updates_multi_root_wazuh_configuration():

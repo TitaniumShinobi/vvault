@@ -11,6 +11,7 @@ ADMIN_ENV_FILE="${VVAULT_WAZUH_ADMIN_ENV_FILE:-/etc/vvault/wazuh-admin.env}"
 AGENT_MANAGER="${VVAULT_WAZUH_AGENT_MANAGER:?VVAULT_WAZUH_AGENT_MANAGER is required}"
 API_GUARD_INSTALLED=0
 ADMIN_CREDENTIALS_ROTATED=0
+MANAGER_INSTALLED=0
 stage=""
 
 remove_api_guard() {
@@ -49,10 +50,6 @@ for forbidden in wazuh-indexer wazuh-dashboard filebeat; do
     exit 1
   fi
 done
-if [[ "$(df -Pk /var | awk 'NR==2 {print $4}')" -lt 5242880 ]]; then
-  echo "less than 5 GiB is free under /var" >&2
-  exit 1
-fi
 if ! id "${SERVICE_USER}" >/dev/null 2>&1; then
   echo "VVAULT service user does not exist: ${SERVICE_USER}" >&2
   exit 1
@@ -62,6 +59,19 @@ command -v iptables >/dev/null 2>&1 || {
   exit 1
 }
 
+if dpkg-query -W -f='${Version}' wazuh-manager 2>/dev/null | grep -qx "${VERSION}"; then
+  MANAGER_INSTALLED=1
+  systemctl stop wazuh-manager >/dev/null 2>&1 || true
+  if [[ -d /var/ossec/tmp && ! -L /var/ossec/tmp ]]; then
+    find /var/ossec/tmp -maxdepth 1 -type f \
+      \( -name 'vd_*.tar' -o -name 'vd_*.tar.xz' \) -delete
+  fi
+fi
+if [[ "$(df -Pk /var | awk 'NR==2 {print $4}')" -lt 5242880 ]]; then
+  echo "less than 5 GiB is free under /var after bounded Wazuh recovery" >&2
+  exit 1
+fi
+
 stage="$(mktemp -d /var/tmp/vvault-wazuh-manager.XXXXXX)"
 if ! iptables -C OUTPUT -p tcp -d 127.0.0.1 --dport 55000 \
   -m owner ! --uid-owner 0 -j REJECT >/dev/null 2>&1; then
@@ -69,14 +79,13 @@ if ! iptables -C OUTPUT -p tcp -d 127.0.0.1 --dport 55000 \
     -m owner ! --uid-owner 0 -j REJECT
   API_GUARD_INSTALLED=1
 fi
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-  --output "${stage}/${PACKAGE}" "${PACKAGE_URL}"
-echo "${PACKAGE_SHA512}  ${stage}/${PACKAGE}" | sha512sum --check --strict
-[[ "$(dpkg-deb -f "${stage}/${PACKAGE}" Package)" == "wazuh-manager" ]]
-[[ "$(dpkg-deb -f "${stage}/${PACKAGE}" Version)" == "${VERSION}" ]]
-[[ "$(dpkg-deb -f "${stage}/${PACKAGE}" Architecture)" == "amd64" ]]
-
-if ! dpkg-query -W -f='${Version}' wazuh-manager 2>/dev/null | grep -qx "${VERSION}"; then
+if [[ "${MANAGER_INSTALLED}" -eq 0 ]]; then
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --output "${stage}/${PACKAGE}" "${PACKAGE_URL}"
+  echo "${PACKAGE_SHA512}  ${stage}/${PACKAGE}" | sha512sum --check --strict
+  [[ "$(dpkg-deb -f "${stage}/${PACKAGE}" Package)" == "wazuh-manager" ]]
+  [[ "$(dpkg-deb -f "${stage}/${PACKAGE}" Version)" == "${VERSION}" ]]
+  [[ "$(dpkg-deb -f "${stage}/${PACKAGE}" Architecture)" == "amd64" ]]
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y "${stage}/${PACKAGE}"
 fi
