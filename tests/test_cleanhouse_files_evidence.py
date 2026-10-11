@@ -136,6 +136,13 @@ def test_manager_installer_is_pinned_manager_only_and_keeps_api_on_loopback():
     assert "sudo -n /bin/bash" not in workflow
     assert "sudo -n /usr/local/libexec/vvault-wazuh-manager-install" in workflow
     assert "deploy ALL=(root) NOPASSWD: VVAULT_WAZUH_MANAGER_INSTALL" in bootstrap
+    assert "bootstrap must run from a root-owned private copy" in bootstrap
+    assert "reviewed Wazuh deploy wrapper must be a root-owned private copy" in bootstrap
+    assert "iptables -I OUTPUT 1 -p tcp -d 127.0.0.1 --dport 55000" in script
+    assert "ADMIN_CREDENTIALS_ROTATED=1" in script
+    assert "systemctl stop wazuh-manager" in script
+    assert script.index("iptables -I OUTPUT 1") < script.index("apt-get install")
+    assert script.index("remove_api_guard", script.index("api_call PUT \"/security/users/${admin_user_id}")) < script.index("install -d -m 0750")
     assert "/bin/bash \"${PRIVATE_INSTALLER}\"" in wrapper
     installer_sha256 = hashlib.sha256(script.encode("utf-8")).hexdigest()
     assert f'EXPECTED_SHA256="{installer_sha256}"' in wrapper

@@ -9,6 +9,31 @@ SERVICE_USER="${VVAULT_SERVICE_USER:-vvault}"
 ENV_FILE="${VVAULT_WAZUH_ENV_FILE:-/etc/vvault/wazuh.env}"
 ADMIN_ENV_FILE="${VVAULT_WAZUH_ADMIN_ENV_FILE:-/etc/vvault/wazuh-admin.env}"
 AGENT_MANAGER="${VVAULT_WAZUH_AGENT_MANAGER:?VVAULT_WAZUH_AGENT_MANAGER is required}"
+API_GUARD_INSTALLED=0
+ADMIN_CREDENTIALS_ROTATED=0
+stage=""
+
+remove_api_guard() {
+  if [[ "${API_GUARD_INSTALLED}" -eq 1 ]]; then
+    iptables -D OUTPUT -p tcp -d 127.0.0.1 --dport 55000 \
+      -m owner ! --uid-owner 0 -j REJECT >/dev/null 2>&1 || true
+    API_GUARD_INSTALLED=0
+  fi
+}
+
+cleanup() {
+  local status="$?"
+  if [[ "${ADMIN_CREDENTIALS_ROTATED}" -ne 1 ]] && \
+     systemctl is-active --quiet wazuh-manager 2>/dev/null; then
+    systemctl stop wazuh-manager >/dev/null 2>&1 || true
+  fi
+  remove_api_guard
+  if [[ -n "${stage}" && "${stage}" == /var/tmp/vvault-wazuh-manager.* ]]; then
+    rm -rf -- "${stage}"
+  fi
+  return "${status}"
+}
+trap cleanup EXIT
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "manager installation requires root" >&2
@@ -32,9 +57,18 @@ if ! id "${SERVICE_USER}" >/dev/null 2>&1; then
   echo "VVAULT service user does not exist: ${SERVICE_USER}" >&2
   exit 1
 fi
+command -v iptables >/dev/null 2>&1 || {
+  echo "iptables is required to protect Wazuh API bootstrap" >&2
+  exit 1
+}
 
 stage="$(mktemp -d /var/tmp/vvault-wazuh-manager.XXXXXX)"
-trap 'rm -rf "${stage}"' EXIT
+if ! iptables -C OUTPUT -p tcp -d 127.0.0.1 --dport 55000 \
+  -m owner ! --uid-owner 0 -j REJECT >/dev/null 2>&1; then
+  iptables -I OUTPUT 1 -p tcp -d 127.0.0.1 --dport 55000 \
+    -m owner ! --uid-owner 0 -j REJECT
+  API_GUARD_INSTALLED=1
+fi
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
   --output "${stage}/${PACKAGE}" "${PACKAGE_URL}"
 echo "${PACKAGE_SHA512}  ${stage}/${PACKAGE}" | sha512sum --check --strict
@@ -132,7 +166,9 @@ PY
 }
 
 bootstrap_curl_config="${stage}/bootstrap.curl"
-if ! bootstrap_token="$(authenticate "${admin_user}" "${admin_password}" "${bootstrap_curl_config}")"; then
+if bootstrap_token="$(authenticate "${admin_user}" "${admin_password}" "${bootstrap_curl_config}")"; then
+  ADMIN_CREDENTIALS_ROTATED=1
+else
   bootstrap_token="$(authenticate wazuh wazuh "${bootstrap_curl_config}")" || {
     echo "Wazuh API administrator authentication failed" >&2
     exit 1
@@ -210,6 +246,8 @@ admin_user_id="$(printf '%s' "${users_payload}" | ADMIN_USER="${admin_user}" pyt
 }
 api_call PUT "/security/users/${wui_user_id}" "{\"password\":\"${wui_password}\"}" >/dev/null
 api_call PUT "/security/users/${admin_user_id}" "{\"password\":\"${admin_password}\"}" >/dev/null
+ADMIN_CREDENTIALS_ROTATED=1
+remove_api_guard
 
 install -d -m 0750 -o root -g "${SERVICE_USER}" "$(dirname "${ENV_FILE}")"
 umask 027
