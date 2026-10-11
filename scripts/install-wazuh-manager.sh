@@ -118,7 +118,8 @@ for tag, value in (('disabled', 'yes'), ('remote_enrollment', 'no')):
     if node is None:
         node = ET.SubElement(auth_node, tag)
     node.text = value
-ET.indent(document, space='  ')
+for config in configs:
+    ET.indent(config, space='  ')
 temporary = path.with_suffix('.conf.vvault-new')
 serialized = '\n'.join(ET.tostring(node, encoding='unicode') for node in document)
 if xml_declaration:
@@ -178,8 +179,9 @@ Path(sys.argv[1]).write_text(f'header = "Authorization: Basic {encoded}"\n', enc
 PY
   chmod 0600 "${curl_config}"
   curl --fail --silent --show-error --cacert /var/ossec/api/configuration/ssl/server.crt \
+    --resolve localhost:55000:127.0.0.1 \
     --config "${curl_config}" \
-    --request POST https://127.0.0.1:55000/security/user/authenticate | \
+    --request POST https://localhost:55000/security/user/authenticate | \
     python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["token"])'
 }
 
@@ -203,13 +205,15 @@ api_call() {
     printf '%s' "${body}" > "${body_file}"
     chmod 0600 "${body_file}"
     curl --fail --silent --show-error --cacert /var/ossec/api/configuration/ssl/server.crt \
+      --resolve localhost:55000:127.0.0.1 \
       --config "${api_curl_config}" -H 'Content-Type: application/json' \
-      -X "${method}" --data-binary "@${body_file}" "https://127.0.0.1:55000${path}"
+      -X "${method}" --data-binary "@${body_file}" "https://localhost:55000${path}"
     rm -f -- "${body_file}"
   else
     curl --fail --silent --show-error --cacert /var/ossec/api/configuration/ssl/server.crt \
+      --resolve localhost:55000:127.0.0.1 \
       --config "${api_curl_config}" -X "${method}" \
-      "https://127.0.0.1:55000${path}"
+      "https://localhost:55000${path}"
   fi
 }
 
@@ -270,7 +274,7 @@ remove_api_guard
 install -d -m 0750 -o root -g "${SERVICE_USER}" "$(dirname "${ENV_FILE}")"
 umask 027
 {
-  printf 'VVAULT_WAZUH_MANAGER_API_URL=https://127.0.0.1:55000\n'
+  printf 'VVAULT_WAZUH_MANAGER_API_URL=https://localhost:55000\n'
   printf 'VVAULT_WAZUH_MANAGER_CA_CERT=/var/ossec/api/configuration/ssl/server.crt\n'
   printf 'VVAULT_WAZUH_MANAGER_USERNAME=cleanhouse-ingest\n'
   printf 'VVAULT_WAZUH_MANAGER_PASSWORD=%s\n' "${ingest_password}"
