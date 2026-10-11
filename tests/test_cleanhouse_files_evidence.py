@@ -154,6 +154,9 @@ def test_manager_installer_is_pinned_manager_only_and_keeps_api_on_loopback():
         'curl --fail --silent --show-error --location'
     )
     assert "chown root:wazuh /var/ossec/etc/ossec.conf" in script
+    assert 'VVAULT_CA_FILE="${VVAULT_WAZUH_CA_FILE:-/etc/vvault/wazuh-manager-ca.crt}"' in script
+    assert 'install -o root -g "${SERVICE_USER}" -m 0640' in script
+    assert "VVAULT_WAZUH_MANAGER_CA_CERT=%s" in script
     assert script.index("chown root:wazuh /var/ossec/etc/ossec.conf") < script.index(
         "systemctl enable --now wazuh-manager"
     )

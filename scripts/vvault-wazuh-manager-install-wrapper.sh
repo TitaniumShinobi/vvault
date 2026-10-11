@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 STAGE_DIR="/var/tmp/vvault-wazuh-manager-deploy"
 INSTALLER="${STAGE_DIR}/scripts/install-wazuh-manager.sh"
-EXPECTED_SHA256="9534d0830a9828aee30b02a21402af7c5a6e891d35c5696eb27322860d22122c"
+EXPECTED_SHA256="dd7e08b2b0f017b75882ed59d5cf1b7513be58d28c65183ea973c6175528d82a"
 LOCK_FILE="/run/lock/vvault-wazuh-manager-install.lock"
 PRIVATE_INSTALLER=""
 
