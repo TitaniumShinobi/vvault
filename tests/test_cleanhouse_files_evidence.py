@@ -211,7 +211,7 @@ def test_manager_installer_updates_multi_root_wazuh_configuration():
     assert len(configs) == 2
     assert configs[0].findtext("global/jsonout_output") == "yes"
     assert configs[0].findtext("global/alerts_log") == "yes"
-    assert configs[1].findtext("auth/disabled") == "yes"
+    assert configs[1].findtext("auth/disabled") == "no"
     assert configs[1].findtext("auth/remote_enrollment") == "no"
     assert configs[0].findtext("vulnerability-detection/enabled") == "no"
     assert configs[0].findtext("vulnerability-detection/index-status") == "no"

@@ -124,7 +124,10 @@ for tag, value in (('jsonout_output', 'yes'), ('alerts_log', 'yes')):
 auth_node = next((node.find('auth') for node in configs if node.find('auth') is not None), None)
 if auth_node is None:
     auth_node = ET.SubElement(configs[0], 'auth')
-for tag, value in (('disabled', 'yes'), ('remote_enrollment', 'no')):
+# The manager API delegates agent creation/key retrieval to wazuh-authd.
+# Keep authd available locally while remote enrollment remains disabled; the
+# DigitalOcean firewall continues to expose agent traffic on 1514 only.
+for tag, value in (('disabled', 'no'), ('remote_enrollment', 'no')):
     node = auth_node.find(tag)
     if node is None:
         node = ET.SubElement(auth_node, tag)
