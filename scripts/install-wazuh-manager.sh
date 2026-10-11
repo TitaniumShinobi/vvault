@@ -131,6 +131,8 @@ temporary.write_text(f'{serialized}\n', encoding='utf-8')
 temporary.chmod(0o640)
 temporary.replace(path)
 PY
+chown root:wazuh /var/ossec/etc/ossec.conf
+chmod 0640 /var/ossec/etc/ossec.conf
 
 api_yaml="/var/ossec/api/configuration/api.yaml"
 if grep -Eq '^[[:space:]]*host:' "${api_yaml}"; then
