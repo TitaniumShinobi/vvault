@@ -116,6 +116,28 @@ def test_manager_jwt_is_refreshed_once_after_401():
     assert calls[-1][2] == "Bearer fresh"
 
 
+def test_manager_attestation_requires_connected_agent_for_evidence_routes():
+    def transport(request):
+        if request.full_url.endswith("/manager/status"):
+            return {"data": {"affected_items": [{"wazuh-remoted": "running"}]}}
+        if "/agents?" in request.full_url:
+            return {"data": {"affected_items": [{
+                "id": "001", "name": "zen-001", "status": "never_connected",
+            }]}}
+        if request.full_url.endswith("/manager/info"):
+            return {"data": {"affected_items": [{"name": "manager", "version": "v4.14.7"}]}}
+        raise AssertionError(request.full_url)
+
+    with pytest.raises(evidence.WazuhEvidenceUnavailable, match="not connected"):
+        evidence.manager_attestation(agent_id="001", transport=transport)
+
+    attestation = evidence.manager_attestation(
+        agent_id="001", require_connected=False, transport=transport
+    )
+    assert attestation["agent_status"] == "never_connected"
+    assert attestation["agent_connected"] is False
+
+
 def test_manager_installer_is_pinned_manager_only_and_keeps_api_on_loopback():
     script = (REPO_ROOT / "scripts" / "install-wazuh-manager.sh").read_text(encoding="utf-8")
     wrapper = (REPO_ROOT / "scripts" / "vvault-wazuh-manager-install-wrapper.sh").read_text(
