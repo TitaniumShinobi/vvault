@@ -149,6 +149,8 @@ def test_manager_installer_is_pinned_manager_only_and_keeps_api_on_loopback():
     assert script.index("chown root:wazuh /var/ossec/etc/ossec.conf") < script.index(
         "systemctl enable --now wazuh-manager"
     )
+    assert 'api_call PUT "/security/users/${user_id}"' in script
+    assert "existing cleanhouse-ingest user has no recoverable" not in script
     assert script.index("iptables -I OUTPUT 1") < script.index("apt-get install")
     assert script.index("remove_api_guard", script.index("api_call PUT \"/security/users/${admin_user_id}")) < script.index("install -d -m 0750")
     assert "/bin/bash \"${PRIVATE_INSTALLER}\"" in wrapper
