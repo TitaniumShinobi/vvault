@@ -361,7 +361,15 @@ def read_wazuh_alerts(
                 if not isinstance(source, dict):
                     continue
                 data = source.get("data") if isinstance(source.get("data"), dict) else {}
-                syscheck = data.get("syscheck") if isinstance(data.get("syscheck"), dict) else {}
+                # Manager-local ``alerts.json`` stores FIM evidence as a
+                # top-level ``syscheck`` object. Indexed documents may wrap
+                # the same object under ``data.syscheck``. Accept both while
+                # preserving the original payload for provenance.
+                syscheck = (
+                    data.get("syscheck")
+                    if isinstance(data.get("syscheck"), dict)
+                    else (source.get("syscheck") if isinstance(source.get("syscheck"), dict) else {})
+                )
                 path_value = str(syscheck.get("path") or syscheck.get("file") or "").strip()
                 source_agent = source.get("agent") if isinstance(source.get("agent"), dict) else {}
                 if (
