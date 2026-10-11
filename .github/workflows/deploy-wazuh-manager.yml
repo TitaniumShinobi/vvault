@@ -29,7 +29,11 @@ jobs:
           script: |
             set -eu
             test "$(dpkg --print-architecture)" = amd64
-            test "$(df -Pk /var | awk 'NR==2 {print $4}')" -ge 5242880
+            if test "$(df -Pk /var | awk 'NR==2 {print $4}')" -lt 5242880; then
+              dpkg-query -W -f='${Version}' wazuh-manager | grep -qx '4.14.7-1'
+              test -d /var/ossec/tmp
+              test ! -L /var/ossec/tmp
+            fi
             id vvault >/dev/null
             systemctl is-active vvault-backend.service >/dev/null
             test -x /usr/local/libexec/vvault-wazuh-manager-install
