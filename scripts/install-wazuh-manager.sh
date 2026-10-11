@@ -8,6 +8,7 @@ PACKAGE_SHA512="f54a48683683fea476b133646c6a2ad884c3d61d0f7d85bf8b0602e127e0e14a
 SERVICE_USER="${VVAULT_SERVICE_USER:-vvault}"
 ENV_FILE="${VVAULT_WAZUH_ENV_FILE:-/etc/vvault/wazuh.env}"
 ADMIN_ENV_FILE="${VVAULT_WAZUH_ADMIN_ENV_FILE:-/etc/vvault/wazuh-admin.env}"
+VVAULT_CA_FILE="${VVAULT_WAZUH_CA_FILE:-/etc/vvault/wazuh-manager-ca.crt}"
 AGENT_MANAGER="${VVAULT_WAZUH_AGENT_MANAGER:?VVAULT_WAZUH_AGENT_MANAGER is required}"
 API_GUARD_INSTALLED=0
 ADMIN_CREDENTIALS_ROTATED=0
@@ -305,10 +306,12 @@ ADMIN_CREDENTIALS_ROTATED=1
 remove_api_guard
 
 install -d -m 0750 -o root -g "${SERVICE_USER}" "$(dirname "${ENV_FILE}")"
+install -o root -g "${SERVICE_USER}" -m 0640 \
+  /var/ossec/api/configuration/ssl/server.crt "${VVAULT_CA_FILE}"
 umask 027
 {
   printf 'VVAULT_WAZUH_MANAGER_API_URL=https://localhost:55000\n'
-  printf 'VVAULT_WAZUH_MANAGER_CA_CERT=/var/ossec/api/configuration/ssl/server.crt\n'
+  printf 'VVAULT_WAZUH_MANAGER_CA_CERT=%s\n' "${VVAULT_CA_FILE}"
   printf 'VVAULT_WAZUH_MANAGER_USERNAME=cleanhouse-ingest\n'
   printf 'VVAULT_WAZUH_MANAGER_PASSWORD=%s\n' "${ingest_password}"
   printf 'VVAULT_WAZUH_AGENT_MANAGER=%s\n' "${AGENT_MANAGER}"
