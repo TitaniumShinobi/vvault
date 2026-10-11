@@ -171,6 +171,8 @@ def test_manager_installer_updates_multi_root_wazuh_configuration():
             """<!-- preserved -->
 <ossec_config>
   <global><jsonout_output>no</jsonout_output></global>
+  <vulnerability-detection><enabled>yes</enabled><index-status>yes</index-status></vulnerability-detection>
+  <indexer><enabled>yes</enabled></indexer>
 </ossec_config>
 <ossec_config>
   <auth><disabled>no</disabled></auth>
@@ -197,6 +199,9 @@ def test_manager_installer_updates_multi_root_wazuh_configuration():
     assert configs[0].findtext("global/alerts_log") == "yes"
     assert configs[1].findtext("auth/disabled") == "yes"
     assert configs[1].findtext("auth/remote_enrollment") == "no"
+    assert configs[0].findtext("vulnerability-detection/enabled") == "no"
+    assert configs[0].findtext("vulnerability-detection/index-status") == "no"
+    assert configs[0].findtext("indexer/enabled") == "no"
     assert "preserved" in updated
     assert "\n  </ossec_config>" not in updated
     assert updated.count("\n</ossec_config>") == 2

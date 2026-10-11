@@ -80,6 +80,7 @@ if ! dpkg-query -W -f='${Version}' wazuh-manager 2>/dev/null | grep -qx "${VERSI
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y "${stage}/${PACKAGE}"
 fi
+systemctl stop wazuh-manager >/dev/null 2>&1 || true
 
 python3 - <<'PY'
 from pathlib import Path
@@ -118,6 +119,20 @@ for tag, value in (('disabled', 'yes'), ('remote_enrollment', 'no')):
     if node is None:
         node = ET.SubElement(auth_node, tag)
     node.text = value
+vulnerability_node = next(
+    (node.find('vulnerability-detection') for node in configs if node.find('vulnerability-detection') is not None),
+    None,
+)
+if vulnerability_node is not None:
+    for tag in ('enabled', 'index-status'):
+        node = vulnerability_node.find(tag)
+        if node is not None:
+            node.text = 'no'
+indexer_node = next((node.find('indexer') for node in configs if node.find('indexer') is not None), None)
+if indexer_node is not None:
+    node = indexer_node.find('enabled')
+    if node is not None:
+        node.text = 'no'
 for config in configs:
     ET.indent(config, space='  ')
 temporary = path.with_suffix('.conf.vvault-new')
@@ -133,6 +148,8 @@ temporary.replace(path)
 PY
 chown root:wazuh /var/ossec/etc/ossec.conf
 chmod 0640 /var/ossec/etc/ossec.conf
+find /var/ossec/tmp -maxdepth 1 -type f \
+  \( -name 'vd_*.tar' -o -name 'vd_*.tar.xz' \) -delete
 
 api_yaml="/var/ossec/api/configuration/api.yaml"
 if grep -Eq '^[[:space:]]*host:' "${api_yaml}"; then
