@@ -590,7 +590,7 @@ def list_constructs_for_vvault_workspace(user_id: str) -> BodyResult:
                        created_at,
                        updated_at
                 FROM vault_files
-                WHERE user_id = %s
+                WHERE user_id=%s
                   AND drive_trashed_at IS NULL
                   AND construct_id IS NOT NULL
                   AND btrim(construct_id) <> ''

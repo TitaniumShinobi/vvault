@@ -12,7 +12,7 @@ def test_workspace_projection_avoids_generic_query_canceled_path(monkeypatch):
         observed_scopes.append(lane)
         assert params == ("owner",)
         assert "SELECT construct_id" in sql
-        assert "user_id = %s" in sql
+        assert "WHERE user_id=%s" in sql
         assert "projectionExcluded" in sql
         assert "regexp_match" not in sql
         return [
