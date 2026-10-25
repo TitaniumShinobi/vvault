@@ -17,9 +17,11 @@ and systemd inspection.
 - Verified live Git SHA: `f0dad3d71638096e348f9873800c6ec635531c1c`.
 - Live release size: `339,332,317` bytes.
 - Published frontend size: `28,471,273` bytes.
-- Minimum simultaneous activation requirement: `367,803,590` bytes
+- Release source-byte projection: `339,358,470` bytes (the live release plus
+  the exact `26,153`-byte net source delta in this candidate).
+- Minimum simultaneous activation requirement: `367,829,743` bytes
   (one new immutable release plus one frontend rollback copy).
-- Capacity remaining after that minimum: `1,576,198,970` bytes.
+- Capacity remaining after that minimum: `1,576,172,817` bytes.
 - Deployment unit: `vvault-deploy.service`, last recorded result `success`.
 - Deployment executable: `/usr/local/libexec/vvault-immutable-deploy`.
 
