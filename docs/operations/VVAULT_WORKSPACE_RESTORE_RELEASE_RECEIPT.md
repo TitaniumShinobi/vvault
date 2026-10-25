@@ -28,6 +28,38 @@ and systemd inspection.
 No deletion or storage purchase is required for this bounded release. The
 remaining headroom is not permission to retain additional releases indefinitely.
 
+The canonical deploy capacity gate is stricter than the release's immediate
+copy requirement: it requires the greater of 5 GiB or 15% of the root
+filesystem. For this host that is `5,368,709,120` bytes. The captured root free
+space is short by `3,424,706,560` bytes, so activation is blocked even though
+the new release itself fits.
+
+An existing ext4 volume is mounted at `/mnt/vvault_runtime_storage` from
+`/dev/sda`: `106,330,775,552` bytes total and `90,568,306,688` available.
+Immutable releases and deployment backups currently consume approximately
+`6,802,395,136` and `2,417,938,432` allocated bytes on root. The reviewed
+`vvault-capacity-relocate.sh` plan copies both trees to the existing volume,
+keeps a second byte-preserving original there for rollback, verifies them with
+checksum-mode `rsync`, and bind-mounts them back at the unchanged paths. It
+requires about `18,440,667,136` bytes on the volume and projects root free space
+above 11 GiB without deleting a release, backup, or data record.
+
+The relocation remains a separate, explicitly authorized maintenance action:
+
+```sh
+sudo scripts/deployment/vvault-capacity-relocate.sh preflight
+sudo scripts/deployment/vvault-capacity-relocate.sh apply
+# Only if relocation itself must be reversed:
+sudo scripts/deployment/vvault-capacity-relocate.sh rollback
+```
+
+The apply path takes the immutable deployment lock, performs a live copy, stops
+only the VVAULT backend for the final delta and mount switch, preserves original
+trees on the volume, installs persistent bind entries, reruns the canonical
+capacity calculation, restarts the backend, and requires readiness. Its error
+trap restores the rootfs paths and service. Deployment must not proceed until
+the post-relocation capacity gate reports PASS.
+
 ## SHA-pinned activation chain
 
 The release SHA is supplied by the final PM receipt and must be the exact
@@ -92,3 +124,33 @@ an actual canonical file read, the authenticated Chatty construct-files path,
 and 403/404 denial for the authorized second account. It rejects a root response
 containing `QueryCanceled` and requires root projection in at most 4.5 seconds.
 It reports a hash receipt rather than file contents or owner identifiers.
+
+## Monitoring integration
+
+Read-only inspection on `2026-10-25T23:40:32Z` found no VVAULT workspace health
+timer, service, or cron entry. Existing deployment and Wazuh workflows check
+`/api/ready`; that does not establish authenticated workspace functionality.
+
+This release therefore includes `vvault-workspace-monitor.service` and its
+five-minute timer. They run the same authenticated product gate as user
+`vvault`. Before enabling them, an authorized operator must provision
+`/etc/vvault/workspace-monitor.env` mode `0600`, root-owned, pointing at two
+user-authorized cookie jars under `/var/lib/vvault-monitor` readable only by
+the `vvault` service account. Then install and start the schedule:
+
+```sh
+sudo install -o root -g root -m 0644 \
+  scripts/deployment/systemd/vvault-workspace-monitor.service \
+  /etc/systemd/system/vvault-workspace-monitor.service
+sudo install -o root -g root -m 0644 \
+  scripts/deployment/systemd/vvault-workspace-monitor.timer \
+  /etc/systemd/system/vvault-workspace-monitor.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now vvault-workspace-monitor.timer
+sudo systemctl start vvault-workspace-monitor.service
+```
+
+Expired or revoked user ceremonies must fail the monitor rather than silently
+fall back to readiness. Until those two user-controlled sessions are
+provisioned, continuous authenticated monitoring remains NOT_VERIFIED and the
+manual post-activation gate remains mandatory.

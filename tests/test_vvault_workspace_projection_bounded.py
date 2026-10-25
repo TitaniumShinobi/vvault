@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from vvault.server import chatty_body_service, relying_party_scope
 
 
@@ -108,3 +110,19 @@ def test_workspace_projection_fails_closed_and_restores_scope(monkeypatch):
     assert result.http_status != 200
     assert "QueryCanceled" in result.payload["reason"]
     assert relying_party_scope.current_relying_party_id() == "vvault"
+
+
+def test_rollback_verifies_current_and_previous_release_git_heads():
+    source = Path("scripts/deployment/vvault-immutable-rollback.sh").read_text()
+    assert 'git -c safe.directory="$current_path" -C "$current_path" rev-parse HEAD' in source
+    assert '== "$expected_current"' in source
+    assert 'git -c safe.directory="$previous_path" -C "$previous_path" rev-parse HEAD' in source
+    assert '== "$previous"' in source
+
+
+def test_live_gate_checks_chatty_and_second_account_workspace_paths():
+    source = Path("scripts/deployment/vvault-workspace-live-gate.sh").read_text()
+    assert "/api/chatty/constructs" in source
+    assert "/api/chatty/construct/$VVAULT_CONSTRUCT_ID/files" in source
+    assert 'VVAULT_SECONDARY_COOKIE_JAR" "$tmp_dir/secondary-root.json' in source
+    assert "second-account isolation failed" in source

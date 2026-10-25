@@ -26,6 +26,11 @@ flock -n 9 || { echo "VVAULT deployment lock is busy" >&2; exit 75; }
   echo "live release does not match --expected-current" >&2
   exit 65
 }
+[[ -d "$current_path" ]] || { echo "current release is absent" >&2; exit 65; }
+[[ "$(git -c safe.directory="$current_path" -C "$current_path" rev-parse HEAD)" == "$expected_current" ]] || {
+  echo "current release SHA mismatch" >&2
+  exit 65
+}
 [[ -d "$previous_path" ]] || { echo "previous release is absent" >&2; exit 66; }
 [[ "$(git -c safe.directory="$previous_path" -C "$previous_path" rev-parse HEAD)" == "$previous" ]] || {
   echo "previous release SHA mismatch" >&2

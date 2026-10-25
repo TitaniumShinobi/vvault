@@ -73,10 +73,30 @@ PY
 
 request "$VVAULT_PRIMARY_COOKIE_JAR" "$tmp_dir/chatty.json" \
   "$VVAULT_BASE_URL/api/chatty/construct/$VVAULT_CONSTRUCT_ID/files"
-python3 - "$tmp_dir/chatty.json" <<'PY'
+request "$VVAULT_PRIMARY_COOKIE_JAR" "$tmp_dir/chatty-constructs.json" \
+  "$VVAULT_BASE_URL/api/chatty/constructs"
+python3 - "$tmp_dir/chatty.json" "$tmp_dir/chatty-constructs.json" "$VVAULT_CONSTRUCT_ID" <<'PY'
+import json, sys
+files = json.load(open(sys.argv[1]))
+constructs = json.load(open(sys.argv[2]))
+construct_id = sys.argv[3]
+assert files.get("success") is not False
+assert "QueryCanceled" not in json.dumps(files, sort_keys=True)
+items = constructs.get("constructs") or constructs.get("data") or []
+assert any((item.get("callsign") or item.get("construct_id")) == construct_id for item in items)
+assert "QueryCanceled" not in json.dumps(constructs, sort_keys=True)
+PY
+
+request "$VVAULT_SECONDARY_COOKIE_JAR" "$tmp_dir/secondary-root.json" \
+  "$VVAULT_BASE_URL/api/vault/drive/workspace-root"
+python3 - "$tmp_dir/secondary-root.json" "$VVAULT_CONSTRUCT_ID" <<'PY'
 import json, sys
 p = json.load(open(sys.argv[1]))
-assert p.get("success") is not False
+assert p.get("success") is True and p.get("canonical") is True
+construct_id = sys.argv[2]
+instances = next(node for node in p["children"] if node.get("name") == "instances")
+assert not any(node.get("constructId") == construct_id for node in instances.get("childrenPreview", []))
+assert "QueryCanceled" not in json.dumps(p, sort_keys=True)
 PY
 
 secondary_status="$(curl --silent --show-error --max-time 15 \
