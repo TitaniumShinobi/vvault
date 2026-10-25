@@ -12,6 +12,13 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from vvault.server.construct_taxonomy import (
+    HIDDEN_SELECTOR_CONSTRUCTS,
+    WITHHELD_CONSTRUCTS,
+    canonical_category,
+)
+from vvault.server.projection_classification import PROJECTABLE_METADATA_SQL
+
 CONTENT_MISSING_FIELDS = [
     "vault_files.content",
     "vault_files.construct_id",
@@ -566,42 +573,91 @@ def list_constructs_for_vvault_workspace(user_id: str) -> BodyResult:
         for lane in ("chatty", "chatty-cli", "vvault"):
             set_relying_party_id(lane)
             rows = _rows(
-                """
-                SELECT id, filename, object_key, storage_path, construct_id,
-                       metadata, created_at
+                f"""
+                SELECT construct_id,
+                       filename,
+                       storage_path,
+                       metadata,
+                       CASE
+                           WHEN lower(coalesce(nullif(filename, ''), storage_path, '')) =
+                                'instances/' || lower(construct_id) || '/identity/prompt.json'
+                             OR lower(coalesce(nullif(filename, ''), storage_path, '')) =
+                                'instances/' || lower(construct_id) || '/config/metadata.json'
+                           THEN left(content, 4096)
+                           ELSE NULL
+                       END AS content,
+                       is_system,
+                       created_at,
+                       updated_at
                 FROM vault_files
-                WHERE user_id=%s
-                  AND (
-                    nullif(btrim(coalesce(construct_id, '')), '') IS NOT NULL
-                    OR lower(
-                        coalesce(storage_path, '') || ' ' ||
-                        coalesce(object_key, '') || ' ' ||
-                        coalesce(filename, '')
-                    ) LIKE %s
+                WHERE user_id = %s
+                  AND drive_trashed_at IS NULL
+                  AND construct_id IS NOT NULL
+                  AND btrim(construct_id) <> ''
+                  AND {PROJECTABLE_METADATA_SQL}
+                  AND lower(coalesce(nullif(filename, ''), storage_path, '')) IN (
+                      'instances/' || lower(construct_id) || '/config/metadata.json',
+                      'instances/' || lower(construct_id) || '/identity/prompt.json',
+                      'instances/' || lower(construct_id) || '/identity/avatar.png',
+                      'instances/' || lower(construct_id) || '/identity/avatar.jpg',
+                      'instances/' || lower(construct_id) || '/identity/avatar.jpeg',
+                      'instances/' || lower(construct_id) || '/identity/avatar.webp',
+                      'instances/' || lower(construct_id) || '/identity/avatar.gif',
+                      'instances/' || lower(construct_id) || '/identity/avatar.avif'
                   )
-                ORDER BY created_at ASC
+                ORDER BY construct_id,
+                         coalesce(updated_at, created_at) DESC,
+                         id DESC
                 """,
-                (owner_id, "%instances/%"),
+                (owner_id,),
             )
             seen: dict[str, dict[str, Any]] = {}
             for row in rows:
-                callsign = _construct_from_file(row)
-                if not callsign:
+                callsign = normalize_callsign(str(row.get("construct_id") or ""))
+                if (
+                    not callsign
+                    or callsign in WITHHELD_CONSTRUCTS
+                    or callsign in HIDDEN_SELECTOR_CONSTRUCTS
+                    or (
+                        row.get("is_system") is True
+                        and canonical_category(callsign) != "system"
+                    )
+                ):
                     continue
-                created = row.get("created_at")
-                created_text = created.isoformat() if hasattr(created, "isoformat") else created
-                current = seen.get(callsign)
-                if current and (current.get("created_at") or "") >= (created_text or ""):
-                    continue
-                seen[callsign] = {
+                current = seen.setdefault(
+                    callsign,
+                    {"prompt_name": None, "metadata_name": None},
+                )
+                path = str(row.get("storage_path") or row.get("filename") or "").lower()
+                content = _jsonish(row.get("content"), {}) or {}
+                if not isinstance(content, dict):
+                    content = {}
+                if path.endswith("/identity/prompt.json") and not current["prompt_name"]:
+                    current["prompt_name"] = _first_text(
+                        [content.get("displayName"), content.get("display_name"), content.get("name")]
+                    )
+                elif path.endswith("/config/metadata.json") and not current["metadata_name"]:
+                    current["metadata_name"] = _first_text(
+                        [
+                            content.get("display_name"),
+                            content.get("displayName"),
+                            content.get("instance_name"),
+                            content.get("name"),
+                        ]
+                    )
+            for callsign, names in seen.items():
+                authored_display_name = (
+                    names.get("prompt_name")
+                    or names.get("metadata_name")
+                    or display_name(callsign)
+                )
+                constructs.append({
                     "construct_id": callsign,
                     "callsign": callsign,
-                    "name": display_name(callsign),
-                    "displayName": display_name(callsign),
-                    "created_at": created_text,
+                    "name": authored_display_name,
+                    "displayName": authored_display_name,
                     "sourceRelyingPartyId": lane,
-                }
-            constructs.extend(seen.values())
+                })
     except Exception as exc:
         return _blocked(
             route,
