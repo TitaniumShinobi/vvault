@@ -17,11 +17,13 @@ and systemd inspection.
 - Verified live Git SHA: `f0dad3d71638096e348f9873800c6ec635531c1c`.
 - Live release size: `339,332,317` bytes.
 - Published frontend size: `28,471,273` bytes.
-- Release source-byte projection: `339,358,470` bytes (the live release plus
-  the exact `26,153`-byte net source delta in this candidate).
-- Minimum simultaneous activation requirement: `367,829,743` bytes
-  (one new immutable release plus one frontend rollback copy).
-- Capacity remaining after that minimum: `1,576,172,817` bytes.
+- Final candidate manifest: 10 files across runtime, focused verification,
+  relocation, rollback, live monitoring, systemd scheduling, and this receipt.
+- Exact final Git blob delta from the live base: `000039629` bytes.
+- Immutable release byte projection: `339371946` bytes (the measured live
+  release plus the exact Git blob delta; dependencies/build inputs are unchanged).
+- Minimum simultaneous activation projection: `367843219` bytes (the projected
+  immutable release plus one measured frontend rollback copy).
 - Deployment unit: `vvault-deploy.service`, last recorded result `success`.
 - Deployment executable: `/usr/local/libexec/vvault-immutable-deploy`.
 
@@ -36,6 +38,12 @@ the new release itself fits.
 
 An existing ext4 volume is mounted at `/mnt/vvault_runtime_storage` from
 `/dev/sda`: `106,330,775,552` bytes total and `90,568,306,688` available.
+Read-only verification at `2026-10-25T23:44:23Z` established that the mount is
+persistently defined in `/etc/fstab` by stable device ID
+`/dev/disk/by-id/scsi-0DO_Volume_vvault-runtime-storage`, its generated systemd
+mount unit is both `enabled` and `active`, the device ID resolves to `/dev/sda`,
+and the active filesystem is ext4 with `rw,noatime,discard`. No new mount
+prerequisite is required.
 Immutable releases and deployment backups currently consume approximately
 `6,802,395,136` and `2,417,938,432` allocated bytes on root. The reviewed
 `vvault-capacity-relocate.sh` plan copies both trees to the existing volume,
@@ -66,17 +74,23 @@ The release SHA is supplied by the final PM receipt and must be the exact
 40-character commit tested and independently accepted. Before activation:
 
 ```sh
+BASE_SHA='f0dad3d71638096e348f9873800c6ec635531c1c'
 RELEASE_SHA='<accepted 40-character release SHA>'
 test "$(git rev-parse "$RELEASE_SHA^{commit}")" = "$RELEASE_SHA"
-test "$(git rev-parse "$RELEASE_SHA^")" = 'f0dad3d71638096e348f9873800c6ec635531c1c'
-git diff --quiet f0dad3d71638096e348f9873800c6ec635531c1c "$RELEASE_SHA" -- . \
-  ':!vvault/server/chatty_body_service.py' \
-  ':!vvault/server/construct_taxonomy.py' \
-  ':!vvault/server/projection_classification.py' \
-  ':!tests/test_vvault_workspace_projection_bounded.py' \
-  ':!scripts/deployment/vvault-workspace-live-gate.sh' \
-  ':!scripts/deployment/vvault-immutable-rollback.sh' \
-  ':!docs/operations/VVAULT_WORKSPACE_RESTORE_RELEASE_RECEIPT.md'
+test "$(git merge-base "$BASE_SHA" "$RELEASE_SHA")" = "$BASE_SHA"
+test "$(git rev-list --count "$BASE_SHA..$RELEASE_SHA")" -ge 1
+test -z "$(git rev-list --merges "$BASE_SHA..$RELEASE_SHA")"
+test "$(git diff --name-only "$BASE_SHA..$RELEASE_SHA")" = "$(printf '%s\n' \
+  docs/operations/VVAULT_WORKSPACE_RESTORE_RELEASE_RECEIPT.md \
+  scripts/deployment/systemd/vvault-workspace-monitor.service \
+  scripts/deployment/systemd/vvault-workspace-monitor.timer \
+  scripts/deployment/vvault-capacity-relocate.sh \
+  scripts/deployment/vvault-immutable-rollback.sh \
+  scripts/deployment/vvault-workspace-live-gate.sh \
+  tests/test_vvault_workspace_projection_bounded.py \
+  vvault/server/chatty_body_service.py \
+  vvault/server/construct_taxonomy.py \
+  vvault/server/projection_classification.py)"
 git push https://github.com/TitaniumShinobi/vvault.git \
   "$RELEASE_SHA:refs/heads/production"
 ```
