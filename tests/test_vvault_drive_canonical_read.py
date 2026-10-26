@@ -131,3 +131,60 @@ def test_empty_text_and_unavailable_capsule_are_not_false_success():
     assert not vvault_web_server._vault_preview_has_canonical_content(empty)
     assert unavailable["preview_status"] == "unavailable"
     assert not vvault_web_server._vault_preview_has_canonical_content(unavailable)
+
+
+def _http_file_row(*, owner="owner-a", content='{"displayName":"Zen"}'):
+    return {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "user_id": owner,
+        "filename": "instances/zen-001/identity/prompt.json",
+        "storage_path": "instances/zen-001/identity/prompt.json",
+        "construct_id": "zen-001",
+        "file_type": "text",
+        "content_type": "application/json",
+        "content": content,
+        "metadata": {},
+        "is_system": True,
+    }
+
+
+def _authenticated_client(monkeypatch, row, *, owner="owner-a"):
+    monkeypatch.setattr(
+        vvault_web_server, "get_current_user",
+        lambda: ({"id": owner, "user_id": owner, "email": "owner@example.test", "role": "user"}, "token"),
+    )
+    monkeypatch.setattr(vvault_web_server, "_get_authenticated_user_id", lambda: owner)
+    monkeypatch.setattr(vvault_web_server.VAULT_FILE_REPOSITORY, "get_by_id", lambda _file_id: row)
+    monkeypatch.setattr(vvault_web_server, "_lookup_materialized_capsule_backing_row", lambda *_args, **_kwargs: None)
+    vvault_web_server.app.config["TESTING"] = True
+    return vvault_web_server.app.test_client()
+
+
+def test_http_owner_gets_nonempty_canonical_body(monkeypatch):
+    client = _authenticated_client(monkeypatch, _http_file_row())
+    response = client.get("/api/vault/files/11111111-1111-4111-8111-111111111111")
+    body = response.get_json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["file"]["content"] == '{"displayName":"Zen"}'
+    assert body["file"]["preview_status"] == "inline"
+
+
+def test_http_other_owner_is_denied_before_preview(monkeypatch):
+    client = _authenticated_client(monkeypatch, _http_file_row(owner="owner-b"))
+    monkeypatch.setattr(
+        vvault_web_server, "_derive_vault_preview_payload",
+        lambda *_args, **_kwargs: pytest.fail("preview must not run before owner denial"),
+    )
+    response = client.get("/api/vault/files/11111111-1111-4111-8111-111111111111")
+    assert response.status_code == 403
+    assert response.get_json()["success"] is False
+
+
+def test_http_owner_empty_text_returns_422(monkeypatch):
+    client = _authenticated_client(monkeypatch, _http_file_row(content=""))
+    response = client.get("/api/vault/files/11111111-1111-4111-8111-111111111111")
+    body = response.get_json()
+    assert response.status_code == 422
+    assert body["success"] is False
+    assert body["error"] == "preview_unavailable"
