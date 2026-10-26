@@ -46,6 +46,8 @@ BODY_DATABASE_STATEMENT_TIMEOUT_MS = _bounded_int_env("VVAULT_BODY_DB_STATEMENT_
 BODY_DATABASE_ACQUIRE_TIMEOUT_SECONDS = _bounded_int_env("VVAULT_BODY_DB_ACQUIRE_TIMEOUT_SECONDS", 3, 1, 10)
 BODY_DATABASE_MAX_CONNECTIONS = _bounded_int_env("VVAULT_BODY_DB_MAX_CONNECTIONS", 10, 1, 32)
 _BODY_DATABASE_CONNECTION_GATE = threading.BoundedSemaphore(BODY_DATABASE_MAX_CONNECTIONS)
+_RELYING_PARTY_PARTITION_AVAILABLE: bool | None = None
+_RELYING_PARTY_PARTITION_LOCK = threading.Lock()
 
 
 class _BoundedConnection:
@@ -166,6 +168,28 @@ def _rows(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
 def _one(sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
     rows = _rows(sql, params)
     return rows[0] if rows else None
+
+
+def _vault_files_supports_relying_party_partition() -> bool:
+    """Cache whether the additive consumer partition is present in this body."""
+    global _RELYING_PARTY_PARTITION_AVAILABLE
+    if _RELYING_PARTY_PARTITION_AVAILABLE is not None:
+        return _RELYING_PARTY_PARTITION_AVAILABLE
+    with _RELYING_PARTY_PARTITION_LOCK:
+        if _RELYING_PARTY_PARTITION_AVAILABLE is None:
+            row = _one(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_attribute
+                    WHERE attrelid='ovvaults.vault_files'::regclass
+                      AND attname='relying_party_id'
+                      AND NOT attisdropped
+                ) AS available
+                """
+            )
+            _RELYING_PARTY_PARTITION_AVAILABLE = bool(row and row.get("available"))
+    return _RELYING_PARTY_PARTITION_AVAILABLE
 
 
 def normalize_callsign(value: str | None) -> str:
@@ -570,46 +594,46 @@ def list_constructs_for_vvault_workspace(user_id: str) -> BodyResult:
 
     constructs: list[dict[str, Any]] = []
     try:
-        for lane in ("chatty", "chatty-cli", "vvault"):
+        partitioned = _vault_files_supports_relying_party_partition()
+        # Before the additive consumer partition, every row is legacy Chatty
+        # data by contract.  Do not repeat the same owner-wide projection under
+        # three labels; that both invents provenance and multiplies query cost.
+        lanes = ("chatty", "chatty-cli", "vvault") if partitioned else ("chatty",)
+        for lane in lanes:
             set_relying_party_id(lane)
+            lane_predicate = "AND relying_party_id=%s" if partitioned else ""
+            row_params: tuple[Any, ...] = (
+                (owner_id, lane, owner_id, lane)
+                if partitioned
+                else (owner_id, owner_id)
+            )
             rows = _rows(
                 f"""
-                SELECT construct_id,
-                       filename,
-                       storage_path,
-                       metadata,
-                       CASE
-                           WHEN lower(coalesce(nullif(filename, ''), storage_path, '')) =
-                                'instances/' || lower(construct_id) || '/identity/prompt.json'
-                             OR lower(coalesce(nullif(filename, ''), storage_path, '')) =
-                                'instances/' || lower(construct_id) || '/config/metadata.json'
-                           THEN left(content, 4096)
-                           ELSE NULL
-                       END AS content,
-                       is_system,
-                       created_at,
-                       updated_at
+                WITH catalog AS MATERIALIZED (
+                    SELECT DISTINCT construct_id
+                    FROM vault_files
+                    WHERE user_id=%s
+                      {lane_predicate}
+                      AND construct_id IS NOT NULL
+                      AND btrim(construct_id) <> ''
+                ), identity_paths AS (
+                    SELECT 'instances/' || lower(construct_id) || '/identity/prompt.json' AS path
+                    FROM catalog
+                    UNION ALL
+                    SELECT 'instances/' || lower(construct_id) || '/config/metadata.json' AS path
+                    FROM catalog
+                )
+                SELECT construct_id, storage_path, filename, left(content, 4096) AS content,
+                       is_system, created_at, updated_at
                 FROM vault_files
                 WHERE user_id=%s
+                  {lane_predicate}
+                  AND storage_path = ANY(ARRAY(SELECT path FROM identity_paths))
                   AND drive_trashed_at IS NULL
-                  AND construct_id IS NOT NULL
-                  AND btrim(construct_id) <> ''
                   AND {PROJECTABLE_METADATA_SQL}
-                  AND lower(coalesce(nullif(filename, ''), storage_path, '')) IN (
-                      'instances/' || lower(construct_id) || '/config/metadata.json',
-                      'instances/' || lower(construct_id) || '/identity/prompt.json',
-                      'instances/' || lower(construct_id) || '/identity/avatar.png',
-                      'instances/' || lower(construct_id) || '/identity/avatar.jpg',
-                      'instances/' || lower(construct_id) || '/identity/avatar.jpeg',
-                      'instances/' || lower(construct_id) || '/identity/avatar.webp',
-                      'instances/' || lower(construct_id) || '/identity/avatar.gif',
-                      'instances/' || lower(construct_id) || '/identity/avatar.avif'
-                  )
-                ORDER BY construct_id,
-                         coalesce(updated_at, created_at) DESC,
-                         id DESC
+                ORDER BY construct_id, coalesce(updated_at, created_at) DESC, id DESC
                 """,
-                (owner_id,),
+                row_params,
             )
             seen: dict[str, dict[str, Any]] = {}
             for row in rows:
@@ -624,31 +648,23 @@ def list_constructs_for_vvault_workspace(user_id: str) -> BodyResult:
                     )
                 ):
                     continue
-                current = seen.setdefault(
-                    callsign,
-                    {"prompt_name": None, "metadata_name": None},
-                )
-                path = str(row.get("storage_path") or row.get("filename") or "").lower()
+                names = seen.setdefault(callsign, {"prompt": None, "metadata": None})
                 content = _jsonish(row.get("content"), {}) or {}
-                if not isinstance(content, dict):
-                    content = {}
-                if path.endswith("/identity/prompt.json") and not current["prompt_name"]:
-                    current["prompt_name"] = _first_text(
-                        [content.get("displayName"), content.get("display_name"), content.get("name")]
-                    )
-                elif path.endswith("/config/metadata.json") and not current["metadata_name"]:
-                    current["metadata_name"] = _first_text(
-                        [
-                            content.get("display_name"),
-                            content.get("displayName"),
-                            content.get("instance_name"),
-                            content.get("name"),
-                        ]
-                    )
+                content = content if isinstance(content, dict) else {}
+                path = str(row.get("storage_path") or row.get("filename") or "").lower()
+                if path.endswith("/identity/prompt.json") and names["prompt"] is None:
+                    names["prompt"] = _first_text([
+                        content.get("displayName"), content.get("display_name"), content.get("name"),
+                    ])
+                elif path.endswith("/config/metadata.json") and names["metadata"] is None:
+                    names["metadata"] = _first_text([
+                        content.get("display_name"), content.get("displayName"),
+                        content.get("instance_name"), content.get("name"),
+                    ])
             for callsign, names in seen.items():
                 authored_display_name = (
-                    names.get("prompt_name")
-                    or names.get("metadata_name")
+                    names.get("prompt")
+                    or names.get("metadata")
                     or display_name(callsign)
                 )
                 constructs.append({

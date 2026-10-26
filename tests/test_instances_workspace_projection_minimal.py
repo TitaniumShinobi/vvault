@@ -105,7 +105,7 @@ def test_workspace_projection_queries_are_owner_scoped():
     )[0]
 
     assert "WHERE user_id=%s" in helper
-    assert 'for lane in ("chatty", "chatty-cli", "vvault")' in helper
+    assert 'lanes = ("chatty", "chatty-cli", "vvault") if partitioned else ("chatty",)' in helper
     assert "set_relying_party_id(lane)" in helper
 
 
@@ -115,14 +115,13 @@ def test_workspace_projection_keeps_owner_and_lane_bound(monkeypatch):
     def fake_rows(sql, params):
         calls.append((current_relying_party_id(), params))
         return [{
-            "id": "row", "filename": "instances/zen-001/chatty/thread.md",
-            "storage_path": "instances/zen-001/chatty/thread.md",
-            "object_key": "instances/zen-001/chatty/thread.md",
             "construct_id": "zen-001",
-            "metadata": {},
-            "created_at": None,
+            "is_system": False,
+            "storage_path": "instances/zen-001/identity/prompt.json",
+            "content": None,
         }]
 
+    monkeypatch.setattr(chatty_body_service, "_vault_files_supports_relying_party_partition", lambda: True)
     monkeypatch.setattr(chatty_body_service, "_rows", fake_rows)
     set_relying_party_id("vvault")
     result = chatty_body_service.list_constructs_for_vvault_workspace("owner-a")
