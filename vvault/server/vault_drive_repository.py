@@ -14,6 +14,10 @@ try:
     import chatty_body_service
 except ImportError:
     from vvault.server import chatty_body_service
+try:
+    from .projection_classification import PROJECTABLE_METADATA_SQL
+except ImportError:
+    from projection_classification import PROJECTABLE_METADATA_SQL
 
 
 PROTECTED_ROOTS = {"identity", "config", "chatty", "assets", "documents", "memup"}
@@ -87,6 +91,7 @@ class VaultDriveRepository:
         parts = path.strip("/").split("/")
         semantic_root = parts[2].lower() if len(parts) > 2 else ""
         return {
+            "id": str(row.get("id")),
             "nodeId": str(row.get("id")),
             "fileId": str(row.get("id")),
             "nodeType": "file",
@@ -254,6 +259,117 @@ class VaultDriveRepository:
                 self._cache.pop(oldest, None)
             self._cache[key] = (time.monotonic(), payload)
         return json.loads(json.dumps(payload))
+
+    def projected_children(
+        self, *, owner_user_id: str, construct_id: str, logical_path: str
+    ) -> dict[str, Any]:
+        """Read legacy canonical paths without materializing Drive nodes."""
+        root = f"instances/{construct_id}"
+        path = str(logical_path or root).strip("/")
+        parts = path.split("/")
+        if path != root and (
+            not path.startswith(f"{root}/")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise LookupError("folder not found")
+        prefix = f"{path}/"
+        if path == root:
+            canonical_roots = sorted(PROTECTED_ROOTS | {"documents"})
+            children = [
+                {
+                    "nodeId": f"{root}/{name}",
+                    "nodeType": "folder",
+                    "name": name,
+                    "parentNodeId": root,
+                    "constructId": construct_id,
+                    "semanticKind": name,
+                    "protected": name in PROTECTED_ROOTS,
+                    "trashed": False,
+                    "logicalPath": f"{root}/{name}",
+                    "source": "canonical_path_projection",
+                }
+                for name in canonical_roots
+            ]
+            return {
+                "parentNode": {
+                    "nodeId": root, "nodeType": "folder", "name": construct_id,
+                    "constructId": construct_id, "logicalPath": root,
+                    "semanticKind": "instance_root", "protected": True,
+                    "trashed": False, "source": "canonical_path_projection",
+                },
+                "breadcrumbs": [], "children": children, "count": len(children),
+                "cacheState": "miss", "refreshing": False,
+            }
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT id::text AS id,filename,storage_path,construct_id,
+                           drive_parent_node_id,drive_trashed_at,size_bytes,sha256,
+                           content_type,file_type,created_at,updated_at
+                    FROM ovvaults.vault_files
+                    WHERE user_id=%s AND construct_id=%s
+                      AND drive_trashed_at IS NULL
+                      AND storage_path LIKE %s
+                      AND {PROJECTABLE_METADATA_SQL}
+                    ORDER BY storage_path,id
+                    """,
+                    (owner_user_id, construct_id, f"{prefix}%"),
+                )
+                rows = [_dict(row) for row in cur.fetchall()]
+
+        folders: dict[str, dict[str, Any]] = {}
+        files: list[dict[str, Any]] = []
+        for row in rows:
+            storage_path = str(row.get("storage_path") or row.get("filename") or "").strip("/")
+            if not storage_path.startswith(prefix):
+                continue
+            relative = storage_path[len(prefix):]
+            if not relative:
+                continue
+            name, separator, _remainder = relative.partition("/")
+            if separator:
+                child_path = f"{path}/{name}"
+                folders.setdefault(name.casefold(), {
+                    "nodeId": child_path,
+                    "nodeType": "folder",
+                    "name": name,
+                    "parentNodeId": path,
+                    "constructId": construct_id,
+                    "semanticKind": name.lower() if path == root else "folder",
+                    "protected": name.lower() in PROTECTED_ROOTS,
+                    "trashed": False,
+                    "logicalPath": child_path,
+                    "source": "canonical_path_projection",
+                })
+            else:
+                files.append(self._file_dto(row))
+
+        parent_name = construct_id if path == root else path.rsplit("/", 1)[-1]
+        breadcrumbs = []
+        cursor = root
+        for segment in path[len(root):].strip("/").split("/") if path != root else []:
+            cursor = f"{cursor}/{segment}"
+            breadcrumbs.append({"nodeId": cursor, "name": segment, "logicalPath": cursor})
+        children = [*sorted(folders.values(), key=lambda item: item["name"].casefold()), *files]
+        return {
+            "parentNode": {
+                "nodeId": path,
+                "nodeType": "folder",
+                "name": parent_name,
+                "constructId": construct_id,
+                "logicalPath": path,
+                "semanticKind": "instance_root" if path == root else "folder",
+                "protected": True,
+                "trashed": False,
+                "source": "canonical_path_projection",
+            },
+            "breadcrumbs": breadcrumbs,
+            "children": children,
+            "count": len(children),
+            "cacheState": "miss",
+            "refreshing": False,
+        }
 
     def workspace_root(
         self, *, owner_user_id: str, constructs: list[dict[str, Any]]

@@ -2213,6 +2213,20 @@ def _derive_vault_preview_payload(row: Optional[Dict[str, Any]], preview_budget_
     return file_row
 
 
+def _vault_preview_has_canonical_content(payload: Dict[str, Any]) -> bool:
+    filename = str(payload.get("filename") or payload.get("storage_path") or "")
+    ext = os.path.splitext(filename)[1].lower()
+    file_type = str(payload.get("file_type") or "").lower()
+    if not _is_text_preview_type(ext, file_type):
+        return True
+    content = payload.get("content")
+    return (
+        isinstance(content, str)
+        and bool(content)
+        and payload.get("preview_status") not in {"unavailable", "true_binary"}
+    )
+
+
 def _sort_vault_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(
         rows or [],
@@ -4658,6 +4672,55 @@ def _workspace_ref(owner_user_id: str, construct_id: str, source_scope: str) -> 
     })
 
 
+def _workspace_folder_ref(
+    owner_user_id: str, construct_id: str, source_scope: str, logical_path: str
+) -> str:
+    return _workspace_ref_serializer().dumps({
+        "owner": str(owner_user_id),
+        "construct": str(construct_id),
+        "scope": str(source_scope),
+        "path": str(logical_path),
+        "kind": "folder",
+    })
+
+
+def _workspace_folder_path(
+    folder_ref: str, owner_user_id: str, construct_id: str, source_scope: str
+) -> str:
+    try:
+        reference = _workspace_ref_serializer().loads(folder_ref)
+    except BadSignature as exc:
+        raise PermissionError("folder reference is invalid") from exc
+    if not isinstance(reference, dict) or any((
+        reference.get("kind") != "folder",
+        str(reference.get("owner") or "") != owner_user_id,
+        str(reference.get("construct") or "") != construct_id,
+        str(reference.get("scope") or "") != source_scope,
+    )):
+        raise PermissionError("folder reference does not belong to this workspace")
+    root = f"instances/{construct_id}"
+    path = str(reference.get("path") or "").strip("/")
+    if path != root and not path.startswith(f"{root}/"):
+        raise PermissionError("folder reference is invalid")
+    return path
+
+
+def _sign_projected_drive_folders(
+    result: dict, owner_user_id: str, construct_id: str, source_scope: str
+) -> dict:
+    payload = json.loads(json.dumps(result))
+    for item in [payload.get("parentNode"), *(payload.get("breadcrumbs") or []), *(payload.get("children") or [])]:
+        if not isinstance(item, dict) or item.get("nodeType") == "file":
+            continue
+        logical_path = str(item.get("logicalPath") or item.get("nodeId") or "")
+        if item.get("source") == "canonical_path_projection" or logical_path.startswith(f"instances/{construct_id}/"):
+            item["nodeId"] = _workspace_folder_ref(
+                owner_user_id, construct_id, source_scope, logical_path
+            )
+            item.pop("logicalPath", None)
+    return payload
+
+
 def _workspace_construct_for_authenticated_owner():
     """Resolve the owner-bound, server-signed workspace item for one read."""
     owner_user_id = _get_authenticated_user_id()
@@ -4847,11 +4910,38 @@ def get_vault_drive_children():
         owner_user_id, construct_id, source_scope = _workspace_construct_for_authenticated_owner()
         parent_node_id = (request.args.get("parentNodeId") or "root").strip()
         with _native_vault_drive_read_scope(source_scope):
-            result = VAULT_DRIVE_REPOSITORY.children(
-                owner_user_id=owner_user_id,
-                construct_id=construct_id,
-                parent_node_id=parent_node_id,
-            )
+            if parent_node_id == "root":
+                try:
+                    result = VAULT_DRIVE_REPOSITORY.children(
+                        owner_user_id=owner_user_id,
+                        construct_id=construct_id,
+                        parent_node_id=parent_node_id,
+                    )
+                    if not result.get("children"):
+                        result = VAULT_DRIVE_REPOSITORY.projected_children(
+                            owner_user_id=owner_user_id,
+                            construct_id=construct_id,
+                            logical_path=f"instances/{construct_id}",
+                        )
+                except LookupError:
+                    result = VAULT_DRIVE_REPOSITORY.projected_children(
+                        owner_user_id=owner_user_id,
+                        construct_id=construct_id,
+                        logical_path=f"instances/{construct_id}",
+                    )
+            else:
+                projected_path = _workspace_folder_path(
+                    parent_node_id, owner_user_id, construct_id, source_scope
+                )
+                result = VAULT_DRIVE_REPOSITORY.projected_children(
+                    owner_user_id=owner_user_id,
+                    construct_id=construct_id,
+                    logical_path=projected_path,
+                )
+            if result.get("parentNode", {}).get("source") == "canonical_path_projection":
+                result = _sign_projected_drive_folders(
+                    result, owner_user_id, construct_id, source_scope
+                )
         return jsonify({"success": True, "canonical": True, "constructId": construct_id, **result})
     except Exception as exc:
         return _vault_drive_error_response(exc)
@@ -5861,6 +5951,10 @@ def get_vault_file(file_id):
             )
         else:
             file_payload = _derive_vault_preview_payload(row)
+        if not _vault_preview_has_canonical_content(file_payload):
+            return _preview_unavailable_response(
+                row, "Canonical file content is unavailable", status_code=422
+            )
         logger.info(
             "VAULT_FILE_DETAIL: id=%s path=%s route_elapsed_ms=%s preview_elapsed_ms=%s preview_status=%s preview_source=%s preview_timed_out=%s",
             file_id,
